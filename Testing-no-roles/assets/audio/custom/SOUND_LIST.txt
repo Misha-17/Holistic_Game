@@ -1,0 +1,28 @@
+BEACON BAY - DROP-IN SOUNDS
+===========================
+Put a file with one of these names in this folder or in assets/audio/ (.ogg preferred, .wav or .mp3 also work).
+The game uses it instead of the built-in sound. Missing files fall back to the old sounds.
+Open the project in Godot once after adding files so it imports them.
+
+MUSIC (looping, all three in a similar style; the game crossfades between them as pressure rises)
+  music_calm      quiet but uneasy, low pulse, 90-110 BPM, 1-3 min loop
+  music_tense     same mood, busier: driving percussion, ticking hi-hats, 110-130 BPM
+  music_panic     full pressure: heavy drums, alarms/stabs, 130-150 BPM
+
+SOUND EFFECTS (short, punchy, no long tails; under 1 s unless noted)
+  new_call   a new emergency appears           - radio dispatch beep / pager tone, 0.5-1 s
+  urgent     a call has under ~15 s left       - short alarm or klaxon burst
+  tick       while a call needs crews and has <10 s - a single tick (played every second) or a ticking-clock loop (looped)
+  surge      a busy wave is about to start      - siren swell or rising alarm, 1-2 s
+  fail       a call failed                      - harsh buzzer / low hit
+  rescue     a call was completed               - short positive chime / radio "all clear"
+  select     you pick a crew                    - radio click / squelch
+  dispatch   you send a crew                    - siren whoop or engine rev, 0.5-1 s
+  arrival    a crew reaches the scene           - door slam / brakes / radio blip
+  boost      coffee boost used                  - energetic whoosh or coffee-machine hiss
+  click      UI buttons                         - small, neutral click
+  win        shift won                          - short victory sting, 2-4 s
+  lose       shift lost                         - short defeat sting, 2-4 s
+  (optional) combo, upgrade, shift, work, alarm - the remaining built-in sounds
+
+Licence: only use sounds you are allowed to ship (CC0 or royalty-free), and note the source in ASSET_CREDITS.md.

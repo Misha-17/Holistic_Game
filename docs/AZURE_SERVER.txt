@@ -1,0 +1,151 @@
+BEACON BAY - CORE AZURE DEDICATED SERVER
+Updated: 2026-10-07. Applies to the current department-based codebase.
+
+DEPLOYMENT FILES
+Copy BOTH files from build/server/ to the same directory on the Azure VM:
+  BeaconBay.x86_64
+  BeaconBay.pck
+These are the exported Godot 4.7.2 Linux x86_64 release files.
+No editor, source tree, desktop environment or audio setup is needed to launch
+this build in headless mode. Azure deployment itself has not been performed.
+
+AZURE LAUNCH (from the directory containing both files)
+  chmod +x BeaconBay.x86_64
+  ./BeaconBay.x86_64 --headless --server
+
+In a second terminal, check the listening socket:
+  ss -lunp | grep ':24680'
+
+Allow inbound UDP 24680 in the Azure network security group and VM firewall.
+The owner previously reported Azure UDP access configured; this was not verified
+remotely. No Azure address or credentials were supplied. No VM changes were made.
+
+CLIENTS
+Use normal desktop clients built from this same updated source version.
+Open the existing cooperative lobby, enter the Azure VM public IP, and Join.
+A bare IP or IP:24680 is supported by the current client.
+Do not select Host when connecting to Azure.
+For source clients, the existing --join=ADDRESS playtest argument also works.
+
+One to four human players are supported. Server peer 1 occupies no human seat.
+First-free seats are assigned in connection order. With four connected humans:
+  Player 1: Fire
+  Player 2: Medical
+  Player 3: Engineering
+  Player 4: Police
+This is the CURRENT department-based game, not the old Dispatcher/RM/FC/SM game.
+The existing department splits redistribute departments when someone leaves.
+
+SESSION BEHAVIOR
+There is no automatic start at any player count. The first connected player
+clicks START SHIFT TOGETHER in the existing lobby to begin Shift 1 with 1-4
+players. If that player leaves before starting, the earliest remaining player
+can start. This uses roster arrival order, not departments or seat numbers.
+After start, disconnect/reconnect does not reset the simulation.
+After Shift 1 ends, the server stays on results. Restart the process for the
+next session. No automatic next shift, remote admin or extra lobby was added.
+Normal desktop Host still occupies seat 0 and accepts three remote clients.
+
+CORE IMPLEMENTATION
+scripts/network_session.gd:
+- host(server_only=false) retains desktop default; true opens four remote slots,
+  empty human roster, local role -1, same UDP 24680 ENet authority.
+- Existing compressed snapshots, events and command validation retained.
+- Dedicated mode skips UPnP and disables unused client-to-client relay.
+- Dedicated disconnect roster updates and announcements are deferred until
+  ENet finishes disconnect polling. Desktop roster behavior is retained.
+- Roster RPC carries a dedicated flag and validates server-only membership.
+- Broadcasts use actual remote peer count, so one remote player gets updates.
+- close() restores normal relay behavior for later desktop sessions.
+
+scripts/main.gd:
+- Detects --server in engine or user arguments before presentation setup.
+- Reuses common NetworkSession creation and existing command/simulation paths.
+- Dedicated startup creates no map, HUD, tutorial or audio nodes; ResearchLogger
+  remains disabled. No local profile loading or campaign saving.
+- Manual start_shift uses the existing command RPC; the server validates the
+  earliest connected player, lobby state and one-time start before _begin_shift(0).
+- Existing simulation tick and 0.12-second broadcast threshold retained.
+- Dedicated results do not grant local campaign rewards or start another shift.
+- Console startup, assignment, departure, shift-start/end and bind-failure text.
+- Guest lobby reuses the existing Start button for the session starter.
+
+export_presets.cfg:
+- Added Linux Server, x86_64, separate PCK, build/server/BeaconBay.x86_64.
+- Existing Windows Desktop export preset unchanged.
+- Normal export assets retained; --headless --server activates runtime mode.
+
+No parent _exit_tree() network.close() call was added: child nodes have already
+left the SceneTree by then. Normal engine peer disposal handles process shutdown.
+
+REBUILD (PowerShell, from repository root)
+Install official Godot 4.7.2 export templates matching the editor.
+The Linux debug/release templates were installed locally after verifying the
+full downloaded archive against the official SHA512-SUMS.txt.
+
+  New-Item -ItemType Directory -Force build/server
+  & 'C:/Users/Admin/Downloads/Godot_v4.7.2-stable_win64.exe/Godot_v4.7.2-stable_win64_console.exe' --headless --path . --export-release 'Linux Server' build/server/BeaconBay.x86_64
+
+Source-mode Windows dedicated launch:
+  & 'C:/Users/Admin/Downloads/Godot_v4.7.2-stable_win64.exe/Godot_v4.7.2-stable_win64_console.exe' --headless --path . --server
+
+VERIFICATION BEFORE MANUAL-START CHANGE (historical)
+PASS: server-only roster, department assignments and normal desktop Host.
+PASS: headless startup/quit.
+PASS: separate server + four normal client scenes on Windows:
+      wait at 1/2/3; disconnect before start; reconnect; four-player auto-start;
+      advancing snapshots; disconnect after start; reconnect without restart;
+      all clients disconnecting together without max-channels errors.
+PASS: advanced the authoritative simulation to Shift 1 completion in the test;
+      results stayed active with four players. This was accelerated, not a
+      full-duration four-person acceptance playthrough.
+PASS: graphical Windows Host startup/window-close regression.
+PASS: Linux release export completed.
+PASS: exported binary launched on WSL Ubuntu 22.04 x86_64 with
+      --headless --server; remained alive and ss confirmed UDP 24680 binding.
+      Test-owned Linux process stopped afterward.
+PASS: git diff --check.
+
+Local harnesses/logs are in ignored .tools/ and .godot/ directories:
+  .tools/core_server_roster.gd
+  .tools/dedicated_gate.gd and run_dedicated_gate.ps1
+  .tools/server_shutdown.gd
+  .tools/linux_smoke.sh
+  .godot/core-server-roster.log
+  .godot/dedicated-gate-0.log through dedicated-gate-4.log
+  .godot/core-desktop-host.log
+  .godot/core-linux-export.log
+These are local evidence, not committed test infrastructure.
+
+LIMITATIONS / OWNER ACCEPTANCE
+- Azure Ubuntu 24.04 itself and public-network client connections untested.
+- Linux smoke test covered launch/socket, not four-client Linux gameplay.
+- Test suite did not perform a complete role-command multiplayer playthrough.
+- Compressed snapshot sometimes exceeds ENet's MTU (1583 vs 1392 bytes in the
+  local debug run); WAN packet-loss/performance remains to be checked. The
+  working lag fixes were preserved; no networking redesign was attempted.
+- Seats are first-free; no identity-based seat reservation/authentication added.
+- Restart between sessions. No deployment daemon/admin/automatic progression.
+- Release stdout may buffer when redirected; the Linux smoke test verified the
+  socket and process directly rather than relying on redirected startup text.
+
+Suggested commit message (no commit was made):
+  feat(network): add core Linux dedicated server mode
+
+READY FOR OWNER TEST. No automatic Azure deployment or Git commit performed.
+
+MANUAL-START UPDATE - 2026-10-07
+Removed the four-player gate and automatic startup; no role or lobby redesign.
+Changed scripts/main.gd and scripts/network_session.gd. Updated this guide and
+rebuilt the same Linux package. No commit.
+Focused checks passed:
+- Dedicated launch with no server seat.
+- No automatic start at each player count 1, 2, 3, 4.
+- First connected player manually starts Shift 1 while alone.
+- Second, third and fourth clients join the running shift and receive snapshots.
+- Graphical desktop Host uses its existing Start action successfully.
+Harnesses: .tools/manual_start.gd, .tools/run_manual_start.ps1,
+.tools/manual_start_desktop.gd; logs .godot/manual-start-*.log.
+Use updated clients and server together. Earlier server builds still auto-start.
+The Linux export was rebuilt; no additional Linux/Azure playthrough was performed
+for this small startup-rule change.

@@ -82,6 +82,8 @@ var _tick_left := 0.0
 # Networking smoothness (guests only): dispatches shown before the host confirms them.
 var predicted_dispatches: Array[Dictionary] = []
 var host_speed := 1.0
+var dedicated_server := false
+var _dedicated_shift_started := false
 var show_perf := false
 var _snapshot_gap_ms := 0.0
 var _last_snapshot_ms := -1
@@ -116,6 +118,10 @@ class MapOverlay extends Node2D:
 		game._draw_map_overlay(self)
 
 func _ready() -> void:
+	dedicated_server = "--server" in OS.get_cmdline_args() or "--server" in OS.get_cmdline_user_args()
+	if dedicated_server:
+		_start_dedicated_server()
+		return
 	get_tree().auto_accept_quit = false
 	position = Vector2(UI_OFFSET_X, 0)
 	font = ThemeDB.fallback_font
@@ -165,14 +171,7 @@ func _ready() -> void:
 	add_child(audio)
 	research = ResearchLogger.new()
 	add_child(research)
-	network = NetworkSession.new()
-	add_child(network)
-	network.command_received.connect(_execute_command)
-	if network.has_signal("event_received"):
-		network.connect("event_received",Callable(self,"_on_remote_event"))
-	network.snapshot_received.connect(_receive_snapshot)
-	network.message_received.connect(func(message: String): _toast(message))
-	network.disconnected.connect(_network_ended)
+	_initialize_network()
 	research.log_error.connect(func(message: String): research_enabled=false; _toast(message))
 	ip_input = LineEdit.new()
 	ip_input.position = Vector2(452, 379)
@@ -231,6 +230,28 @@ func _apply_playtest_args() -> void:
 				network.join(ip_input.text)
 				_toast(network.status))
 
+func _initialize_network() -> void:
+	network = NetworkSession.new()
+	add_child(network)
+	network.command_received.connect(_execute_command)
+	network.event_received.connect(_on_remote_event)
+	network.snapshot_received.connect(_receive_snapshot)
+	network.message_received.connect(_toast)
+	network.disconnected.connect(_network_ended)
+
+func _start_dedicated_server() -> void:
+	sim = RescueSimulation.new()
+	research = ResearchLogger.new()
+	add_child(research)
+	_initialize_network()
+	var err := network.host(true)
+	if err != OK:
+		printerr("Dedicated ENet startup failed: ", error_string(err))
+		get_tree().quit(1)
+		return
+	screen = "lobby"
+	print("Beacon Bay dedicated server: UDP ", NetworkSession.PORT, "; waiting for a player to start (1-4 players).")
+
 func _process(delta: float) -> void:
 	elapsed_ui += delta
 	toast_left = maxf(0, toast_left - delta)
@@ -258,6 +279,7 @@ func _process(delta: float) -> void:
 		if net_timer > 0.12:
 			net_timer = 0
 			network.broadcast({"simulation": sim.net_snapshot(), "screen": "pause" if screen=="settings" else screen, "orders": orders, "speed": (0.8 if comfortable else 1.0)})
+	if dedicated_server: return
 	if screen == "game":
 		pressure_display = lerpf(pressure_display, _pressure(), 1.0-exp(-delta*3.0))
 		audio.set_intensity(pressure_display)
@@ -344,6 +366,7 @@ func _notification(what: int) -> void:
 		get_tree().quit()
 
 func _update_visibility() -> void:
+	if dedicated_server: return
 	map_clip.visible = screen == "game"
 	town.process_mode = Node.PROCESS_MODE_ALWAYS if screen == "game" else Node.PROCESS_MODE_DISABLED
 	field_focus.visible = screen=="game" and focus_open and (selected>=0 or focus_hold_left>0)
@@ -746,7 +769,10 @@ func _draw_lobby() -> void:
 			_text(_short(network.internet_status,78),Vector2(452,652),13,TEAL if network.internet_address!="" else MUTED)
 			_text("Port %d (UDP). Allow Beacon Bay through the firewall when Windows asks." % NetworkSession.PORT,Vector2(452,676),12,MUTED)
 		else:
-			_text("Waiting for the host to begin…",Vector2(452,600),19,GOLD)
+			if network.can_start_session():
+				_button("host_start","START SHIFT TOGETHER",Rect2(452,540,536,54),TEAL,INK)
+			else:
+				_text("Waiting for the first player to start…" if network.dedicated else "Waiting for the host to begin…",Vector2(452,600),19,GOLD)
 	_button("leave_lobby","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
 	_wrap("Departments split automatically: 1 player commands all four, 2 players take two each, 3 players: the host also takes police, 4 players: one each. Anyone can scout, use supplies, use the coffee boost and ping.",Vector2(400,741),640,16,MUTED,25)
 
@@ -907,6 +933,7 @@ func _star(center: Vector2, radius: float, color: Color) -> void:
 	cv.draw_colored_polygon(points,color)
 
 func _input(event: InputEvent) -> void:
+	if dedicated_server: return
 	if tutorial_overlay.visible and tutorial_overlay.handle_input(event):
 		if event is InputEventMouseMotion:
 			town.hover_id=-1
@@ -1067,7 +1094,11 @@ func _action(id: String) -> void:
 			network.join(ip_input.text)
 			ip_input.release_focus()
 			_toast(network.status)
-		"host_start": _begin_shift(unlocked)
+		"host_start":
+			if network.dedicated:
+				network.send_command("start_shift")
+			else:
+				_begin_shift(unlocked)
 		"leave_lobby":
 			if screen=="results": _submit_rating()
 			_leave_network()
@@ -1101,6 +1132,7 @@ func _action(id: String) -> void:
 		"locked": _toast("Finish the previous shift to unlock this part of the story.")
 
 func _begin_tutorial(auto_start: bool = false) -> void:
+	if dedicated_server: return
 	if tutorial_active: return
 	if network.active:
 		_toast("Meet the crew from the solo title screen, outside your shared room.")
@@ -1246,6 +1278,12 @@ func _draw_tutorial_highlight(canvas: Node2D) -> void:
 func _begin_shift(index: int) -> void:
 	_route_cache_until = 0
 	sim.start_shift(clampi(index,0,5))
+	if dedicated_server:
+		orders.clear()
+		result_saved = false
+		screen = "game"
+		print("Dedicated server: Shift 1 started.")
+		return
 	town.set_theme(index)
 	selected=-1
 	selected_unit=-1
@@ -1272,6 +1310,9 @@ func _finish_shift() -> void:
 	if result_saved: return
 	result_saved=true
 	screen="results"
+	if dedicated_server:
+		print("Dedicated server: Shift 1 ended. Restart the process for another session.")
+		return
 	if sim.won:
 		unlocked=maxi(unlocked,mini(5,sim.shift_index+1))
 		best_scores[str(sim.shift_index)]=maxi(int(best_scores.get(str(sim.shift_index),0)),sim.score)
@@ -1328,6 +1369,11 @@ func _command(action: String, payload: Dictionary) -> void:
 			focused_unit_left = 0
 
 func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
+	if action == "start_shift":
+		if dedicated_server and screen == "lobby" and not _dedicated_shift_started and network.can_start_session(_peer_id) and multiplayer.get_peers().has(_peer_id):
+			_dedicated_shift_started = true
+			_begin_shift(0)
+		return
 	_route_cache_until = 0
 	if screen!="game": return
 	if tutorial_active and not tutorial.can_action(action,payload):
@@ -1374,6 +1420,7 @@ func _on_remote_event(event: Dictionary) -> void:
 	_handle_game_event(event)
 
 func _handle_game_event(event: Dictionary) -> void:
+	if dedicated_server: return
 	var type:=str(event.get("type",""))
 	var message:=str(event.get("text",""))
 	if message!="" and type!="action_denied":
@@ -1493,6 +1540,7 @@ func _submit_rating() -> void:
 		result_rating_sent=true
 
 func _save_progress(include_session: bool = false) -> void:
+	if dedicated_server: return
 	if tutorial_active or test_mode or (network.active and not network.hosting): return
 	var data:={"version":2,"tutorial_completed":tutorial_completed,"tutorial_seen":tutorial_seen,"unlocked":unlocked,"best_scores":best_scores,"total_rescued":total_rescued,"credits":sim.credits,"upgrades":sim.upgrades,"settings":{"music":music_enabled,"sfx":sfx_enabled,"reduced_motion":reduced_motion,"comfort":comfortable,"research":research_enabled}}
 	if include_session and sim.running and not sim.finished: data["session"]=sim.snapshot()
@@ -1505,6 +1553,7 @@ func _save_progress(include_session: bool = false) -> void:
 		has_resume=data.has("session")
 
 func _load_save() -> void:
+	if dedicated_server: return
 	if not FileAccess.file_exists(SAVE_PATH): return
 	var data=JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))
 	if not data is Dictionary: return
@@ -1581,6 +1630,9 @@ func _boost_text() -> String:
 	return "COFFEE BOOST" if sim.special_cooldown<=0 else "COFFEE BOOST %ds"%ceili(sim.special_cooldown)
 
 func _toast(message: String) -> void:
+	if dedicated_server:
+		print(message)
+		return
 	toast_text=message
 	toast_left=5.0
 

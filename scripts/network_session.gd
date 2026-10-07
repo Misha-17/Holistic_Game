@@ -19,9 +19,10 @@ const SPLITS := {
 	3: [["fire", "police"], ["medic"], ["engineer"]],
 	4: [["fire"], ["medic"], ["engineer"], ["police"]],
 }
-const ACTIONS := ["dispatch", "scout", "supply", "special", "ping"]
+const ACTIONS := ["dispatch", "scout", "supply", "special", "ping", "start_shift"]
 var active := false
 var hosting := false
+var dedicated := false
 # Seat number in the room (0 = host). Kept under the old name so research logs stay comparable.
 var role := 0
 var roster: Dictionary = {}
@@ -48,21 +49,23 @@ func _ready() -> void:
 	multiplayer.connection_failed.connect(_failed)
 	multiplayer.server_disconnected.connect(_failed)
 
-func host() -> Error:
+func host(server_only: bool = false) -> Error:
 	close()
+	dedicated = server_only
 	var peer := ENetMultiplayerPeer.new()
-	var err := peer.create_server(PORT, 3)
+	var err := peer.create_server(PORT, 4 if dedicated else 3)
 	if err != OK:
 		status = "Could not open port %d (is another copy of the game already hosting?)" % PORT
 		return err
 	# Snapshots are large; compression keeps them under one network packet.
 	peer.host.compress(ENetConnection.COMPRESS_RANGE_CODER)
+	multiplayer.server_relay = not dedicated
 	multiplayer.multiplayer_peer = peer
-	_start_upnp()
+	if not dedicated: _start_upnp()
 	active = true
 	hosting = true
-	role = 0
-	roster = {1: 0}
+	role = -1 if dedicated else 0
+	roster = {} if dedicated else {1: 0}
 	status = "Room open · port %d" % PORT
 	roster_changed.emit()
 	return OK
@@ -116,6 +119,8 @@ func close() -> void:
 	if multiplayer.has_multiplayer_peer():
 		multiplayer.multiplayer_peer.close()
 	multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
+	multiplayer.server_relay = true
+	dedicated = false
 	active = false
 	hosting = false
 	roster.clear()
@@ -136,7 +141,7 @@ func send_command(action: String, payload: Dictionary = {}) -> void:
 func broadcast(data: Dictionary) -> void:
 	if active and hosting:
 		_last_snapshot = data.duplicate(true)
-		if roster.size() > 1:
+		if multiplayer.get_peers().size() > 0:
 			# The game state is ~10x smaller compressed, so it fits in a few network packets.
 			var raw := var_to_bytes(data)
 			_state.rpc(raw.compress(FileAccess.COMPRESSION_ZSTD), raw.size())
@@ -153,10 +158,11 @@ static func _unpack(packed: PackedByteArray, size: int) -> Dictionary:
 func broadcast_event(data: Dictionary) -> void:
 	
 	
-	if active and hosting and roster.size() > 1:
+	if active and hosting and multiplayer.get_peers().size() > 0:
 		_event.rpc(data)
 
 func can_do(action: String, peer_id: int = -1, payload: Dictionary = {}) -> bool:
+	if action == "start_shift": return can_start_session(peer_id)
 	if not ACTIONS.has(action):
 		return false
 	if not active:
@@ -168,6 +174,12 @@ func can_do(action: String, peer_id: int = -1, payload: Dictionary = {}) -> bool
 		return owns(str(payload.get("kind", "")), actor)
 	# Scouting, supplies, the team boost and pings are shared by everyone.
 	return true
+
+func can_start_session(peer_id: int = -1) -> bool:
+	if not active or not dedicated or roster.is_empty(): return false
+	var actor := multiplayer.get_unique_id() if peer_id < 0 else peer_id
+	# Dictionary insertion order keeps this independent of department/seat assignment.
+	return actor == int(roster.keys()[0])
 
 func departments_for(peer_id: int = -1) -> Array:
 	if not active:
@@ -221,10 +233,18 @@ func _peer_disconnected(id: int) -> void:
 	roster.erase(id)
 	_command_windows.erase(id)
 	if hosting:
-		_roster.rpc(roster)
+		if dedicated: _broadcast_roster.call_deferred()
+		else: _roster.rpc(roster, dedicated)
 	roster_changed.emit()
 	if hosting:
-		announce("%s left. Departments reshuffled. %s" % [label, assignment_summary()])
+		var text := "%s left. Departments reshuffled. %s" % [label, assignment_summary()]
+		if dedicated: announce.call_deferred(text)
+		else: announce(text)
+
+func _broadcast_roster() -> void:
+	# Wait until ENet finishes removing disconnected peers before sending.
+	if active and hosting and multiplayer.get_peers().size() > 0:
+		_roster.rpc(roster, dedicated)
 
 func _connected() -> void:
 	_connect_started_ms = -1
@@ -245,17 +265,17 @@ func _hello() -> void:
 		return
 	
 	if roster.has(sender):
-		_roster.rpc_id(sender, roster)
+		_roster.rpc_id(sender, roster, dedicated)
 		return
 	var assigned := -1
-	for i in range(1, 4):
+	for i in range(0 if dedicated else 1, 4):
 		if not roster.values().has(i):
 			assigned = i
 			break
 	if assigned < 0:
 		return
 	roster[sender] = assigned
-	_roster.rpc(roster)
+	_roster.rpc(roster, dedicated)
 	if not _last_snapshot.is_empty():
 		var raw := var_to_bytes(_last_snapshot)
 		_initial_state.rpc_id(sender, raw.compress(FileAccess.COMPRESSION_ZSTD), raw.size())
@@ -263,9 +283,10 @@ func _hello() -> void:
 	announce("%s joined. %s" % [player_label(sender), assignment_summary()])
 
 @rpc("authority", "call_remote", "reliable")
-func _roster(data: Dictionary) -> void:
-	if hosting or multiplayer.get_remote_sender_id() != 1 or not _valid_roster(data):
+func _roster(data: Dictionary, server_only: bool = false) -> void:
+	if hosting or multiplayer.get_remote_sender_id() != 1 or not _valid_roster(data, server_only):
 		return
+	dedicated = server_only
 	roster = data.duplicate()
 	role = int(roster.get(multiplayer.get_unique_id(), 0))
 	roster_changed.emit()
@@ -303,7 +324,7 @@ func _event(data: Dictionary) -> void:
 
 func announce(text: String) -> void:
 	message_received.emit(text)
-	if active and hosting:
+	if active and hosting and multiplayer.get_peers().size() > 0:
 		_message.rpc(text)
 
 @rpc("authority", "call_remote", "reliable")
@@ -311,9 +332,11 @@ func _message(text: String) -> void:
 	if active and not hosting and multiplayer.get_remote_sender_id() == 1:
 		message_received.emit(text.left(240))
 
-func _valid_roster(data: Dictionary) -> bool:
-	if data.size() < 1 or data.size() > 4 or data.get(1, -1) != 0:
+func _valid_roster(data: Dictionary, server_only: bool = false) -> bool:
+	if data.size() > 4:
 		return false
+	if server_only and data.has(1): return false
+	if not server_only and (data.is_empty() or data.get(1, -1) != 0): return false
 	var assigned: Array[int] = []
 	for peer_id in data:
 		if not peer_id is int or peer_id <= 0 or not data[peer_id] is int:
@@ -325,6 +348,7 @@ func _valid_roster(data: Dictionary) -> bool:
 	return true
 
 func _valid_payload(action: String, payload: Dictionary) -> bool:
+	if action == "start_shift": return payload.is_empty()
 	if payload.size() > 6:
 		return false
 	

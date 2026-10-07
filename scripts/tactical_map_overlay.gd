@@ -19,6 +19,7 @@ const ROLE_COLOR := {"fire": Color("f2a27f"), "medic": Color("9be0c4"), "enginee
 const ROLE_SHORT := {"fire": "FIRE", "medic": "MED", "engineer": "ENG", "police": "POL"}
 
 var sim = null
+var options_provider: Callable
 var selected_id: int = -1
 var selected_unit_id: int = -1
 var tutorial_active: bool = false
@@ -285,7 +286,7 @@ func _refresh_layout() -> void:
 	var target: int = hovered_incident_id if selected_unit_id >= 0 and hovered_incident_id >= 0 else selected_id
 	_preview_target = target
 	if target >= 0 and sim.has_method("dispatch_options"):
-		_options = sim.dispatch_options(target)
+		_options = options_provider.call(target) if options_provider.is_valid() else sim.dispatch_options(target)
 		for option in _options:
 			if int(option.get("unit_id", -1)) == selected_unit_id:
 				_selected_option = option

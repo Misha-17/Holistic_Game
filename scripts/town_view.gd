@@ -96,7 +96,9 @@ func _unit_position(unit: Dictionary) -> Vector2:
 	return position * MAP_SIZE
 
 func set_theme(index: int) -> void:
-	shift_theme = clampi(index, 0, 5)
+	var next_theme := clampi(index, 0, 5)
+	if shift_theme == next_theme: return
+	shift_theme = next_theme
 	theme_index = [0, 2, 3, 1, 3, 2][shift_theme]
 	if is_instance_valid(_backdrop):
 		_backdrop.queue_redraw()

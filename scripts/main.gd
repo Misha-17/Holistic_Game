@@ -43,6 +43,10 @@ var buttons: Array[Dictionary] = []
 var elapsed_ui := 0.0
 var refresh := 0.0
 var net_timer := 0.0
+var _route_cache: Array = []
+var _route_cache_target := -1
+var _route_cache_until := 0
+var _route_cache_sim: RefCounted
 var save_timer := 0.0
 var unlocked := 0
 var best_scores: Dictionary = {}
@@ -131,6 +135,7 @@ func _ready() -> void:
 	town.incident_clicked.connect(_select_incident)
 	tactical_map = preload("res://scripts/tactical_map_overlay.gd").new()
 	tactical_map.sim = sim
+	tactical_map.options_provider = _cached_dispatch_options
 	tactical_map.z_index = 2
 	tactical_map.map_rect = Rect2(MAP_ORIGIN, MAP_PIXELS)
 	tactical_map.view_rect = Rect2(MAP_ORIGIN, Vector2(MAP_PIXELS.x, VIEW.size.y))
@@ -557,9 +562,18 @@ func _pick_department(kind: String) -> void:
 		return
 	_select_unit(best)
 
+func _cached_dispatch_options(target: int) -> Array:
+	var now := Time.get_ticks_msec()
+	if sim != _route_cache_sim or target != _route_cache_target or now >= _route_cache_until:
+		_route_cache = sim.dispatch_options(target)
+		_route_cache_sim = sim
+		_route_cache_target = target
+		_route_cache_until = now + 100
+	return _route_cache
+
 func _selected_plan() -> Dictionary:
 	if selected<0 or selected_unit<0: return {}
-	for option: Dictionary in sim.dispatch_options(selected):
+	for option: Dictionary in _cached_dispatch_options(selected):
 		if int(option.unit_id)==selected_unit: return option
 	return {}
 
@@ -1230,6 +1244,7 @@ func _draw_tutorial_highlight(canvas: Node2D) -> void:
 				canvas.draw_rect((button.rect as Rect2).grow(4),accent,false,3)
 
 func _begin_shift(index: int) -> void:
+	_route_cache_until = 0
 	sim.start_shift(clampi(index,0,5))
 	town.set_theme(index)
 	selected=-1
@@ -1294,6 +1309,7 @@ func _cycle_incident() -> void:
 	_select_incident(int(calls[idx].id))
 
 func _command(action: String, payload: Dictionary) -> void:
+	_route_cache_until = 0
 	if screen != "game": return
 	if not network.can_do(action,-1,payload):
 		var owner: int = network.owner_of(str(payload.get("kind","")))
@@ -1312,6 +1328,7 @@ func _command(action: String, payload: Dictionary) -> void:
 			focused_unit_left = 0
 
 func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
+	_route_cache_until = 0
 	if screen!="game": return
 	if tutorial_active and not tutorial.can_action(action,payload):
 		_toast(str(tutorial.current().objective))
@@ -1408,6 +1425,7 @@ func _handle_game_event(event: Dictionary) -> void:
 	elif type=="action_denied" and local_actor: _toast(message)
 
 func _receive_snapshot(data: Dictionary) -> void:
+	_route_cache_until = 0
 	if network.hosting: return
 	var next_screen:=str(data.get("screen","game"))
 	if screen=="results" and next_screen=="game":

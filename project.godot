@@ -1,30 +1,38 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
 
 config_version=5
 
+[animation]
+
+compatibility/default_parent_skeleton_in_mesh_instance_3d=true
+
 [application]
+
 config/name="Beacon Bay"
+config/description="A little town. A big responsibility. A cooperative pixel rescue game."
 config/version="0.5.0"
 run/main_scene="res://scenes/main.tscn"
-config/features=PackedStringArray("4.3", "GL Compatibility")
-config/description="A little town. A big responsibility. A cooperative pixel rescue game."
+config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://assets/icon.svg"
 
 [display]
-window/size/viewport_width=1440
+
+window/size/viewport_width=1600
 window/size/viewport_height=900
-window/size/window_width_override=1280
-window/size/window_height_override=800
 window/stretch/mode="canvas_items"
-window/stretch/aspect="keep"
-
-[rendering]
-renderer/rendering_method="gl_compatibility"
-renderer/rendering_method.mobile="gl_compatibility"
-textures/default_filters/use_nearest_mipmap_filter=false
-environment/defaults/default_clear_color=Color(0.047, 0.102, 0.137, 1)
-
-[audio]
-driver/enable_input=false
 
 [gui]
+
 theme/default_font_multichannel_signed_distance_field=true
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+environment/defaults/default_clear_color=Color(0.047, 0.102, 0.137, 1)

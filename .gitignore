@@ -16,3 +16,4 @@
 beacon_bay_save.json
 .env
 .env.*
+/assets/**/*.import

@@ -9,10 +9,18 @@ const TEAL := Color("70d2ba")
 const CORAL := Color("f28b71")
 const GOLD := Color("efc66e")
 const BLUE := Color("83c4e6")
+const VIOLET := Color("a3aef5")
+const DEPARTMENTS: Array[String] = ["fire","medic","engineer","police"]
 const SAVE_PATH := "user://beacon_bay_save.json"
-const KIND_COLOR := {"fire": CORAL, "medic": TEAL, "engineer": GOLD, "medical": TEAL, "flood": BLUE, "power": GOLD}
-const KIND_NAME := {"fire": "FIRE CREW", "medic": "MEDIC CREW", "engineer": "ENGINEERS"}
+# The game canvas is 1600x900 (16:9, scales exactly to 1920x1080). The layout below is
+# 1440 wide, so the whole scene is shifted right to sit in the middle.
+const UI_OFFSET_X := 80.0
+const KIND_COLOR := {"fire": CORAL, "medic": TEAL, "engineer": GOLD, "police": VIOLET, "medical": TEAL, "flood": BLUE, "power": GOLD}
+const KIND_NAME := {"fire": "FIRE CREW", "medic": "MEDIC CREW", "engineer": "ENGINEERS", "police": "POLICE"}
+const KIND_SHORT := {"fire":"FIRE","medic":"MED","engineer":"ENG","police":"POL"}
 
+var cv: CanvasItem
+var hud: Node2D
 var sim: RescueSimulation
 var town: TownView
 var map_clip: Control
@@ -35,6 +43,10 @@ var buttons: Array[Dictionary] = []
 var elapsed_ui := 0.0
 var refresh := 0.0
 var net_timer := 0.0
+var _route_cache: Array = []
+var _route_cache_target := -1
+var _route_cache_until := 0
+var _route_cache_sim: RefCounted
 var save_timer := 0.0
 var unlocked := 0
 var best_scores: Dictionary = {}
@@ -66,6 +78,15 @@ var focus_open := false
 var focus_hold_id := -1
 var focus_hold_left := 0.0
 var urgency_cooldown := 0.0
+var _tick_left := 0.0
+# Networking smoothness (guests only): dispatches shown before the host confirms them.
+var predicted_dispatches: Array[Dictionary] = []
+var host_speed := 1.0
+var dedicated_server := false
+var _dedicated_shift_started := false
+var show_perf := false
+var _snapshot_gap_ms := 0.0
+var _last_snapshot_ms := -1
 var pressure_display := 0.0
 var tutorial_active := false
 var tutorial_completed := false
@@ -76,8 +97,20 @@ var _tutorial_campaign_sim: RescueSimulation
 var _tutorial_saved_ui: Dictionary = {}
 var _tutorial_auto_start := false
 var _tutorial_last_stage := -1
-const FOCUS_RECT := Rect2(40, 548, 464, 210)
+# Game screen layout (main.gd local coordinates; the visible window spans x -80..1520).
+const VIEW := Rect2(-80, 0, 1600, 900)
+const MAP_SCALE := 3.0
+const MAP_ORIGIN := Vector2(-78, 0)
+const MAP_PIXELS := Vector2(1596, 948)
+const CREW_BAR := Rect2(-72, 836, 1584, 58)
+const FOCUS_RECT := Rect2(-64, 612, 464, 210)
 const SURGE_RECT := Rect2(598, 158, 478, 51)
+
+# Everything main.gd draws (HUD, menus, toasts) goes on this layer, above the map.
+class HudLayer extends Node2D:
+	var game: Node2D
+	func _draw() -> void:
+		game._draw_all(self)
 
 class MapOverlay extends Node2D:
 	var game: Node2D
@@ -85,25 +118,33 @@ class MapOverlay extends Node2D:
 		game._draw_map_overlay(self)
 
 func _ready() -> void:
+	dedicated_server = "--server" in OS.get_cmdline_args() or "--server" in OS.get_cmdline_user_args()
+	if dedicated_server:
+		_start_dedicated_server()
+		return
 	get_tree().auto_accept_quit = false
+	position = Vector2(UI_OFFSET_X, 0)
 	font = ThemeDB.fallback_font
 	hero = load("res://assets/art/title_coast.png")
 	sim = RescueSimulation.new()
 	town = TownView.new()
 	map_clip = Control.new()
-	map_clip.position = Vector2(24,146)
-	map_clip.size = Vector2(1064,632)
+	map_clip.position = MAP_ORIGIN
+	map_clip.size = Vector2(MAP_PIXELS.x, VIEW.size.y)
 	map_clip.clip_contents = true
 	map_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(map_clip)
 	town.position = Vector2.ZERO
-	town.scale = Vector2(2, 2)
+	town.scale = Vector2(MAP_SCALE, MAP_SCALE)
 	town.sim = sim
 	map_clip.add_child(town)
 	town.incident_clicked.connect(_select_incident)
 	tactical_map = preload("res://scripts/tactical_map_overlay.gd").new()
 	tactical_map.sim = sim
+	tactical_map.options_provider = _cached_dispatch_options
 	tactical_map.z_index = 2
+	tactical_map.map_rect = Rect2(MAP_ORIGIN, MAP_PIXELS)
+	tactical_map.view_rect = Rect2(MAP_ORIGIN, Vector2(MAP_PIXELS.x, VIEW.size.y))
 	add_child(tactical_map)
 	tactical_map.incident_selected.connect(_select_incident)
 	tactical_map.unit_selected.connect(_select_unit)
@@ -117,22 +158,20 @@ func _ready() -> void:
 	map_overlay.game = self
 	map_overlay.z_index = 4
 	add_child(map_overlay)
+	hud = HudLayer.new()
+	hud.game = self
+	hud.z_index = 10
+	add_child(hud)
 	tutorial_overlay = TutorialOverlay.new()
 	add_child(tutorial_overlay)
+	tutorial_overlay.position = Vector2(-64, CREW_BAR.position.y - tutorial_overlay.panel_size.y - 10)
 	tutorial_overlay.advance_requested.connect(_tutorial_next)
 	tutorial_overlay.skip_requested.connect(func(): _end_tutorial(false))
 	audio = AudioDirector.new()
 	add_child(audio)
 	research = ResearchLogger.new()
 	add_child(research)
-	network = NetworkSession.new()
-	add_child(network)
-	network.command_received.connect(_execute_command)
-	if network.has_signal("event_received"):
-		network.connect("event_received",Callable(self,"_on_remote_event"))
-	network.snapshot_received.connect(_receive_snapshot)
-	network.message_received.connect(func(message: String): _toast(message))
-	network.disconnected.connect(_network_ended)
+	_initialize_network()
 	research.log_error.connect(func(message: String): research_enabled=false; _toast(message))
 	ip_input = LineEdit.new()
 	ip_input.position = Vector2(452, 379)
@@ -140,6 +179,9 @@ func _ready() -> void:
 	ip_input.placeholder_text = "Host's local IP address, e.g. 192.168.1.10"
 	ip_input.text = "127.0.0.1"
 	ip_input.add_theme_font_size_override("font_size", 20)
+	ip_input.select_all_on_focus = true
+	# Must sit above the HUD layer (z 10), which draws the lobby panel.
+	ip_input.z_index = 20
 	add_child(ip_input)
 	_load_save()
 	audio.set_music_enabled(music_enabled)
@@ -154,7 +196,61 @@ func _ready() -> void:
 			_begin_tutorial(false)
 		if arg.begins_with("--capture="):
 			_capture_later(arg.trim_prefix("--capture="))
+	_apply_playtest_args()
 	_update_visibility()
+
+# Local multiplayer testing (Godot: Debug > Customize Run Instances > launch arguments per instance):
+#   --host            open a room straight away
+#   --join=127.0.0.1  join that address straight away
+#   --tile=0..3       shrink the window to a quarter of the screen in that corner; tiles 1-3 also mute the music
+func _apply_playtest_args() -> void:
+	var args: PackedStringArray = OS.get_cmdline_args()
+	args.append_array(OS.get_cmdline_user_args())
+	for arg in args:
+		if arg.begins_with("--tile="):
+			var tile: int = clampi(arg.trim_prefix("--tile=").to_int(), 0, 3)
+			var area: Rect2i = DisplayServer.screen_get_usable_rect()
+			var size := Vector2i(area.size.x / 2, area.size.y / 2)
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+			DisplayServer.window_set_size(size)
+			DisplayServer.window_set_position(area.position + Vector2i((tile % 2) * size.x, (tile / 2) * size.y))
+			if tile > 0:
+				music_enabled = false
+				audio.set_music_enabled(false)
+		elif arg == "--host":
+			screen = "lobby"
+			network.host()
+			_toast(network.status)
+		elif arg.begins_with("--join="):
+			screen = "lobby"
+			ip_input.text = arg.trim_prefix("--join=")
+			# Give the host a moment to open its room first.
+			get_tree().create_timer(1.5).timeout.connect(func():
+				guest_progress = sim.snapshot()
+				network.join(ip_input.text)
+				_toast(network.status))
+
+func _initialize_network() -> void:
+	network = NetworkSession.new()
+	add_child(network)
+	network.command_received.connect(_execute_command)
+	network.event_received.connect(_on_remote_event)
+	network.snapshot_received.connect(_receive_snapshot)
+	network.message_received.connect(_toast)
+	network.disconnected.connect(_network_ended)
+
+func _start_dedicated_server() -> void:
+	sim = RescueSimulation.new()
+	research = ResearchLogger.new()
+	add_child(research)
+	_initialize_network()
+	var err := network.host(true)
+	if err != OK:
+		printerr("Dedicated ENet startup failed: ", error_string(err))
+		get_tree().quit(1)
+		return
+	screen = "lobby"
+	print("Beacon Bay dedicated server: UDP ", NetworkSession.PORT, "; waiting for a player to start (1-4 players).")
 
 func _process(delta: float) -> void:
 	elapsed_ui += delta
@@ -173,11 +269,17 @@ func _process(delta: float) -> void:
 		_process_events()
 		if sim.finished and not tutorial_active:
 			_finish_shift()
+	elif screen == "game" and network.active and not network.hosting:
+		# Guests run the same simulation between host updates so crews glide and
+		# timers count down every frame; each snapshot from the host corrects it.
+		sim.tick(delta * host_speed)
+		sim.drain_events()
 	if network.active and network.hosting:
 		net_timer += delta
 		if net_timer > 0.12:
 			net_timer = 0
-			network.broadcast({"simulation": sim.snapshot(), "screen": "pause" if screen=="settings" else screen, "orders": orders})
+			network.broadcast({"simulation": sim.net_snapshot(), "screen": "pause" if screen=="settings" else screen, "orders": orders, "speed": (0.8 if comfortable else 1.0)})
+	if dedicated_server: return
 	if screen == "game":
 		pressure_display = lerpf(pressure_display, _pressure(), 1.0-exp(-delta*3.0))
 		audio.set_intensity(pressure_display)
@@ -189,6 +291,12 @@ func _process(delta: float) -> void:
 			for call in active_calls:
 				if call.deadline < 20: urgent_count += 1
 			research.update_context({"shift":sim.shift_index,"role":network.role,"active_incidents":active_calls.size(),"urgent_incidents":urgent_count,"reputation":sim.reputation})
+		var about_to_fail := false
+		for call in _active_incidents():
+			if float(call.deadline) < 10.0 and _missing_crews(call) > 0:
+				about_to_fail = true
+				break
+		audio.set_ticking(about_to_fail and sim.running)
 		if not tutorial_active: save_timer += delta
 		if save_timer > 15 and not network.active and not tutorial_active:
 			save_timer = 0
@@ -201,6 +309,7 @@ func _process(delta: float) -> void:
 				role_filter = ""
 	else:
 		audio.set_intensity(0.0)
+		audio.set_ticking(false)
 	for p in particles:
 		p.life -= delta
 		p.pos += p.velocity * delta
@@ -217,13 +326,25 @@ func _process(delta: float) -> void:
 	tactical_map.selected_unit_id = selected_unit
 	tactical_map.role_filter = role_filter
 	tactical_map.focused_unit_id = focused_unit
-	tactical_map.dispatch_enabled = network.can_do("dispatch") and not (network.active and network.roster.size()>1 and network.role==1 and not orders.has(selected))
+	var planned: Dictionary = sim.get_unit(selected_unit)
+	tactical_map.dispatch_enabled = not planned.is_empty() and network.owns(str(planned.kind))
+	tactical_map.owned_kinds = network.departments_for()
+	var owners: Dictionary = {}
+	if network.active:
+		for kind in DEPARTMENTS:
+			if not network.owns(kind):
+				var owner: int = network.owner_of(kind)
+				owners[kind] = "P%d" % (int(network.roster.get(owner, 0)) + 1) if owner > 0 else "?"
+	tactical_map.owner_labels = owners
 	if tutorial_active:
 		var planned_crew: Dictionary=sim.get_unit(selected_unit)
 		tactical_map.dispatch_enabled = not planned_crew.is_empty() and tutorial.can_action("dispatch",{"incident_id":selected,"kind":planned_crew.get("kind",""),"unit_id":selected_unit})
 	tactical_map.tutorial_active = tutorial_active
 	tactical_map.reduced_motion = reduced_motion
 	var blocked: Array[Rect2] = []
+	if screen=="game":
+		blocked.append(_hud_rect())
+		blocked.append(Rect2(VIEW.position.x, CREW_BAR.position.y - 4, VIEW.size.x, VIEW.end.y - CREW_BAR.position.y + 4))
 	if field_focus.visible: blocked.append(Rect2(field_focus.position, FOCUS_RECT.size))
 	if tutorial_overlay.visible: blocked.append(Rect2(tutorial_overlay.position,tutorial_overlay.panel_size))
 	tactical_map.occlusions = blocked
@@ -234,7 +355,7 @@ func _process(delta: float) -> void:
 	tutorial_overlay.reduced_motion = reduced_motion
 	_update_visibility()
 	map_overlay.queue_redraw()
-	queue_redraw()
+	hud.queue_redraw()
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
@@ -245,6 +366,7 @@ func _notification(what: int) -> void:
 		get_tree().quit()
 
 func _update_visibility() -> void:
+	if dedicated_server: return
 	map_clip.visible = screen == "game"
 	town.process_mode = Node.PROCESS_MODE_ALWAYS if screen == "game" else Node.PROCESS_MODE_DISABLED
 	field_focus.visible = screen=="game" and focus_open and (selected>=0 or focus_hold_left>0)
@@ -257,9 +379,10 @@ func _update_visibility() -> void:
 	tutorial_overlay.visible = tutorial_active and screen=="game"
 	ip_input.visible = screen == "lobby" and not network.active
 
-func _draw() -> void:
+func _draw_all(canvas: CanvasItem) -> void:
+	cv = canvas
 	buttons.clear()
-	draw_rect(Rect2(0, 0, 1440, 900), INK)
+	if screen != "game": cv.draw_rect(Rect2(-UI_OFFSET_X, 0, 1600, 900), INK)
 	match screen:
 		"title": _draw_title()
 		"campaign": _draw_campaign()
@@ -274,22 +397,30 @@ func _draw() -> void:
 			if screen == "help": _draw_help()
 	if toast_left > 0 and screen != "title":
 		var width: float = minf(1040, font.get_string_size(toast_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x + 56)
-		_panel(Rect2((1440-width)/2, 89, width, 43), PANEL_LIGHT, TEAL)
-		_text(toast_text, Vector2((1440-width)/2 + 28, 117), 17, CREAM)
+		_panel(Rect2((1440-width)/2, 104, width, 40), Color(INK, 0.8), TEAL)
+		_text(toast_text, Vector2((1440-width)/2 + 28, 130), 16, CREAM)
 	for p in particles:
-		draw_rect(Rect2(p.pos, Vector2(5,5)), Color(p.color, clampf(p.life, 0, 1)))
+		cv.draw_rect(Rect2(p.pos, Vector2(5,5)), Color(p.color, clampf(p.life, 0, 1)))
+	if show_perf:
+		var line: String = "%d FPS" % Engine.get_frames_per_second()
+		if network.active and not network.hosting:
+			line += "   ping %d ms   host updates every %d ms" % [network.round_trip_ms(), roundi(_snapshot_gap_ms)]
+		elif network.active:
+			line += "   hosting"
+		_panel(Rect2(-64, 70, font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x + 24, 30), Color(INK, 0.8), TEAL)
+		_text(line, Vector2(-52, 91), 15, CREAM)
 
 func _draw_title() -> void:
 	if hero:
-		draw_texture_rect(hero, Rect2(0, -30, 1440, 960), false)
+		cv.draw_texture_rect(hero, Rect2(-UI_OFFSET_X, -60, 1600, 1067), false)
 	
 	for i in range(72):
 		var opacity := 0.84 * pow(1.0 - float(i)/72.0, 1.1)
-		draw_rect(Rect2(i * 15, 0, 15, 900), Color(0.035,0.13,0.17,opacity))
+		cv.draw_rect(Rect2(i * 15, 0, 15, 900), Color(0.035,0.13,0.17,opacity))
 	_text("A LITTLE TOWN. A BIG RESPONSIBILITY.", Vector2(74, 178), 16, GOLD)
 	_text("BEACON", Vector2(65, 277), 88, CREAM)
 	_text("BAY", Vector2(65, 361), 88, CREAM)
-	draw_rect(Rect2(74, 395, 72, 4), CORAL)
+	cv.draw_rect(Rect2(74, 395, 72, 4), CORAL)
 	_text("Keep the light on.", Vector2(74, 441), 28, CREAM)
 	_button("play", "CONTINUE" if unlocked > 0 or has_resume else "PLAY SOLO", Rect2(74, 497, 280, 64), TEAL, INK)
 	_button("co_op", "PLAY WITH FRIENDS", Rect2(74, 575, 280, 54), Color(0.08,0.20,0.25,0.94), CREAM)
@@ -303,57 +434,74 @@ func _draw_title() -> void:
 		for i in range(22):
 			var px := fmod(i * 97.0 + elapsed_ui * 5.0, 1400.0)
 			var py := 690 + sin(i * 17.0 + elapsed_ui * 0.2) * 150
-			draw_rect(Rect2(px, py, 3, 2), Color(1,0.91,0.64,0.2 + sin(elapsed_ui+i)*0.12))
+			cv.draw_rect(Rect2(px, py, 3, 2), Color(1,0.91,0.64,0.2 + sin(elapsed_ui+i)*0.12))
+
+func _hud_rect() -> Rect2:
+	var width: float = 860.0 if network.active else 720.0
+	return Rect2(VIEW.position.x + (VIEW.size.x - width) / 2.0, 8, width, 52)
 
 func _draw_game() -> void:
-	_text("BEACON BAY", Vector2(27, 45), 26, CREAM)
-	_text("EMERGENCY SERVICES", Vector2(29, 67), 11, MUTED)
-	var shift: Dictionary = BeaconCampaign.shift_data(sim.shift_index)
-	_text("MEET THE CREW" if tutorial_active else shift.get("title", "First light"), Vector2(279, 45), 24, CREAM)
-	_text("GUIDED PRACTICE · TAKE YOUR TIME" if tutorial_active else "SHIFT %02d / 06   ·   %s" % [sim.shift_index+1, sim.weather.to_upper()], Vector2(281, 68), 12, MUTED)
-	_text("COMMUNITY / MIN %d%%" % int(sim.minimum_confidence), Vector2(684,31),10,MUTED)
-	_bar(Rect2(684, 43, 156, 10), sim.reputation / 100.0, TEAL if sim.reputation > 40 else CORAL)
-	_text("%d%%" % sim.reputation, Vector2(852, 55), 18, CREAM)
-	_text("RESCUED", Vector2(950, 31), 11, MUTED)
-	_text(str(sim.rescued), Vector2(950, 59), 26, CREAM)
-	_text("TRAINING" if tutorial_active else "SHIFT ENDS", Vector2(1065, 31), 11, MUTED)
-	_text("NO RUSH" if tutorial_active else _time(sim.duration - sim.elapsed), Vector2(1065, 59), 26, GOLD)
-	_button("help", "?", Rect2(1258, 24, 48, 44), PANEL_LIGHT, CREAM, 22)
-	_button("pause", "II", Rect2(1318, 24, 96, 44), PANEL_LIGHT, CREAM, 20)
-	draw_line(Vector2(24, 88), Vector2(1416, 88), Color("2b4a54"), 1)
-	_text("OPERATIONS MAP", Vector2(25, 119), 13, MUTED)
-	var obj := "Read the route. Match the crew. Protect the rescue." if tutorial_active else "Save %d neighbors · keep community above %d%%" % [sim.target,int(sim.minimum_confidence)]
-	_text(obj, Vector2(215,119), 14, CREAM)
-	_draw_pressure_meter()
-	_text("INCOMING REPORTS",Vector2(1112,119),13,MUTED)
-	var active := _active_incidents()
-	_text("%02d" % active.size(), Vector2(1381, 119), 15, TEAL)
-	
-	_panel(Rect2(21, 143, 1070, 638), PANEL_LIGHT)
-	_draw_incident_queue(active)
-	_draw_dispatch_panel()
+	if screen != "game":
+		cv.draw_rect(VIEW, INK)
+	var bar: Rect2 = _hud_rect()
+	_panel(bar, Color(INK, 0.62), Color(CREAM, 0.12))
+	var x: float = bar.position.x + 18
+	if network.active:
+		var mine: Array = network.departments_for()
+		_text("YOU", Vector2(x, 24), 10, MUTED)
+		var bx: float = x
+		for kind in mine:
+			_symbol(kind, Vector2(bx + 8, 42), KIND_COLOR[kind], 0.5)
+			bx += 22
+		if mine.size() >= DEPARTMENTS.size(): _text("ALL", Vector2(x, 48), 16, CREAM)
+		x += 130
+	_text("RESCUED", Vector2(x, 26), 10, MUTED)
+	_text("%d / %d" % [sim.rescued, sim.target] if not tutorial_active else str(sim.rescued), Vector2(x, 50), 22, CREAM if sim.rescued < sim.target else TEAL)
+	x += 120
+	_text("COMMUNITY", Vector2(x, 26), 10, MUTED)
+	_bar(Rect2(x, 36, 140, 10), sim.reputation / 100.0, TEAL if sim.reputation > sim.minimum_confidence + 10 else CORAL)
+	cv.draw_rect(Rect2(x + 140 * sim.minimum_confidence / 100.0 - 1, 32, 2, 18), CREAM)
+	_text("%d%%" % sim.reputation, Vector2(x + 148, 47), 16, CREAM)
+	x += 210
+	_text("TIME", Vector2(x, 26), 10, MUTED)
+	_text("--:--" if tutorial_active else _time(sim.duration - sim.elapsed), Vector2(x, 50), 22, GOLD)
+	x += 90
+	var boost := Rect2(x, 14, 136, 40)
+	var boost_ready: bool = sim.special_cooldown <= 0
+	_button("special", "", boost, Color(PANEL_LIGHT, 0.85) if boost_ready else Color(PANEL, 0.6), GOLD)
+	var label: String = "COFFEE BOOST"
+	var lw: float = font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+	_text(label, boost.position + Vector2((boost.size.x - lw) / 2, 19), 14, GOLD if boost_ready else MUTED)
+	var sub: String = "SPACE" if boost_ready else "ready in %ds" % ceili(sim.special_cooldown)
+	var sw: float = font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 10).x
+	_text(sub, boost.position + Vector2((boost.size.x - sw) / 2, 34), 10, MUTED)
+	_button("help", "?", Rect2(bar.end.x - 102, 16, 40, 36), Color(PANEL_LIGHT, 0.85), CREAM, 18)
+	_button("pause", "II", Rect2(bar.end.x - 54, 16, 40, 36), Color(PANEL_LIGHT, 0.85), CREAM, 16)
+	if sim.surge_warning_remaining > 0:
+		_pill(Rect2(bar.get_center().x - 120, bar.end.y + 6, 240, 34), "WAVE INCOMING · %ds" % ceili(sim.surge_warning_remaining), CORAL)
+	elif sim.rush_remaining > 0:
+		_pill(Rect2(bar.get_center().x - 120, bar.end.y + 6, 240, 34), "BUSY WAVE · %ds" % ceili(sim.rush_remaining), GOLD)
 	_draw_crew_cards()
-	
-	if screen=="game" and not tutorial_active and (field_focus.visible or selected>=0):
-		buttons.append({"id":"focus","rect":_focus_button_rect()})
-	_text("MAP: click call, then crew   1 / 2 / 3 filter   ENTER send   Q scout   E supply   SPACE rally   F scene", Vector2(27,892),12,MUTED)
-	_text("%d WORKSHOP CREDITS" % sim.credits,Vector2(1213,891),11,GOLD)
 
-func _draw_incident_queue(active: Array) -> void:
-	for i in range(mini(active.size(),6)):
-		var call: Dictionary = active[i]
-		var area := Rect2(1112,146+i*48,304,43)
-		var known: bool = bool(call.get("discovered",true))
-		var color: Color = KIND_COLOR.get(call.kind,CORAL) if known else GOLD
-		_button("select:%d" % call.id,"",area,PANEL_LIGHT if int(call.id)==selected else PANEL)
-		_text("#%02d" % call.id,area.position+Vector2(10,27),16,color)
-		_text(_short(str(call.name),23),area.position+Vector2(55,18),14,CREAM)
-		_text(_call_status(call) if known else "UNCERTAIN REPORT · SCOUT TO CONFIRM",area.position+Vector2(55,34),9,MUTED if known else GOLD)
-	if active.is_empty():
-		_panel(Rect2(1112,146,304,132),PANEL)
-		_symbol("safe",Vector2(1264,184),TEAL,1.1)
-		_text("The bay is quiet",Vector2(1180,222),19,CREAM)
-		_text("Watch the map for the next call.",Vector2(1140,251),13,MUTED)
+func _pill(rect: Rect2, text: String, color: Color) -> void:
+	var pulse: float = 0.0 if reduced_motion else (sin(elapsed_ui * 6.0) + 1.0) * 0.5
+	_panel(rect, Color(INK, 0.7), Color(color, 0.6 + 0.4 * pulse))
+	var width := font.get_string_size(text,HORIZONTAL_ALIGNMENT_LEFT,-1,15).x
+	_text(text, rect.position + Vector2((rect.size.x - width) / 2, 23), 15, color)
+
+func _need_chips(call: Dictionary, origin: Vector2, size: float = 18.0) -> void:
+	var x: float = origin.x
+	for kind in DEPARTMENTS:
+		var needed: int = int(call.needs.get(kind,0))
+		if needed<=0: continue
+		var covered: bool = _assigned_count(call,kind)>=needed
+		var chip := Rect2(Vector2(x, origin.y), Vector2(size, size))
+		cv.draw_rect(chip, KIND_COLOR[kind] if covered else INK)
+		cv.draw_rect(chip, KIND_COLOR[kind], false, 1)
+		_symbol(kind, chip.get_center(), INK if covered else KIND_COLOR[kind], size / 34.0)
+		x += size + 4
+
+
 
 func _pressure() -> float:
 	if sim.has_method("pressure_level"):
@@ -366,97 +514,105 @@ func _draw_pressure_meter() -> void:
 	_text("TOWN PRESSURE",Vector2(805,109),10,MUTED)
 	_text(level,Vector2(994,109),10,color)
 	for i in range(20):
-		draw_rect(Rect2(805+i*13,117,10,7),color if float(i)/20.0<pressure_display else PANEL_LIGHT)
+		cv.draw_rect(Rect2(805+i*13,117,10,7),color if float(i)/20.0<pressure_display else PANEL_LIGHT)
 
 func _draw_map_overlay(canvas: Node2D) -> void:
 	if screen!="game": return
 	if tutorial_active:
 		_draw_tutorial_highlight(canvas)
-		return
-	if field_focus.visible:
-		_overlay_button(canvas,"F HIDE",_focus_button_rect())
-	elif selected>=0:
-		_overlay_button(canvas,"F WATCH CREW",_focus_button_rect())
 
 func _focus_button_rect() -> Rect2:
 	return Rect2(field_focus.position+Vector2(FOCUS_RECT.size.x-65,7),Vector2(57,24)) if field_focus.visible else Rect2(40,724,185,34)
 
 func _map_occluded(point: Vector2) -> bool:
-	if tutorial_overlay.visible and tutorial_overlay.blocks_point(point): return true
+	if tutorial_overlay.visible and tutorial_overlay.blocks_point(point + global_position): return true
 	if field_focus.visible and Rect2(field_focus.position,FOCUS_RECT.size).has_point(point): return true
 	return false
 
 func _overlay_button(canvas: Node2D, caption: String, rect: Rect2) -> void:
-	var hover: bool = rect.has_point(get_global_mouse_position())
+	var hover: bool = rect.has_point(get_local_mouse_position())
 	canvas.draw_style_box(_style(PANEL_LIGHT.lightened(.15) if hover else PANEL_LIGHT),rect)
 	canvas.draw_string(font,rect.position+Vector2(8,rect.size.y*.5+4),caption,HORIZONTAL_ALIGNMENT_LEFT,-1,11,CREAM)
 
-func _draw_dispatch_panel() -> void:
-	_panel(Rect2(1112,449,304,329),PANEL)
-	var call := _incident(selected)
-	if call.is_empty() or call.get("status","") not in ["active","working"]:
-		_text("CALL DESK",Vector2(1130,479),15,TEAL)
-		_wrap("Choose a call. Its location will light up on the map.",Vector2(1130,518),263,21,CREAM,29)
-		_text("Hover a station to see its crews.",Vector2(1130,616),13,MUTED)
-		_text("1 / 2 / 3 highlight a crew type.",Vector2(1130,640),13,MUTED)
-		_text("Choose your responder on the map.",Vector2(1130,664),13,CREAM)
-		_button("special",_boost_text(),Rect2(1130,740,268,32),PANEL_LIGHT,GOLD,12)
-		return
-	var known: bool = bool(call.get("discovered",true))
-	var color: Color = KIND_COLOR.get(call.kind,CORAL) if known else GOLD
-	_text("REPORT #%02d  ·  %d PEOPLE" % [call.id,int(call.get("people",1))],Vector2(1130,475),12,color)
-	_text(_short(str(call.name),23),Vector2(1130,504),21,CREAM)
-	var need_text: String = ""
-	for kind: String in ["fire","medic","engineer"]:
-		if int(call.needs.get(kind,0))>0:
-			need_text += "%s %d  " % [{"fire":"FIRE","medic":"MED","engineer":"ENG"}[kind],call.needs[kind]]
-	_text("NEEDS " + need_text if known else "? UNCONFIRMED REPORT",Vector2(1130,528),11,MUTED if known else GOLD)
-	draw_line(Vector2(1130,544),Vector2(1398,544),PANEL_LIGHT,1)
-	var waiting: bool = network.active and network.roster.size()>1 and network.role==1 and not orders.has(call.id)
-	var covered: bool = known
-	for kind: String in ["fire","medic","engineer"]:
-		if _assigned_count(call,kind)<int(call.needs.get(kind,0)): covered=false
-	if waiting:
-		_wrap("Waiting for your dispatcher's order.",Vector2(1130,572),263,15,GOLD,23)
-	elif covered:
-		_text("CREWS RESPONDING",Vector2(1130,573),12,TEAL)
-		_text("Follow their progress on the map.",Vector2(1130,599),13,CREAM)
-		_text("Use support if the rescue is at risk.",Vector2(1130,621),12,MUTED)
-	elif selected_unit>=0:
-		_text("RESPONSE PLANNED ON MAP",Vector2(1130,573),12,TEAL)
-		_text("Check its route. Enter confirms it.",Vector2(1130,599),13,CREAM)
+
+
+func _missing_crews(call: Dictionary) -> int:
+	var count := 0
+	for kind in DEPARTMENTS:
+		count += maxi(0, int(call.needs.get(kind,0)) - _assigned_count(call,kind))
+	return count
+
+func _crew_on_scene(call: Dictionary) -> bool:
+	for unit in sim.units:
+		if int(unit.target)==int(call.id) and unit.state=="working" and bool(unit.get("assignment_suitable",true)): return true
+	return false
+
+func _clear_selection() -> void:
+	if selected_unit>=0:
+		selected_unit=-1
 	else:
-		_text("CHOOSE A CREW ON THE MAP",Vector2(1130,573),12,TEAL)
-		_text("Hover a crew to compare its route.",Vector2(1130,599),13,CREAM)
-		_text("Click that crew to prepare a response.",Vector2(1130,621),12,MUTED)
-	if network.active and network.roster.size()>1 and network.role==0 and not network.can_do("dispatch"):
-		_button("order","ISSUE DISPATCH ORDER",Rect2(1130,628,268,32),TEAL,INK,12)
-	var scout_label: String = "Q SCOUT +9s"
-	if bool(call.get("scouted",false)): scout_label="REPORT CHECKED"
-	elif float(sim.scout_cooldown)>0: scout_label="Q READY IN %ds" % ceili(float(sim.scout_cooldown))
-	_button("scout",scout_label,Rect2(1130,675,129,37),PANEL_LIGHT,TEAL,10)
-	_button("supply","E +18s · %d LEFT" % sim.supplies,Rect2(1269,675,129,37),PANEL_LIGHT,GOLD,10)
-	var benefit: String = action_feedback if action_feedback_left>0 else ("Scout reveals needs before you commit." if not known else "Supplies: +18s, lower danger, faster work.")
-	_text(_short(benefit,46),Vector2(1130,730),10,TEAL if action_feedback_left>0 else MUTED)
-	_button("special",_boost_text(),Rect2(1130,740,268,32),PANEL_LIGHT,GOLD,12)
+		selected=-1
+	role_filter=""
+	focused_unit=-1
+
+# Number keys pick a free crew of that department (the fastest one to the selected call).
+# Number keys: with the mouse over a call (or a call selected) they SEND the nearest free crew of that
+# department straight there. With no call targeted they just pick that crew.
+func _pick_department(kind: String) -> void:
+	if not network.owns(kind):
+		var owner: int = network.owner_of(kind)
+		_toast("%s crews belong to %s." % [str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind)), network.player_label(owner) if owner>0 else "a teammate"])
+		return
+	var target: int = int(tactical_map.hovered_incident_id) if int(tactical_map.hovered_incident_id)>=0 else selected
+	var call: Dictionary = _incident(target)
+	var best: int = -1
+	var best_eta: float = INF
+	if not call.is_empty() and call.get("status","") in ["active","working"]:
+		for option: Dictionary in sim.dispatch_options(target):
+			if str(option.kind)==kind and float(option.eta)<best_eta:
+				best_eta=float(option.eta); best=int(option.unit_id)
+		if best<0:
+			_toast("No %s crew is free right now." % str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind)).to_lower())
+			return
+		selected=target
+		_command("dispatch",{"incident_id":target,"kind":kind,"unit_id":best})
+		return
+	for unit in sim.units:
+		if unit.kind==kind and unit.state in ["idle","return"] and sim.elapsed>=float(unit.get("dispatch_guard_until",0.0)) and sim.elapsed>=float(unit.get("divert_after",0.0)):
+			best=int(unit.id); break
+	if best<0:
+		_toast("No %s crew is free right now." % str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind)).to_lower())
+		return
+	_select_unit(best)
+
+func _cached_dispatch_options(target: int) -> Array:
+	var now := Time.get_ticks_msec()
+	if sim != _route_cache_sim or target != _route_cache_target or now >= _route_cache_until:
+		_route_cache = sim.dispatch_options(target)
+		_route_cache_sim = sim
+		_route_cache_target = target
+		_route_cache_until = now + 100
+	return _route_cache
 
 func _selected_plan() -> Dictionary:
 	if selected<0 or selected_unit<0: return {}
-	for option: Dictionary in sim.dispatch_options(selected):
+	for option: Dictionary in _cached_dispatch_options(selected):
 		if int(option.unit_id)==selected_unit: return option
 	return {}
 
 func _select_unit(id: int) -> void:
 	if screen!="game": return
-	var call: Dictionary = _incident(selected)
-	if call.is_empty() or call.get("status","") not in ["active","working"]:
-		_locate_unit(id)
-		_toast("Choose a call first, then pick a responder here on the map.")
-		return
 	var unit: Dictionary = sim.get_unit(id)
 	if unit.is_empty(): return
+	if not network.owns(str(unit.kind)):
+		var owner: int = network.owner_of(str(unit.kind))
+		_toast("%s is a %s crew. %s commands them — ask over voice." % [unit.get("crew_name",unit.name),str(NetworkSession.DEPARTMENT_NAMES.get(unit.kind,unit.kind)).to_lower(),network.player_label(owner) if owner>0 else "Nobody"])
+		return
+	if selected_unit==id:
+		selected_unit=-1
+		return
 	if unit.state not in ["idle","return"]:
-		_toast("%s is committed. Follow their progress on the map." % unit.get("crew_name",unit.name))
+		_toast("%s is busy. Pick a free crew." % unit.get("crew_name",unit.name))
 		return
 	var wait_left: float = maxf(float(unit.get("divert_after",0.0)),float(unit.get("dispatch_guard_until",0.0))) - sim.elapsed
 	if wait_left>0:
@@ -469,11 +625,11 @@ func _select_unit(id: int) -> void:
 	if tutorial_active:
 		tutorial.on_action("select_unit",{"unit_id":id,"incident_id":selected,"kind":unit.kind})
 		_sync_tutorial()
-	audio.play_cue("click")
+	audio.play_cue("select")
 
 func _plan_kind(kind: String) -> void:
 	
-	if screen!="game" or kind not in ["fire","medic","engineer"]: return
+	if screen!="game" or kind not in DEPARTMENTS: return
 	if tutorial_active and not tutorial.can_action("plan:"+kind,{"incident_id":selected,"kind":kind}):
 		_toast(str(tutorial.current().objective))
 		return
@@ -505,44 +661,47 @@ func _locate_unit(id: int) -> void:
 func _dispatch_selected() -> void:
 	var unit: Dictionary = sim.get_unit(selected_unit)
 	if selected<0 or unit.is_empty():
-		_toast("Click a call, then choose its responder on the map.")
+		_toast("Pick a crew, then click a call.")
 		return
 	_command("dispatch",{"incident_id":selected,"kind":unit.kind,"unit_id":selected_unit})
 
 func _draw_crew_cards() -> void:
-	for i in range(3):
-		var kind: String = ["fire","medic","engineer"][i]
-		var rect := Rect2(24+i*360, 796, 344, 78)
-		_panel(rect, PANEL)
-		_symbol(kind, rect.position + Vector2(19, 15), KIND_COLOR[kind], 0.46)
-		_text(KIND_NAME[kind], rect.position + Vector2(35,19), 11, MUTED)
-		var available := _available_units(kind)
+	var gap: float = 8.0
+	var width: float = (CREW_BAR.size.x - gap * (DEPARTMENTS.size() - 1)) / DEPARTMENTS.size()
+	for i in range(DEPARTMENTS.size()):
+		var kind: String = DEPARTMENTS[i]
+		var rect := Rect2(CREW_BAR.position.x + i * (width + gap), CREW_BAR.position.y, width, CREW_BAR.size.y)
+		var mine: bool = network.owns(kind)
+		_panel(rect, Color(INK, 0.72), Color(KIND_COLOR[kind], 0.9) if mine and network.active else Color(CREAM, 0.1))
+		_symbol(kind, rect.position + Vector2(14, 14), KIND_COLOR[kind], 0.42)
+		var owner_text: String = KIND_NAME[kind]
+		if network.active:
+			var owner: int = network.owner_of(kind)
+			owner_text = "%s · %s" % [KIND_NAME[kind], "YOU" if mine else (network.player_label(owner).to_upper() if owner>0 else "—")]
+		_text(owner_text, rect.position + Vector2(28,18), 10, CREAM if mine and network.active else MUTED)
 		var total := 0
 		for unit in sim.units:
 			if unit.kind == kind: total += 1
-		_text("%d/%d READY" % [available,total], rect.position + Vector2(247,19), 11, TEAL if available>0 else GOLD)
+		var available := _available_units(kind)
+		_text("%d/%d READY" % [available,total], rect.position + Vector2(rect.size.x - 78,18), 10, TEAL if available>0 else GOLD)
 		var idx := 0
+		var slot: float = (rect.size.x - 12) / maxi(1,total)
 		for unit in sim.units:
 			if unit.kind != kind: continue
-			var x: float = 13+idx*(320.0/maxi(2,total))
-			var card_area := Rect2(rect.position+Vector2(x-3,26),Vector2(320.0/maxi(2,total)-3,46))
+			var x: float = 8 + idx * slot
+			var card_area := Rect2(rect.position + Vector2(x - 2, 22), Vector2(slot - 4, 34))
 			buttons.append({"id":"unit:%d" % unit.id,"rect":card_area})
-			if int(unit.id)==selected_unit: draw_rect(card_area,GOLD,false,2)
-			ResponderArt.draw_portrait(self,rect.position+Vector2(x,31),kind,int(unit.get("appearance",unit.id)),1.5)
-			_text(_short(str(unit.get("crew_name",unit.name)),11),rect.position+Vector2(x+30,45),12,CREAM)
-			var status: String = {"idle":"READY","travel":"EN ROUTE","working":"ON SCENE","return":"CAN DIVERT","rest":"RECOVERING"}.get(unit.state,str(unit.state).to_upper())
+			if int(unit.id)==selected_unit:
+				cv.draw_rect(card_area, Color(GOLD, 0.18))
+				cv.draw_rect(card_area, GOLD, false, 2)
+			ResponderArt.draw_portrait(cv, rect.position + Vector2(x + 2, 26), kind, int(unit.get("appearance",unit.id)), 1.4)
+			_text(_short(str(unit.get("crew_name",unit.name)),8), rect.position + Vector2(x + 30, 38), 13, CREAM)
+			var status: String = {"idle":"READY","travel":"EN ROUTE","working":"ON SCENE","return":"RETURNING","rest":"RESTING"}.get(unit.state,str(unit.state).to_upper())
 			if unit.state=="travel": status="ARRIVE %ds" % ceili(sim.unit_eta(unit))
 			var ready_in: float = maxf(float(unit.get("divert_after",0.0)),float(unit.get("dispatch_guard_until",0.0))) - sim.elapsed
 			if unit.state in ["idle","return"] and ready_in>0: status="READY IN %ds" % ceili(ready_in)
-			_text(status,rect.position+Vector2(x+30,62),9,KIND_COLOR[kind] if unit.state in ["travel","working"] else MUTED)
+			_text(status, rect.position + Vector2(x + 30, 52), 10, KIND_COLOR[kind] if unit.state in ["travel","working"] else MUTED)
 			idx += 1
-	_panel(Rect2(1112,796,304,78),PANEL)
-	var heading: String = "CREW UPDATES"
-	if sim.surge_warning_remaining>0: heading="NEW WAVE IN %ds" % ceili(sim.surge_warning_remaining)
-	elif sim.rush_remaining>0: heading="BUSY WAVE · %ds" % ceili(sim.rush_remaining)
-	elif sim.breather_remaining>0: heading="RECOVERY WINDOW · %ds" % ceili(sim.breather_remaining)
-	_text(heading,Vector2(1130,819),11,TEAL)
-	_wrap(_short(ticker,82),Vector2(1130,842),267,12,CREAM,17)
 
 func _draw_campaign() -> void:
 	_draw_page_header("Your town is counting on you.", "SIX SHIFTS. ONE BEACON BAY.")
@@ -551,7 +710,7 @@ func _draw_campaign() -> void:
 		var rect := Rect2(80+(i%3)*430, 222+(i/3)*221, 402, 192)
 		var is_open := i <= unlocked
 		_panel(rect, PANEL if is_open else Color("122e39"))
-		draw_rect(Rect2(rect.position, Vector2(402,4)), [TEAL,GOLD,BLUE,CORAL,Color("b5a5e9"),GOLD][i])
+		cv.draw_rect(Rect2(rect.position, Vector2(402,4)), [TEAL,GOLD,BLUE,CORAL,Color("b5a5e9"),GOLD][i])
 		_text("%02d" % (i+1), rect.position+Vector2(23,45), 27, GOLD if is_open else MUTED)
 		_text(str(data.get("title","Shift")),rect.position+Vector2(23,83),24,CREAM if is_open else MUTED)
 		_text(_short(str(data.get("subtitle","")),42),rect.position+Vector2(23,112),14,MUTED)
@@ -586,25 +745,36 @@ func _draw_lobby() -> void:
 	_panel(Rect2(400,240,640,452),PANEL)
 	if not network.active:
 		_text("Meet at the station",Vector2(451,293),28,CREAM)
-		_text("Use the same local network. The host starts the shift.",Vector2(452,331),16,MUTED)
+		_text("Same Wi-Fi / LAN, or a shared VPN such as Tailscale.",Vector2(452,331),16,MUTED)
+		_text("TO JOIN: TYPE THE HOST'S IP ADDRESS (shown on the host's screen)",Vector2(452,370),12,TEAL)
 		_button("host","HOST A ROOM",Rect2(452,456,536,54),TEAL,INK)
 		_button("join","JOIN THIS ADDRESS",Rect2(452,524,536,54),PANEL_LIGHT,CREAM)
-		_wrap("Roles are assigned on arrival: dispatch, resources, field coordination, and support. Use your own voice call or the in-game radio pings.",Vector2(452,620),526,14,MUTED,21)
+		_wrap("Everyone plays the same role: you each command your own emergency departments. Talk over your voice call to cover calls that need several crews.",Vector2(452,620),526,14,MUTED,21)
 	else:
 		_text("%d / 4 CREW CONNECTED" % network.roster.size(),Vector2(452,291),21,TEAL)
 		_text(network.status,Vector2(452,326),15,MUTED)
 		var row := 0
 		for peer_id in network.roster:
 			var r: int = int(network.roster[peer_id])
-			_text("%02d   %s" %[row+1,NetworkSession.ROLES[r]],Vector2(452,373+row*42),19,CREAM)
+			_text("%s%s" %[network.player_label(int(peer_id)), "  (you)" if int(peer_id)==multiplayer.get_unique_id() else ""],Vector2(452,373+row*42),19,CREAM)
+			var dx: float = 640
+			for kind in network.departments_for(int(peer_id)):
+				_symbol(kind,Vector2(dx,367+row*42),KIND_COLOR[kind],0.5)
+				_text(str(KIND_SHORT[kind]),Vector2(dx+12,373+row*42),15,KIND_COLOR[kind])
+				dx += 74
 			row += 1
 		if network.hosting:
-			_button("host_start","START SHIFT TOGETHER",Rect2(452,558,536,54),TEAL,INK)
-			_text("Host IP: " + _local_address(),Vector2(452,643),16,MUTED)
+			_button("host_start","START SHIFT TOGETHER",Rect2(452,540,536,54),TEAL,INK)
+			_text("Same network: " + "   ".join(_local_addresses()),Vector2(452,624),16,CREAM)
+			_text(_short(network.internet_status,78),Vector2(452,652),13,TEAL if network.internet_address!="" else MUTED)
+			_text("Port %d (UDP). Allow Beacon Bay through the firewall when Windows asks." % NetworkSession.PORT,Vector2(452,676),12,MUTED)
 		else:
-			_text("Waiting for the dispatcher to begin…",Vector2(452,600),19,GOLD)
+			if network.can_start_session():
+				_button("host_start","START SHIFT TOGETHER",Rect2(452,540,536,54),TEAL,INK)
+			else:
+				_text("Waiting for the first player to start…" if network.dedicated else "Waiting for the host to begin…",Vector2(452,600),19,GOLD)
 	_button("leave_lobby","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
-	_wrap("Dispatcher marks priorities. Resource manager sends crews. Field coordinator scouts and stabilizes. Support lead triggers team boosts. Empty roles are available to the host.",Vector2(400,741),640,16,MUTED,25)
+	_wrap("Departments split automatically: 1 player commands all four, 2 players take two each, 3 players: the host also takes police, 4 players: one each. Anyone can scout, use supplies, use the coffee boost and ping.",Vector2(400,741),640,16,MUTED,25)
 
 func _draw_settings() -> void:
 	_draw_page_header("Make yourself comfortable.", "SETTINGS & OPTIONAL RESEARCH")
@@ -643,10 +813,10 @@ func _draw_help() -> void:
 	_panel(Rect2(320,142,800,627),INK,Color("355966"))
 	_text("A good call changes everything.",Vector2(365,202),30,CREAM)
 	var tips := [
-		["01", "Choose a call", "Choose a numbered map marker. A crew needs time to travel AND finish its work. Compare the route and projected safety margin."],
-		["02", "Send the right team", "1 / 2 / 3 highlights a crew type. Hover a station or vehicle, then click a specific map crew. Check its route and press ENTER to send."],
-		["03", "Contain the pressure", "Q reveals an uncertain report and buys time; scouting then recharges. E spends a limited supply for +18 seconds and faster, safer work."],
-		["04", "Watch your people", "Names appear when you hover or select. Crew cards locate people on the map. SPACE rallies the team; F opens a rescue close-up."]
+		["01", "Pick a crew", "Click a station, a vehicle on the road or a crew card. 1-4 picks a free crew of that type. In co-op you only command your own departments."],
+		["02", "Click the call", "Hover a call to see whether the crew makes it IN TIME, then click it to send. Shortcut: hover a call and press 1-4 to send the nearest fire / medic / engineer / police crew."],
+		["03", "Scout and supply", "Q reveals what a ? call needs. E sends supplies to a crew already on scene: +18 seconds and faster work."],
+		["04", "Stay calm", "SPACE: coffee boost, every crew is faster for 20 seconds. Right-click or ESC clears your selection. F opens a close-up of the selected call."]
 	]
 	for i in range(tips.size()):
 		var y := 257+i*105
@@ -689,7 +859,7 @@ func _draw_page_header(title: String, eyebrow: String) -> void:
 	_text("BEACON BAY",Vector2(1172,52),22,CREAM)
 
 func _panel(rect: Rect2, color: Color = PANEL, border: Color = Color.TRANSPARENT) -> void:
-	draw_style_box(_style(color,border),rect)
+	cv.draw_style_box(_style(color,border),rect)
 
 func _style(color: Color, border: Color = Color.TRANSPARENT) -> StyleBoxFlat:
 	var box := StyleBoxFlat.new()
@@ -701,7 +871,7 @@ func _style(color: Color, border: Color = Color.TRANSPARENT) -> StyleBoxFlat:
 	return box
 
 func _button(id: String, text: String, rect: Rect2, bg: Color = PANEL_LIGHT, fg: Color = CREAM, font_size: int = 17) -> void:
-	var hovered := rect.has_point(get_global_mouse_position())
+	var hovered := rect.has_point(get_local_mouse_position())
 	_panel(rect,bg.lightened(0.10) if hovered else bg,fg*Color(1,1,1,0.34) if hovered else Color.TRANSPARENT)
 	if text != "":
 		var width := font.get_string_size(text,HORIZONTAL_ALIGNMENT_LEFT,-1,font_size).x
@@ -709,7 +879,7 @@ func _button(id: String, text: String, rect: Rect2, bg: Color = PANEL_LIGHT, fg:
 	buttons.append({"id":id,"rect":rect})
 
 func _text(text: String, pos: Vector2, size: int = 18, color: Color = CREAM) -> void:
-	draw_string(font,pos,text,HORIZONTAL_ALIGNMENT_LEFT,-1,size,color)
+	cv.draw_string(font,pos,text,HORIZONTAL_ALIGNMENT_LEFT,-1,size,color)
 
 func _wrap(text: String, pos: Vector2, width: float, size: int = 18, color: Color = CREAM, line_height: float = 27) -> void:
 	var line := ""
@@ -723,62 +893,77 @@ func _wrap(text: String, pos: Vector2, width: float, size: int = 18, color: Colo
 	_text(line,Vector2(pos.x,y),size,color)
 
 func _bar(rect: Rect2, ratio: float, color: Color) -> void:
-	draw_rect(rect,Color("0b242e"))
-	draw_rect(Rect2(rect.position,Vector2(rect.size.x*clampf(ratio,0,1),rect.size.y)),color)
+	cv.draw_rect(rect,Color("0b242e"))
+	cv.draw_rect(Rect2(rect.position,Vector2(rect.size.x*clampf(ratio,0,1),rect.size.y)),color)
 
 func _symbol(kind: String, center: Vector2, color: Color, s: float = 1.0) -> void:
 	match kind:
+		"police":
+			cv.draw_rect(Rect2(center+Vector2(-9,-11)*s,Vector2(18,14)*s),color)
+			cv.draw_colored_polygon(PackedVector2Array([center+Vector2(-9,3)*s,center+Vector2(9,3)*s,center+Vector2(0,13)*s]),color)
+			cv.draw_rect(Rect2(center+Vector2(-3,-6)*s,Vector2(6,6)*s),INK)
 		"medic","medical":
-			draw_rect(Rect2(center+Vector2(-4,-12)*s,Vector2(8,24)*s),color)
-			draw_rect(Rect2(center+Vector2(-12,-4)*s,Vector2(24,8)*s),color)
+			cv.draw_rect(Rect2(center+Vector2(-4,-12)*s,Vector2(8,24)*s),color)
+			cv.draw_rect(Rect2(center+Vector2(-12,-4)*s,Vector2(24,8)*s),color)
 		"fire":
 			var pts := PackedVector2Array([Vector2(-10,10),Vector2(-12,0),Vector2(-5,-8),Vector2(-3,-2),Vector2(3,-16),Vector2(6,-7),Vector2(12,2),Vector2(9,11)])
 			for i in range(pts.size()): pts[i]=pts[i]*s+center
-			draw_colored_polygon(pts,color)
-			draw_rect(Rect2(center+Vector2(-3,2)*s,Vector2(6,9)*s),GOLD)
+			cv.draw_colored_polygon(pts,color)
+			cv.draw_rect(Rect2(center+Vector2(-3,2)*s,Vector2(6,9)*s),GOLD)
 		"engineer","power":
-			draw_line(center+Vector2(-9,11)*s,center+Vector2(8,-8)*s,color,6*s)
-			draw_line(center+Vector2(1,-12)*s,center+Vector2(7,-5)*s,color,5*s)
-			draw_line(center+Vector2(12,-1)*s,center+Vector2(7,-5)*s,color,5*s)
+			cv.draw_line(center+Vector2(-9,11)*s,center+Vector2(8,-8)*s,color,6*s)
+			cv.draw_line(center+Vector2(1,-12)*s,center+Vector2(7,-5)*s,color,5*s)
+			cv.draw_line(center+Vector2(12,-1)*s,center+Vector2(7,-5)*s,color,5*s)
 		"flood":
 			for i in range(3):
-				draw_line(center+Vector2(-12,-7+i*7)*s,center+Vector2(-4,-10+i*7)*s,color,3*s)
-				draw_line(center+Vector2(-4,-10+i*7)*s,center+Vector2(5,-6+i*7)*s,color,3*s)
-				draw_line(center+Vector2(5,-6+i*7)*s,center+Vector2(12,-9+i*7)*s,color,3*s)
+				cv.draw_line(center+Vector2(-12,-7+i*7)*s,center+Vector2(-4,-10+i*7)*s,color,3*s)
+				cv.draw_line(center+Vector2(-4,-10+i*7)*s,center+Vector2(5,-6+i*7)*s,color,3*s)
+				cv.draw_line(center+Vector2(5,-6+i*7)*s,center+Vector2(12,-9+i*7)*s,color,3*s)
 		_:
-			draw_line(center+Vector2(-10,0)*s,center+Vector2(-3,8)*s,color,4*s)
-			draw_line(center+Vector2(-3,8)*s,center+Vector2(12,-9)*s,color,4*s)
+			cv.draw_line(center+Vector2(-10,0)*s,center+Vector2(-3,8)*s,color,4*s)
+			cv.draw_line(center+Vector2(-3,8)*s,center+Vector2(12,-9)*s,color,4*s)
 
 func _overlay() -> void:
-	draw_rect(Rect2(0,0,1440,900),Color(0.025,0.08,0.11,0.92))
+	cv.draw_rect(Rect2(-UI_OFFSET_X,0,1600,900),Color(0.025,0.08,0.11,0.92))
 
 func _star(center: Vector2, radius: float, color: Color) -> void:
 	var points:=PackedVector2Array()
 	for i in range(10):
 		points.append(center+Vector2.from_angle(-PI/2.0+i*PI/5.0)*radius*(1.0 if i%2==0 else 0.45))
-	draw_colored_polygon(points,color)
+	cv.draw_colored_polygon(points,color)
 
 func _input(event: InputEvent) -> void:
+	if dedicated_server: return
 	if tutorial_overlay.visible and tutorial_overlay.handle_input(event):
 		if event is InputEventMouseMotion:
 			town.hover_id=-1
 			tactical_map.clear_hover()
 		get_viewport().set_input_as_handled()
 		return
-	if screen=="game" and tactical_map.visible and tactical_map.handle_input(event):
+	var over_hud_button: bool = false
+	if screen=="game" and event is InputEventMouse:
+		var p: Vector2 = event.position - global_position
+		for b in buttons:
+			if b.rect.has_point(p): over_hud_button = true
+	if screen=="game" and tactical_map.visible and not over_hud_button and tactical_map.handle_input(event):
 		if not tutorial_active:
 			if event is InputEventMouseMotion: research.log_pointer(event.position,event.relative)
 			elif event is InputEventMouseButton and event.pressed: research.log_click(event.position)
+		get_viewport().set_input_as_handled()
+		return
+	var local_pos: Vector2 = (event.position - global_position) if event is InputEventMouse else Vector2.ZERO
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT and screen=="game":
+		_clear_selection()
 		get_viewport().set_input_as_handled()
 		return
 	if event is InputEventMouseMotion:
 		if screen == "game" and not tutorial_active: research.log_pointer(event.position,event.relative)
 		var over := false
 		for b in buttons:
-			if b.rect.has_point(event.position): over = true
-		if screen=="game" and not _map_occluded(event.position) and town.hover_id>=0: over=true
+			if b.rect.has_point(local_pos): over = true
+		if screen=="game" and not _map_occluded(local_pos) and town.hover_id>=0: over=true
 		Input.set_default_cursor_shape(Input.CURSOR_POINTING_HAND if over else Input.CURSOR_ARROW)
-		if screen=="game" and _map_occluded(event.position):
+		if screen=="game" and _map_occluded(local_pos):
 			town.hover_id=-1
 			get_viewport().set_input_as_handled()
 			return
@@ -786,11 +971,11 @@ func _input(event: InputEvent) -> void:
 		if screen == "game" and not tutorial_active: research.log_click(event.position)
 		for i in range(buttons.size()-1,-1,-1):
 			var b: Dictionary=buttons[i]
-			if b.rect.has_point(event.position):
+			if b.rect.has_point(local_pos):
 				_action(b.id)
 				get_viewport().set_input_as_handled()
 				return
-		if screen=="game" and _map_occluded(event.position):
+		if screen=="game" and _map_occluded(local_pos):
 			get_viewport().set_input_as_handled()
 			return
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -798,10 +983,13 @@ func _input(event: InputEvent) -> void:
 			if event.keycode == KEY_ENTER: _action("join")
 			return
 		match event.keycode:
+			KEY_F3:
+				show_perf = not show_perf
 			KEY_F11:
 				DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED if DisplayServer.window_get_mode()==DisplayServer.WINDOW_MODE_FULLSCREEN else DisplayServer.WINDOW_MODE_FULLSCREEN)
 			KEY_ESCAPE:
-				if screen=="game": _action("pause")
+				if screen=="game" and (selected_unit>=0 or selected>=0): _clear_selection()
+				elif screen=="game": _action("pause")
 				elif screen in ["pause","help"]: _action("unpause")
 				elif screen=="settings": _action("settings_back")
 				elif screen in ["campaign","upgrades","lobby"]: _action("title")
@@ -814,6 +1002,8 @@ func _input(event: InputEvent) -> void:
 				if screen=="game": _action("plan:medic")
 			KEY_3:
 				if screen=="game": _action("plan:engineer")
+			KEY_4:
+				if screen=="game": _action("plan:police")
 			KEY_Q:
 				if screen=="game": _action("scout")
 			KEY_E:
@@ -845,10 +1035,11 @@ func _action(id: String) -> void:
 		_select_incident(id.trim_prefix("select:").to_int())
 		return
 	if id.begins_with("unit:"):
-		_locate_unit(id.trim_prefix("unit:").to_int())
+		_select_unit(id.trim_prefix("unit:").to_int())
 		return
 	if id.begins_with("plan:"):
-		_plan_kind(id.trim_prefix("plan:"))
+		if tutorial_active: _plan_kind(id.trim_prefix("plan:"))
+		else: _pick_department(id.trim_prefix("plan:"))
 		return
 	if id=="dispatch_selected":
 		_dispatch_selected()
@@ -903,7 +1094,11 @@ func _action(id: String) -> void:
 			network.join(ip_input.text)
 			ip_input.release_focus()
 			_toast(network.status)
-		"host_start": _begin_shift(unlocked)
+		"host_start":
+			if network.dedicated:
+				network.send_command("start_shift")
+			else:
+				_begin_shift(unlocked)
 		"leave_lobby":
 			if screen=="results": _submit_rating()
 			_leave_network()
@@ -915,9 +1110,9 @@ func _action(id: String) -> void:
 			if network.active and not network.hosting: _toast("The dispatcher controls the shared pause.")
 			else: screen="game"
 		"help":
-			if network.active and not network.hosting: _toast("1/2/3 plan · Enter send · Q scout · E +18s · SPACE rally")
+			if network.active and not network.hosting: _toast("Hover a call + 1-4 sends a crew · Q scout · E supplies · SPACE coffee boost · R ping")
 			else: screen="help"
-		"scout","supply","special","order": _command(id,{"incident_id":selected})
+		"scout","supply","special": _command(id,{"incident_id":selected})
 		"ping":
 			var call:=_incident(selected)
 			_command("ping",{"text":"Support requested at %s"%call.get("name","the station")})
@@ -937,6 +1132,7 @@ func _action(id: String) -> void:
 		"locked": _toast("Finish the previous shift to unlock this part of the story.")
 
 func _begin_tutorial(auto_start: bool = false) -> void:
+	if dedicated_server: return
 	if tutorial_active: return
 	if network.active:
 		_toast("Meet the crew from the solo title screen, outside your shared room.")
@@ -950,7 +1146,7 @@ func _begin_tutorial(auto_start: bool = false) -> void:
 	tutorial.begin(sim)
 	town.sim=sim
 	field_focus.sim=sim
-	field_focus.position=Vector2(40,168)
+	field_focus.position=Vector2(-64,80)
 	town.set_theme(0)
 	screen="game"
 	selected=-1
@@ -1055,9 +1251,9 @@ func _draw_tutorial_highlight(canvas: Node2D) -> void:
 	var accent:=Color(GOLD,.8 if reduced_motion else .72+.25*sin(elapsed_ui*3))
 	if key.begins_with("map_unit:"):
 		var kind: String=key.trim_prefix("map_unit:")
-		if selected_unit>=0 and bool(tactical_map.dispatch_enabled) and tactical_map.has_method("send_hit_rect"):
-			var send_rect: Rect2=tactical_map.send_hit_rect()
-			if send_rect.has_area(): canvas.draw_rect(send_rect.grow(4),accent,false,3)
+		if selected_unit>=0 and selected>=0:
+			var call_rect: Rect2=tactical_map.call_hit_rect(selected)
+			if call_rect.has_area(): canvas.draw_rect(call_rect.grow(4),accent,false,3)
 		elif tactical_map.has_method("hit_regions"):
 			var any_crew: bool=false
 			for hit: Dictionary in tactical_map.hit_regions():
@@ -1070,13 +1266,9 @@ func _draw_tutorial_highlight(canvas: Node2D) -> void:
 				canvas.draw_rect((tactical_map.base_hit_rect(kind) as Rect2).grow(4),accent,false,3)
 	elif key.begins_with("call:"):
 		var ident: int=key.trim_prefix("call:").to_int()
-		var calls: Array=_active_incidents()
-		for i in range(calls.size()):
-			if int(calls[i].id)==ident:
-				canvas.draw_rect(Rect2(1108,142+i*48,312,51),accent,false,3)
 		var call:=_incident(ident)
 		if not call.is_empty():
-			var point: Vector2=map_clip.position+call.pos*TownView.MAP_SIZE*2
+			var point: Vector2=map_clip.position+call.pos*TownView.MAP_SIZE*MAP_SCALE
 			canvas.draw_rect(Rect2(point-Vector2(23,67),Vector2(46,47)),accent,false,3)
 	else:
 		for button in buttons:
@@ -1084,7 +1276,14 @@ func _draw_tutorial_highlight(canvas: Node2D) -> void:
 				canvas.draw_rect((button.rect as Rect2).grow(4),accent,false,3)
 
 func _begin_shift(index: int) -> void:
+	_route_cache_until = 0
 	sim.start_shift(clampi(index,0,5))
+	if dedicated_server:
+		orders.clear()
+		result_saved = false
+		screen = "game"
+		print("Dedicated server: Shift 1 started.")
+		return
 	town.set_theme(index)
 	selected=-1
 	selected_unit=-1
@@ -1105,33 +1304,41 @@ func _begin_shift(index: int) -> void:
 	research.set_enabled(research_enabled)
 	research.update_context({"shift":index,"mode":"co_op" if network.active else "solo","role":network.role,"comfort_pace":comfortable})
 	audio.play_cue("shift")
-	_toast("Choose a call, then click a crew on the map. 1 / 2 / 3 highlight crew types." if index==0 else ticker)
+	_toast(("You command %s. Choose a call, then click one of your crews." % network.departments_text()) if network.active else ("Choose a call, then click a crew on the map. 1-4 highlight crew types." if index==0 else ticker))
 
 func _finish_shift() -> void:
 	if result_saved: return
 	result_saved=true
 	screen="results"
+	if dedicated_server:
+		print("Dedicated server: Shift 1 ended. Restart the process for another session.")
+		return
 	if sim.won:
 		unlocked=maxi(unlocked,mini(5,sim.shift_index+1))
 		best_scores[str(sim.shift_index)]=maxi(int(best_scores.get(str(sim.shift_index),0)),sim.score)
 		total_rescued+=sim.rescued
-		audio.play_cue("shift")
-	else: audio.play_cue("fail")
+		audio.play_cue("win")
+	else: audio.play_cue("lose")
 	_save_progress()
 
 func _select_incident(id: int) -> void:
 	focus_hold_left=0
 	if screen != "game": return
+	# A crew is selected: clicking a call sends that crew there.
+	if selected_unit>=0:
+		var crew: Dictionary = sim.get_unit(selected_unit)
+		var payload := {"incident_id":id,"kind":str(crew.get("kind","")),"unit_id":selected_unit}
+		if not crew.is_empty() and (not tutorial_active or tutorial.can_action("dispatch",payload)):
+			selected=id
+			_command("dispatch",payload)
+			return
 	if tutorial_active and not tutorial.can_action("select",{"incident_id":id}): return
-	if selected!=id:
-		selected_unit=-1
-		focused_unit=-1
-		focused_unit_left=0
 	selected=id
 	if tutorial_active:
 		tutorial.on_action("select",{"incident_id":id})
 		_sync_tutorial()
-	else: research.log_inspection(id)
+	else:
+		research.log_inspection(id)
 	audio.play_cue("click")
 
 func _cycle_incident() -> void:
@@ -1143,52 +1350,62 @@ func _cycle_incident() -> void:
 	_select_incident(int(calls[idx].id))
 
 func _command(action: String, payload: Dictionary) -> void:
+	_route_cache_until = 0
 	if screen != "game": return
-	if not network.can_do(action):
-		_toast("Your role: %s. Coordinate with the team." % NetworkSession.ROLES[network.role])
+	if not network.can_do(action,-1,payload):
+		var owner: int = network.owner_of(str(payload.get("kind","")))
+		_toast("You command %s. Ask %s to send that crew." % [network.departments_text(), network.player_label(owner) if owner>0 else "a teammate"])
 		return
 	network.send_command(action,payload)
+	if action == "dispatch" and network.active and not network.hosting and sim.running:
+		var id: int = int(payload.get("incident_id", -1))
+		if sim.dispatch(id, str(payload.get("kind", "")), int(payload.get("unit_id", -1))):
+			sim.drain_events()
+			predicted_dispatches.append({"incident_id": id, "kind": str(payload.get("kind", "")), "unit_id": int(payload.get("unit_id", -1)), "until": Time.get_ticks_msec() + 1500})
+			selected_unit = -1
+			selected = id
+			role_filter = ""
+			focused_unit = -1
+			focused_unit_left = 0
 
 func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
+	if action == "start_shift":
+		if dedicated_server and screen == "lobby" and not _dedicated_shift_started and network.can_start_session(_peer_id) and multiplayer.get_peers().has(_peer_id):
+			_dedicated_shift_started = true
+			_begin_shift(0)
+		return
+	_route_cache_until = 0
 	if screen!="game": return
 	if tutorial_active and not tutorial.can_action(action,payload):
 		_toast(str(tutorial.current().objective))
 		return
-	if not network.can_do(action,_peer_id): return
+	if not network.can_do(action,_peer_id,payload): return
 	event_actor = _peer_id
+	var local_command: bool = not network.active or _peer_id==multiplayer.get_unique_id()
 	var id:=int(payload.get("incident_id",-1))
 	var success:=false
 	match action:
 		"dispatch":
-			if network.active and network.roster.size()>1 and int(network.roster.get(_peer_id,0))==1 and not orders.has(id):
-				var denied:={"type":"action_denied","text":"Wait for a dispatch order. Press R to request support.","actor_peer":_peer_id}
-				_handle_game_event(denied)
-				if network.has_method("broadcast_event"): network.call("broadcast_event",denied)
-				event_actor=1
-				return
 			success=sim.dispatch(id,str(payload.get("kind","")),int(payload.get("unit_id",-1)))
 		"scout": success=sim.scout(id)
 		"supply": success=sim.supply(id)
 		"special": success=sim.use_special()
-		"order":
-			var call:=_incident(id)
-			if not call.is_empty():
-				orders[id]=true
-				network.announce("DISPATCH ORDER: %s — send matching crews."%call.name)
-				success=true
-		"ping": network.announce(str(payload.get("text","Help needed"))); success=true
+		"ping": network.announce("%s: %s" % [network.player_label(_peer_id) if network.active else "Radio", str(payload.get("text","Help needed"))]); success=true
 	if success:
-		if action=="dispatch":
+		if action=="dispatch" and local_command:
 			selected_unit=-1
+			selected=id
 			role_filter=""
 			focused_unit=-1
 			focused_unit_left=0
 		if tutorial_active:
 			tutorial.on_action(action,payload,true)
 			_sync_tutorial()
-		elif action in ["order","ping"]: research.log_event(action,payload)
+		elif action=="ping": research.log_event(action,payload)
 	else:
-		_toast("Crew unavailable or already assigned. Check the call's remaining needs." if action=="dispatch" else "Not available yet. Select an active call or let supplies recharge.")
+		var reason: String = "Crew unavailable or already assigned. Check the call's remaining needs." if action=="dispatch" else "Not available yet. Select an active call or let supplies recharge."
+		if local_command: _toast(reason)
+		elif network.has_method("broadcast_event"): network.call("broadcast_event",{"type":"action_denied","text":reason,"actor_peer":_peer_id})
 	_process_events()
 	event_actor = 1
 
@@ -1203,9 +1420,10 @@ func _on_remote_event(event: Dictionary) -> void:
 	_handle_game_event(event)
 
 func _handle_game_event(event: Dictionary) -> void:
+	if dedicated_server: return
 	var type:=str(event.get("type",""))
 	var message:=str(event.get("text",""))
-	if message!="":
+	if message!="" and type!="action_denied":
 		var event_call: Dictionary = _incident(int(event.get("incident_id",-1)))
 		if not event_call.is_empty() and not bool(event_call.get("discovered",true)) and type in ["incident","spawn","incident_spawned","escalated"]:
 			message="Unconfirmed report at %s. Scout before committing." % event_call.name
@@ -1222,7 +1440,7 @@ func _handle_game_event(event: Dictionary) -> void:
 			focus_hold_id=selected
 			focus_hold_left=2.2
 	elif type in ["incident","spawn","incident_spawned","new_incident"]:
-		audio.play_cue("alarm")
+		audio.play_cue("new_call")
 	elif type in ["disruption","warning"]:
 		_toast(message)
 		audio.play_cue("alarm")
@@ -1247,23 +1465,50 @@ func _handle_game_event(event: Dictionary) -> void:
 		var effect: Dictionary = sim.last_action_effect
 		action_feedback="%s: +%ds · safer, faster rescue" % ["Scouted" if type=="scout" else "Supply",roundi(float(effect.get("time_added",0)))]
 		action_feedback_left=9.0
-	elif type=="rally": audio.play_cue("upgrade")
+	elif type=="rally": audio.play_cue("boost")
 	elif type=="dispatch_mismatch":
 		_toast(message)
 		audio.play_cue("fail")
 	elif type=="action_denied" and local_actor: _toast(message)
 
 func _receive_snapshot(data: Dictionary) -> void:
+	_route_cache_until = 0
 	if network.hosting: return
 	var next_screen:=str(data.get("screen","game"))
 	if screen=="results" and next_screen=="game":
 		_submit_rating()
 		result_rating_sent=false
+	var previous_shift: int = sim.shift_index
 	sim.apply_snapshot(data.get("simulation",{}))
+	host_speed = float(data.get("speed", 1.0))
+	var now: int = Time.get_ticks_msec()
+	if _last_snapshot_ms >= 0: _snapshot_gap_ms = lerpf(_snapshot_gap_ms, float(now - _last_snapshot_ms), 0.2)
+	_last_snapshot_ms = now
+	if next_screen == "game" and sim.running:
+		# The snapshot left the host half a round trip ago; catch up to "now".
+		sim.tick(clampf(network.round_trip_ms() * 0.0005, 0.0, 0.15) * host_speed)
+		_reapply_predictions()
+		sim.drain_events()
 	if next_screen in ["game","pause","results","help"]:
 		screen=next_screen
 	orders=data.get("orders",{})
-	town.set_theme(sim.shift_index)
+	# Repainting the town backdrop is expensive; only do it when the shift changes.
+	if sim.shift_index != previous_shift or screen != "game": town.set_theme(sim.shift_index)
+
+# A guest's dispatch moves the crew on their own screen straight away. Until the
+# host's snapshot shows the crew assigned, it is re-applied after every snapshot
+# so the crew doesn't jump back to the station.
+func _reapply_predictions() -> void:
+	var now: int = Time.get_ticks_msec()
+	var keep: Array[Dictionary] = []
+	for p in predicted_dispatches:
+		if now > int(p.until): continue
+		var unit: Dictionary = sim.get_unit(int(p.unit_id))
+		if unit.is_empty(): continue
+		if int(unit.get("target", -1)) == int(p.incident_id) and str(unit.get("state", "")) != "idle": continue
+		sim.dispatch(int(p.incident_id), str(p.kind), int(p.unit_id))
+		keep.append(p)
+	predicted_dispatches = keep
 
 func _leave_network() -> void:
 	network.close()
@@ -1295,6 +1540,7 @@ func _submit_rating() -> void:
 		result_rating_sent=true
 
 func _save_progress(include_session: bool = false) -> void:
+	if dedicated_server: return
 	if tutorial_active or test_mode or (network.active and not network.hosting): return
 	var data:={"version":2,"tutorial_completed":tutorial_completed,"tutorial_seen":tutorial_seen,"unlocked":unlocked,"best_scores":best_scores,"total_rescued":total_rescued,"credits":sim.credits,"upgrades":sim.upgrades,"settings":{"music":music_enabled,"sfx":sfx_enabled,"reduced_motion":reduced_motion,"comfort":comfortable,"research":research_enabled}}
 	if include_session and sim.running and not sim.finished: data["session"]=sim.snapshot()
@@ -1307,6 +1553,7 @@ func _save_progress(include_session: bool = false) -> void:
 		has_resume=data.has("session")
 
 func _load_save() -> void:
+	if dedicated_server: return
 	if not FileAccess.file_exists(SAVE_PATH): return
 	var data=JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))
 	if not data is Dictionary: return
@@ -1370,18 +1617,22 @@ func _call_status(call: Dictionary) -> String:
 	if float(call.get("hazard",0))>.7: return "CRITICAL · SEND HELP"
 	var sent:=0
 	var needed:=0
-	for kind in ["fire","medic","engineer"]:
+	var missing: Array[String] = []
+	for kind in DEPARTMENTS:
 		sent+=_assigned_count(call,kind)
 		needed+=int(call.needs.get(kind,0))
-	if sent>0:
-		return "CREWS EN ROUTE" if sent>=needed else "MORE CREWS NEEDED"
+		if call.discovered and _assigned_count(call,kind)<int(call.needs.get(kind,0)): missing.append(KIND_SHORT[kind])
 	if not call.discovered: return "UNCONFIRMED REPORT"
-	return "ORDER RECEIVED" if orders.has(call.id) else "AWAITING RESPONSE"
+	if not missing.is_empty(): return ("STILL NEEDS " if sent>0 else "NEEDS ") + " + ".join(missing)
+	return "CREWS EN ROUTE"
 
 func _boost_text() -> String:
-	return "SPACE  TEAM BOOST" if sim.special_cooldown<=0 else "TEAM BOOST  ·  %ds"%ceili(sim.special_cooldown)
+	return "COFFEE BOOST" if sim.special_cooldown<=0 else "COFFEE BOOST %ds"%ceili(sim.special_cooldown)
 
 func _toast(message: String) -> void:
+	if dedicated_server:
+		print(message)
+		return
 	toast_text=message
 	toast_left=5.0
 
@@ -1392,10 +1643,15 @@ func _time(seconds: float) -> String:
 func _short(text: String,count: int) -> String:
 	return text if text.length()<=count else text.left(count-1)+"…"
 
-func _local_address() -> String:
+# Every IPv4 address another computer could use to reach this one (home/school LAN, Tailscale/ZeroTier VPN).
+func _local_addresses() -> Array[String]:
+	var found: Array[String] = []
 	for address in IP.get_local_addresses():
-		if address.begins_with("192.168.") or address.begins_with("10."): return address
-	return "127.0.0.1 (same computer)"
+		if address.contains(":") or address.begins_with("127.") or address.begins_with("169.254."): continue
+		if not found.has(address): found.append(address)
+	found.sort_custom(func(a,b): return (0 if a.begins_with("192.168.") else 1) < (0 if b.begins_with("192.168.") else 1))
+	if found.is_empty(): found.append("127.0.0.1 (this computer only)")
+	return found.slice(0,3)
 
 func _celebrate(center: Vector2) -> void:
 	if reduced_motion: return

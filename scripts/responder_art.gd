@@ -13,7 +13,7 @@ static func _line(canvas: CanvasItem, a: Vector2, b: Vector2, color: Color, widt
 	canvas.draw_line(a.floor(), b.floor(), color, maxf(1, floorf(width)), false)
 
 static func uniform(kind: String) -> Color:
-	return {"fire": Color("cf7253"), "medic": Color("66b29d"), "engineer": Color("d7ae55"), "civilian": Color("a39cbd")}.get(kind, Color("81a4a1"))
+	return {"fire": Color("cf7253"), "medic": Color("66b29d"), "engineer": Color("d7ae55"), "police": Color("4f63b0"), "civilian": Color("a39cbd")}.get(kind, Color("81a4a1"))
 
 static func draw_portrait(canvas: CanvasItem, position: Vector2, kind: String, appearance: int, scale: float = 1.0) -> void:
 	var variant: int = absi(appearance)
@@ -44,6 +44,11 @@ static func draw_portrait(canvas: CanvasItem, position: Vector2, kind: String, a
 		_r(canvas, position, scale, 3, 5, 11, 1, helmet.darkened(.18))
 		_r(canvas, position, scale, 6, 2, 1, 3, helmet.lightened(.2))
 		_r(canvas, position, scale, 8, 4, 2, 1, Color("ae7155"))
+	elif kind == "police":
+		_r(canvas, position, scale, 4, 2, 9, 3, Color("27346a"))
+		_r(canvas, position, scale, 3, 5, 11, 1, Color("1d2852"))
+		_r(canvas, position, scale, 7, 3, 2, 1, Color("e7d596"))
+		_r(canvas, position, scale, 9, 13, 2, 2, Color("e7d596"))
 	elif kind == "medic":
 		if variant % 2 == 0:
 			_r(canvas, position, scale, 4, 3, 8, 3, Color("e3ead0"))
@@ -58,7 +63,7 @@ static func draw_person(canvas: CanvasItem, position: Vector2, kind: String, app
 	var suit: Color = uniform(kind)
 	var boots := Color("2c3e47")
 	var pants := Color("365565")
-	var stripe := Color("efcf80") if kind != "medic" else Color("d8ecce")
+	var stripe := Color("d8ecce") if kind == "medic" else (Color("c9d8ef") if kind == "police" else Color("efcf80"))
 	var kneeling: bool = action in ["treat", "repair", "sandbag", "cpr"]
 	var walking: bool = action in ["walk", "carry"]
 	var beat: int = int(time * 7.0 + variant * .7) % 4
@@ -121,6 +126,10 @@ static func draw_person(canvas: CanvasItem, position: Vector2, kind: String, app
 		_r(canvas, position, scale, -4, -15 + dy, 9, 1, helmet.darkened(.18))
 		_r(canvas, position, scale, -2, -17 + dy, 1, 2, helmet.lightened(.20))
 		_r(canvas, position, scale, 0, -16 + dy, 2, 1, Color("a87155") if kind == "fire" else Color("e7dcac"))
+	elif kind == "police":
+		_r(canvas, position, scale, -3, -17 + dy, 6, 2, Color("27346a"))
+		_r(canvas, position, scale, -4, -15 + dy, 8, 1, Color("1d2852"))
+		_r(canvas, position, scale, -1, -17 + dy, 2, 1, Color("e7d596"))
 	elif kind == "medic" and variant % 2 == 0:
 		_r(canvas, position, scale, -3, -16 + dy, 6, 2, Color("e4ead0"))
 		_r(canvas, position, scale, 0, -16 + dy, 1, 2, Color("be655b"))
@@ -257,6 +266,14 @@ static func draw_team(canvas: CanvasItem, origin: Vector2, kind: String, inciden
 			draw_person(canvas, origin + Vector2(21, -2) * scale, kind, appearance + 9, "radio" if phase in ["assess", "hold"] else "treat", time + .4, -1, scale)
 			_r(canvas, origin, scale, -7, -3, 5, 4, Color("e2e8cd"))
 			_r(canvas, origin, scale, -5, -2, 1, 2, Color("bf7065"))
+	elif kind == "police":
+		# Cordon of cones and tape; one officer directs, the partner reports in.
+		for i in range(4):
+			_r(canvas, origin, scale, -14 + i * 9, 1, 3, 3, Color("ee8a52"))
+			_r(canvas, origin, scale, -14 + i * 9, 2, 3, 1, Color("f4e3c0"))
+		_line(canvas, origin + Vector2(-13, -2) * scale, origin + Vector2(15, -2) * scale, Color("efd36b"), scale)
+		draw_person(canvas, origin, kind, appearance, "wave" if phase in ["act", "assess", "hold"] else "radio", time, 1, scale)
+		draw_person(canvas, origin + Vector2(19, 1) * scale, kind, appearance + 9, "radio" if phase != "secure" else "walk", time + .5, -1, scale)
 	else:
 		if incident_kind == "flood":
 			_r(canvas, origin, scale, 4, -5, 7, 6, Color("749ca1"))

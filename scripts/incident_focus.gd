@@ -117,7 +117,7 @@ func _draw() -> void:
 			eta = minf(eta, float(unit.get("remaining", 0)))
 		_text("%d crew%s dispatched · first arrival in %ds" % [travelling.size(), "s" if travelling.size() > 1 else "", ceili(eta)], Vector2(12, 201), 12, CREAM)
 	else:
-		_text("No crews assigned · dispatch from the call panel", Vector2(12, 201), 12, Color("d2c7aa"))
+		_text("No crews yet · pick a crew, then click this call", Vector2(12, 201), 12, Color("d2c7aa"))
 	
 	_r(2, 207, panel_size.x - 4, 2, Color("102a35"))
 	if progress > 0:
@@ -188,6 +188,20 @@ func _draw_scene(kind: String, progress: float, hazard: float, resolved: bool) -
 		_r(199, 96, 4, 10, Color("526b64"))
 		_r(299, 87, 17, 28, Color("73948b"))
 		_r(297, 85, 21, 4, Color("c3c6a5"))
+	elif kind == "police":
+		# A junction with two bumped cars.
+		_r(2, 123, 460, 43, Color("6f7f7d"))
+		for x in range(16, 460, 40):
+			_r(x, 143, 20, 2, Color("d9d2b0"))
+		_r(150, 120, 54, 20, Color("b98a6d"))
+		_r(156, 112, 36, 10, Color("9c7158"))
+		_r(160, 114, 12, 6, Color("8fb2b8"))
+		_r(212, 126, 54, 20, Color("7f98a3"))
+		_r(222, 118, 34, 10, Color("6a8390"))
+		_r(238, 120, 12, 6, Color("a9c7c9"))
+		if not resolved:
+			for i in range(3):
+				_r(196 + i * 6, 108 - i * 5, 3, 3, Color(.85, .85, .8, .6))
 	elif kind == "flood":
 		_r(121, 91, 216, 7, Color("c8b58b"))
 		for i in range(8):

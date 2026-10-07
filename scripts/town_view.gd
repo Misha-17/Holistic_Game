@@ -191,7 +191,7 @@ func _paint_static(canvas: Node2D) -> void:
 	_building(235, 86, 67, 43, 2, "clinic")
 	_building(348, 89, 75, 41, 2, "power")
 	_building(466, 83, 44, 42, 1, "house")
-	_building(109, 168, 37, 40, 0, "house")
+	_building(109, 168, 37, 40, 2, "police")
 	_building(157, 173, 40, 35, 2, "library")
 	_building(239, 169, 59, 39, 1, "school")
 	_building(350, 169, 29, 39, 0, "house")
@@ -281,6 +281,8 @@ func _building(x: int, y: int, w: int, h: int, roof: int, kind: String) -> void:
 		wall = Color("d5aa85")
 	elif kind == "power":
 		wall = Color("b4c1b1")
+	elif kind == "police":
+		wall = Color("c3c9df")
 	_r(x + 4, y + 7, w, h, SHADOW)
 	_r(x + 2, y + h - 4, w + 1, 8, Color("b9bca1"))
 	_r(x + 2, y + 12, w - 2, h - 10, INK)
@@ -353,6 +355,12 @@ func _building(x: int, y: int, w: int, h: int, roof: int, kind: String) -> void:
 			_r(x + 9, y + 17, w - 22, 4, Color("977657"))
 			for i in range(5):
 				_r(x + 11 + i * 3, y + 18, 1, 2, CREAM)
+		elif kind == "police":
+			_r(x + 6, y + 3, w - 15, 8, Color("2f3f72"))
+			_r(x + 8, y + 5, w - 19, 4, Color("e8e4cf"))
+			for i in range(3):
+				_r(x + 10 + i * 6, y + 6, 4, 1, Color("2f3f72"))
+			_r(x + w - 9, y - 2, 3, 3, Color("7ecdd4"))
 
 func _window(x: int, y: int, warm: bool) -> void:
 	_r(x - 1, y - 1, 7, 8, Color("b09e7e"))
@@ -730,7 +738,7 @@ func _draw_unit(unit: Dictionary) -> void:
 	var p: Vector2 = _unit_position(unit)
 	var kind: String = unit.get("kind", "fire")
 	var state: String = unit.get("state", "idle")
-	var color: Color = {"fire": Color("cf725a"), "medic": Color("e4ddba"), "engineer": Color("e0b768")}.get(kind, Color("7fab9a"))
+	var color: Color = {"fire": Color("cf725a"), "medic": Color("e4ddba"), "engineer": Color("e0b768"), "police": Color("5f72c4")}.get(kind, Color("7fab9a"))
 	var vertical: bool = false
 	if state == "travel" or state == "return":
 		var vector: Vector2 = unit.get("heading", Vector2.RIGHT)
@@ -753,8 +761,8 @@ func _draw_unit(unit: Dictionary) -> void:
 			var appearance: int = int(unit.get("appearance", unit.get("id", 0)))
 			var worked: float = float(unit.get("work_elapsed", 2.0))
 			var phase: String = unit.get("work_phase", "act")
-			var scene: Vector2 = {"fire": Vector2(-20, 14), "medic": Vector2(3, 22), "engineer": Vector2(-7, 27)}.get(kind, Vector2.ZERO)
-			var parking: Vector2 = {"fire": Vector2(-36, 22), "medic": Vector2(34, 29), "engineer": Vector2(-28, 32)}.get(kind, Vector2.ZERO)
+			var scene: Vector2 = {"fire": Vector2(-20, 14), "medic": Vector2(3, 22), "engineer": Vector2(-7, 27), "police": Vector2(16, 10)}.get(kind, Vector2.ZERO)
+			var parking: Vector2 = {"fire": Vector2(-36, 22), "medic": Vector2(34, 29), "engineer": Vector2(-28, 32), "police": Vector2(36, 6)}.get(kind, Vector2.ZERO)
 			var extra := Vector2(index * -5, index * 11)
 			var parked_position: Vector2 = p + (parking + extra).lerp(Vector2.ZERO, 1 - minf(1, worked * 2))
 			parked_position = parked_position.clamp(Vector2(10, 8), MAP_SIZE - Vector2(10, 9))
@@ -775,7 +783,7 @@ func _draw_incident(incident: Dictionary, layer: int = 0) -> void:
 	var p: Vector2 = incident.get("pos", Vector2.ONE * .5) * MAP_SIZE
 	var kind: String = incident.get("kind", "fire")
 	var discovered: bool = incident.get("discovered", true)
-	var color: Color = {"fire": Color("ed936b"), "medical": Color("c7dcb1"), "flood": Color("7bbec9"), "power": Color("edd083")}.get(kind, Color("e8c485"))
+	var color: Color = {"fire": Color("ed936b"), "medical": Color("c7dcb1"), "flood": Color("7bbec9"), "power": Color("edd083"), "police": Color("b3bbef")}.get(kind, Color("e8c485"))
 	if not discovered:
 		color = Color("c9c3d1")
 	var ident: int = incident.get("id", -1)
@@ -796,6 +804,13 @@ func _draw_incident(incident: Dictionary, layer: int = 0) -> void:
 		if int(elapsed * 5 + ident) % 4 == 0:
 			_r(p.x - 8, p.y - 3, 2, 1, Color("f4daa0"))
 			_r(p.x + 8, p.y + 1, 1, 2, Color("f4daa0"))
+	elif kind == "police" and discovered and layer != 2:
+		# Two bumped cars behind a cone line.
+		_car(p + Vector2(-9, 8), Color("b98a6d"), false, false, 0)
+		_car(p + Vector2(6, 11), Color("7f98a3"), false, false, 0)
+		for i in range(4):
+			_r(p.x - 14 + i * 9, p.y + 18, 3, 3, Color("ee8a52"))
+			_r(p.x - 14 + i * 9, p.y + 19, 3, 1, Color("f4e3c0"))
 	elif kind == "medical" and discovered and layer != 2:
 		var has_medic: bool = false
 		for unit in sim.units:
@@ -828,6 +843,10 @@ func _draw_incident(incident: Dictionary, layer: int = 0) -> void:
 		_r(bx + 7, by + 8, 2, 3, Color("f2d4a0"))
 	elif kind == "power":
 		_bolt(bx + 5, by + 3, Color("6f6547"))
+	elif kind == "police":
+		_r(bx + 4, by + 3, 8, 6, Color("36457e"))
+		_poly([Vector2(bx + 4, by + 9), Vector2(bx + 12, by + 9), Vector2(bx + 8, by + 12)], Color("36457e"))
+		_r(bx + 7, by + 5, 2, 2, Color("e8e4cf"))
 	else:
 		for i in range(3):
 			_r(bx + 3, by + 4 + i * 3, 9, 1, Color("305c73"))

@@ -4,7 +4,7 @@ extends RefCounted
 
 
 const Campaign = preload("res://scripts/campaign.gd")
-enum Step { WELCOME, SELECT_MEDICAL, DISPATCH_MEDIC, WATCH_MEDIC, SCOUT_FIRE, READ_MARGIN, SUPPLY_FIRE, DISPATCH_FIRE, DISPATCH_ENGINEER, RALLY, WATCH_TEAM, COMPARE_CALLS, CHALLENGE, OUTCOME, COMPLETE }
+enum Step { WELCOME, SELECT_MEDICAL, DISPATCH_MEDIC, WATCH_MEDIC, SCOUT_FIRE, READ_MARGIN, DISPATCH_FIRE, SUPPLY_FIRE, DISPATCH_ENGINEER, RALLY, WATCH_TEAM, COMPARE_CALLS, CHALLENGE, OUTCOME, COMPLETE }
 const STAGE_COUNT: int = 15
 const CAST: Dictionary = {"fire": "Bram", "medic": "Elio", "engineer": "Tess"}
 var sim: RescueSimulation
@@ -101,7 +101,6 @@ func can_action(action: String, payload: Dictionary = {}) -> bool:
 		
 		
 		if int(payload.get("unit_id",-1))!=_selected_unit_id or _selected_unit_id<0: return false
-		if _action_incident(action,payload)!=_selected_unit_call: return false
 		var unit: Dictionary = _unit(_selected_unit_id)
 		if unit.is_empty() or normalized!="dispatch:"+str(unit.kind): return false
 	if stage == Step.CHALLENGE:
@@ -173,41 +172,44 @@ func current() -> Dictionary:
 			card.objective = "Read the route. Match the crew. Leave time for the work."
 			card.can_advance = active
 		Step.SELECT_MEDICAL:
-			_set_card(card,"Nova","Start with the place that needs help","Select Beacon Clinic on the map or in the call list. Its medical symbol tells you the skill needed; the countdown is time remaining before the call fails.","Select Beacon Clinic.",_medical_id,"call:%d"%_medical_id,["select"])
+			_set_card(card,"Nova","Start with the place that needs help","Click Beacon Clinic. The icons under it show which crews it needs; the number is the time left.","Click Beacon Clinic.",_medical_id,"call:%d"%_medical_id,["select"])
 		Step.DISPATCH_MEDIC:
-			_set_card(card,"Elio","Pick the crew on the map","2 highlights medics; it does not choose one. Click my ambulance marker on the map to preview its route and safety margin. Then Enter sends me. A wrong specialist wastes a real trip.","Press 2, click Elio on the map, check the route, then Enter.",_medical_id,"map_unit:medic",["select","select_unit","dispatch:medic"])
+			_set_card(card,"Elio","Pick the crew on the map","Click my medic station (the white cross) to pick me. You'll see my route. Then click the clinic again to send me.","Click Elio's station, then click the clinic.",_medical_id,"map_unit:medic",["select","select_unit","dispatch:medic"])
 			card.metrics = _best_option(_medical_id)
 		Step.WATCH_MEDIC:
-			_set_card(card,"Elio","Arrival is not completion","Follow the ambulance's route, then watch us step out and work. Arriving slows the call's countdown; the rescue succeeds only when the work bar fills.","Watch travel, arrival and the completed rescue.",_medical_id,"map",["select","select_unit"])
+			_set_card(card,"Elio","Arrival is not completion","Follow the ambulance's route, then watch us step out and work. The rescue only counts when the work bar fills before the countdown reaches zero.","Watch travel, arrival and the completed rescue.",_medical_id,"map",["select","select_unit"])
 			card.can_advance = _is_resolved(_medical_id)
 			card.next_label = "READ A REPORT"
 			if card.can_advance:
 				card.title = "Now Elio can help someone else"
 				card.text = "The rescue is complete. Elio can take another call while returning. Until the work finished, he was committed here: there isn't an unlimited supply of crews."
 		Step.SCOUT_FIRE:
-			_set_card(card,"Bram","A question mark is missing information","This bakery report is unconfirmed. Guessing can send the wrong specialist. Q reveals the needs, reduces danger and adds time. Scouting then needs eight seconds to recharge across all calls.","Scout the bakery with Q before committing a crew.",_fire_id,"scout",["select","select_unit","scout"])
+			_set_card(card,"Bram","A question mark is missing information","The ? means nobody knows what the bakery needs. Q sends the scout team to find out. Scouting only reveals; it doesn't buy time.","Select the bakery and press Q.",_fire_id,"scout",["select","select_unit","scout"])
 		Step.READ_MARGIN:
-			_set_card(card,"Bram","Known needs. A risky finish.","Scouting confirmed a fire and added %ds. Press 1, then click my map marker. Safety margin predicts time left after travel and work, including the slower countdown on scene. A negative margin needs help."%roundi(_scout_added),"Click Bram on the map; compare the route and safety margin.",_fire_id,"map_unit:fire",["select","select_unit"])
-			card.can_advance = _selected_unit_id>=0 and _selected_unit_call==_fire_id
-			card.next_label = "BUY SOME TIME"
+			_set_card(card,"Bram","Known needs. A risky finish.","It's a fire. Click my fire station to pick me and look at the margin: the time left over after travel and work. Negative means we'll be late without help.","Click Bram's fire station and read the margin.",_fire_id,"map_unit:fire",["select","select_unit"])
+			card.can_advance = _selected_unit_id>=0
+			card.next_label = "SEND BRAM"
 			card.metrics = _best_option(_fire_id)
 		Step.SUPPLY_FIRE:
-			_set_card(card,"Bram","Supplies change the outcome","Bram's projected safety margin is %s. E spends one crate: +18 seconds, lower danger and faster work. Supplies are limited; use them where the predicted finish is at risk."%_seconds(_supply_margin_before),"Spend one supply on the bakery with E.",_fire_id,"supply",["select","select_unit","supply"])
+			if _crew_on_scene(_fire_id):
+				_set_card(card,"Bram","Supplies help a crew on scene","I'm at the bakery, but the margin is %s. E sends a crate to the crew on scene: +18 seconds, less danger, faster work. Supplies only work once a crew is there."%_seconds(float(sim.incident_estimate(_fire_id).get("margin",0.0))),"Press E to send a supply to the bakery.",_fire_id,"supply",["select","select_unit","supply"])
+			else:
+				_set_card(card,"Bram","On my way","Watch me drive to the bakery. Supplies can only go to a crew that is already on scene.","Wait for Bram to arrive.",_fire_id,"map",["select","select_unit"])
 			card.metrics = {"margin_before":_supply_margin_before,"deadline_before":_supply_before}
 		Step.DISPATCH_FIRE:
 			var option: Dictionary = _best_option(_fire_id)
-			_set_card(card,"Bram","The same route. A safer rescue.","The crate added %ds. Safety margin changed from %s to %s because it also speeds up work. Press 1 to highlight fire crews, click me on the map and confirm with Enter or the map's SEND button."%[roundi(_supply_added),_seconds(_supply_margin_before),_seconds(float(option.get("margin",0.0)))],"Click Bram's map marker, then Enter. Supplies used: one.",_fire_id,"map_unit:fire",["select","select_unit","dispatch:fire"])
-			card.metrics = option.merged({"margin_before":_supply_margin_before,"supply_added":_supply_added})
+			_set_card(card,"Bram","Send me anyway","Even late, it's better to be on the way. Pick me at the fire station, then click the bakery. We'll fix the margin once I'm there.","Click Bram's station, then the bakery.",_fire_id,"map_unit:fire",["select","select_unit","dispatch:fire"])
+			card.metrics = option
 		Step.DISPATCH_ENGINEER:
-			_set_card(card,"Tess","A different skill can work in parallel","Bram is committed to the bakery. Select the workshop, press 3 and click my engineer marker on the map. Check my route, then Enter. Changing calls clears the crew choice so each trip is deliberate.","Select Harbor Workshop, click Tess on the map, then Enter.",_engineer_id,"map_unit:engineer",["select","select_unit","dispatch:engineer"])
+			_set_card(card,"Tess","A different skill can work in parallel","Bram is busy at the bakery. Pick me at the engineer station, then click Harbor Workshop to send me.","Click Tess's station, then Harbor Workshop.",_engineer_id,"map_unit:engineer",["select","select_unit","dispatch:engineer"])
 		Step.RALLY:
-			_set_card(card,"Nova","One boost helps both crews","Bram and Tess are travelling together. Rally makes every crew move and work faster for twenty seconds. Use it when several responses need help, rather than spending it on an empty town.","Press Space to rally the two active crews.",_fire_id,"special",["select","select_unit","special"])
+			_set_card(card,"Nova","One boost helps both crews","Bram and Tess are on the road. The coffee boost makes every crew move and work faster for twenty seconds. Save it for when several calls need help.","Press Space for a coffee boost.",_fire_id,"special",["select","select_unit","special"])
 		Step.WATCH_TEAM:
 			_set_card(card,"Tess","Two routes. Two jobs getting done.","Bram contains the bakery while I repair the workshop. Each route takes time and each rescue still needs work after arrival. Both calls must finish.","Watch both calls resolve.",_engineer_id,"map",["select","select_unit"])
 			card.can_advance = _is_resolved(_fire_id) and _is_resolved(_engineer_id)
 			card.next_label = "TRY YOUR OWN PLAN"
 		Step.COMPARE_CALLS:
-			_set_card(card,"Tess","The shortest countdown isn't the whole story","Two repairs need one engineer. Select each call, then click me on the map again. Compare margins: a longer countdown can hide more travel and work. You have one supply and Rally available.","Compare both map routes, then choose your plan.",-1,"map_unit:engineer",["select","select_unit"])
+			_set_card(card,"Tess","The shortest countdown isn't the whole story","Two repairs, one engineer. Pick me and hover each call to compare margins: a longer countdown can hide a longer drive.","Compare both calls, then choose.",-1,"map_unit:engineer",["select","select_unit"])
 			card.can_advance = true
 			card.next_label = "MY TURN"
 			card.metrics = _challenge_metrics()
@@ -224,7 +226,7 @@ func current() -> Dictionary:
 			card.allowed = ["select"]
 		Step.COMPLETE:
 			card.title = "Ready to read the town"
-			card.text = "Read the call, click a crew on the map and check its route. Number keys only highlight crew types. Protect risky finishes with supplies or Rally, then confirm your dispatch. Watch for crews you can divert."
+			card.text = "Pick a crew (station or vehicle), then click the call. Q scouts a ? call. E helps a crew on scene. Space is the coffee boost. Shortcut: hover a call and press 1-4 to send the nearest crew of that type. Right-click clears your selection."
 			card.objective = "Practice complete. Your campaign progress stays untouched."
 			card.next_label = "READY FOR BEACON BAY"
 			card.can_advance = active
@@ -249,13 +251,13 @@ func _enter_stage(next_stage: int) -> void:
 			_fire_id = _create_call("fire","Moonrise Bakery","Unconfirmed trouble at the bakery","fire",65.0)
 			var call: Dictionary = sim.get_incident(_fire_id)
 			call.hazard=0.48; call.hazard_stage=1; call.highest_hazard_stage=1
-			_set_margin(_fire_id,-16.0)
+			_set_margin(_fire_id,-9.0)
 			call.discovered=false
 			call.bonus="Confirmed: the bakery needs one fire crew."
 			_scout_before=float(call.deadline)
 		Step.SUPPLY_FIRE:
 			_supply_before=float(sim.get_incident(_fire_id).deadline)
-			_supply_margin_before=float(_best_option(_fire_id).get("margin",0.0))
+			_supply_margin_before=float(sim.incident_estimate(_fire_id).get("margin",0.0))
 		Step.DISPATCH_ENGINEER:
 			_engineer_id=_create_call("power","Harbor Workshop","Workshop power failure","engineer",18.0)
 		Step.RALLY:
@@ -271,10 +273,10 @@ func _evaluate_action_stage() -> void:
 			if _has_crew(_medical_id,"medic"): _enter_stage(Step.WATCH_MEDIC)
 		Step.SCOUT_FIRE:
 			if bool(sim.get_incident(_fire_id).get("scouted",false)): _enter_stage(Step.READ_MARGIN)
-		Step.SUPPLY_FIRE:
-			if int(sim.get_incident(_fire_id).get("supply_count",0))>0: _enter_stage(Step.DISPATCH_FIRE)
 		Step.DISPATCH_FIRE:
-			if _has_crew(_fire_id,"fire"): _enter_stage(Step.DISPATCH_ENGINEER)
+			if _has_crew(_fire_id,"fire"): _enter_stage(Step.SUPPLY_FIRE)
+		Step.SUPPLY_FIRE:
+			if int(sim.get_incident(_fire_id).get("supply_count",0))>0: _enter_stage(Step.DISPATCH_ENGINEER)
 		Step.DISPATCH_ENGINEER:
 			if _has_crew(_engineer_id,"engineer"): _enter_stage(Step.RALLY)
 		Step.RALLY:
@@ -301,7 +303,7 @@ func _prepare_cast() -> void:
 	var seen: Array[String]=[]
 	for unit: Dictionary in sim.units:
 		var kind: String=str(unit.kind)
-		if kind in seen: continue
+		if kind in seen or not CAST.has(kind): continue
 		seen.append(kind)
 		unit.crew_name=CAST[kind]; unit.name=CAST[kind]
 		practice_units.append(unit)
@@ -315,7 +317,7 @@ func _create_call(kind: String, location_name: String, title: String, crew: Stri
 			call.pos=location.pos; call.location_index=Campaign.locations().find(location)
 			break
 	call.kind=kind; call.name=location_name; call.title=title; call.severity=1
-	call.needs={"fire":0,"medic":0,"engineer":0}; call.needs[crew]=1
+	call.needs={"fire":0,"medic":0,"engineer":0,"police":0}; call.needs[crew]=1
 	call.deadline=120.0; call.max_deadline=120.0; call.work_duration=work_time; call.people=3
 	call.discovered=true; call.hazard=0.16; call.hazard_stage=0; call.highest_hazard_stage=0
 	call.tutorial=true; call.bonus="The scene is ready for the matching crew."
@@ -349,8 +351,14 @@ func _challenge_metrics() -> Dictionary:
 func _watch_is_running() -> bool:
 	if not active or sim==null: return false
 	if stage==Step.WATCH_MEDIC: return _is_open(_medical_id)
+	if stage==Step.SUPPLY_FIRE: return _is_open(_fire_id) and not _crew_on_scene(_fire_id)
 	if stage==Step.WATCH_TEAM: return _is_open(_fire_id) or _is_open(_engineer_id)
 	if stage==Step.CHALLENGE: return _challenge_started and not _challenge_has_failed() and not _challenge_is_resolved()
+	return false
+
+func _crew_on_scene(id: int) -> bool:
+	for unit: Dictionary in sim.units:
+		if int(unit.target)==id and unit.state=="working": return true
 	return false
 
 func _challenge_is_resolved() -> bool:
@@ -386,7 +394,7 @@ func _normalize_action(action: String, payload: Dictionary) -> String:
 
 func _stage_crew_kind() -> String:
 	if stage==Step.DISPATCH_MEDIC: return "medic"
-	if stage in [Step.READ_MARGIN,Step.SUPPLY_FIRE,Step.DISPATCH_FIRE]: return "fire"
+	if stage in [Step.READ_MARGIN,Step.DISPATCH_FIRE]: return "fire"
 	if stage in [Step.DISPATCH_ENGINEER,Step.COMPARE_CALLS]: return "engineer"
 	return ""
 

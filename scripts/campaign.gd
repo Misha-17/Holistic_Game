@@ -4,12 +4,12 @@ extends RefCounted
 
 static func shifts() -> Array[Dictionary]:
 	var scenarios: Array[Dictionary] = [
-		{"title": "FIRST LIGHT", "subtitle": "A small town. A very big heart.", "weather": "clear", "target": 30, "introduction": "Select a call. Send the matching crew. Bring everyone home.", "accent": "66dbc0", "interval": 23.0, "max_active": 4, "weights": [4, 5, 1, 2], "disruptions": [{"at": 112.0, "type": "market", "duration": 35.0, "text": "Morning market • busy streets slow travel"}, {"at": 224.0, "type": "clear", "duration": 25.0, "text": "Neighbors lend a hand • crews work faster"}]},
-		{"title": "MARKET DAY", "subtitle": "The festival is counting on you.", "weather": "golden", "target": 42, "introduction": "Some calls need two teams. Scout a call for extra breathing room.", "accent": "ffd17b", "interval": 20.5, "max_active": 4, "weights": [4, 5, 2, 3], "disruptions": [{"at": 95.0, "type": "roadworks", "duration": 48.0, "text": "Bridge works • crews are taking a detour"}, {"at": 205.0, "type": "festival", "duration": 48.0, "text": "Festival rush • extra calls from the square"}]},
-		{"title": "RISING WATER", "subtitle": "Keep the harbor's lights alive.", "weather": "rain", "target": 44, "introduction": "Flood calls need engineers and medics. Supplies buy precious time.", "accent": "7bc8f0", "interval": 19.0, "max_active": 4, "weights": [2, 3, 7, 3], "disruptions": [{"at": 85.0, "type": "rain", "duration": 58.0, "text": "Cloudburst • flood calls intensify"}, {"at": 211.0, "type": "shortage", "duration": 45.0, "text": "Supply delay • supply replenishment paused"}]},
-		{"title": "AFTER DARK", "subtitle": "Be the calm in the blackout.", "weather": "night", "target": 60, "introduction": "Unconfirmed calls reward scouting. Keep an engineer in reserve.", "accent": "bda6ff", "interval": 17.5, "max_active": 5, "weights": [3, 4, 2, 7], "disruptions": [{"at": 93.0, "type": "blackout", "duration": 56.0, "text": "Grid failure • scout unconfirmed calls for a clear picture"}, {"at": 213.0, "type": "comms", "duration": 44.0, "text": "Radio interference • incoming reports need a closer look"}]},
-		{"title": "STORMFRONT", "subtitle": "Different teams. One heartbeat.", "weather": "storm", "target": 64, "introduction": "Use Rally when calls pile up. It speeds every crew for twenty seconds.", "accent": "8cceef", "interval": 16.0, "max_active": 5, "weights": [4, 4, 6, 5], "disruptions": [{"at": 82.0, "type": "storm", "duration": 62.0, "text": "Storm surge • travel slows; every second matters"}, {"at": 202.0, "type": "shortage", "duration": 40.0, "text": "Warehouse flooded • make the supplies you have count"}]},
-		{"title": "BEACON NIGHT", "subtitle": "A whole town, looking out for each other.", "weather": "sunset", "target": 72, "introduction": "Your final watch. Use every lesson, every upgrade, every teammate.", "accent": "ffa784", "interval": 14.5, "max_active": 5, "weights": [5, 5, 5, 5], "disruptions": [{"at": 75.0, "type": "comms", "duration": 44.0, "text": "Radio interference • trust your field reports"}, {"at": 167.0, "type": "storm", "duration": 51.0, "text": "One last squall • the bay needs all of us"}, {"at": 254.0, "type": "clear", "duration": 60.0, "text": "The beacon shines • neighbors help finish the watch"}]}
+		{"title": "FIRST LIGHT", "subtitle": "A small town. A very big heart.", "weather": "clear", "target": 30, "introduction": "Select a call. Send the matching crew. Bring everyone home.", "accent": "66dbc0", "interval": 23.0, "max_active": 4, "weights": [4, 5, 1, 2, 3], "disruptions": [{"at": 112.0, "type": "market", "duration": 35.0, "text": "Morning market • busy streets slow travel"}, {"at": 224.0, "type": "clear", "duration": 25.0, "text": "Neighbors lend a hand • crews work faster"}]},
+		{"title": "MARKET DAY", "subtitle": "The festival is counting on you.", "weather": "golden", "target": 42, "introduction": "Some calls need two teams. Scout a call for extra breathing room.", "accent": "ffd17b", "interval": 20.5, "max_active": 4, "weights": [4, 5, 2, 3, 5], "disruptions": [{"at": 95.0, "type": "roadworks", "duration": 48.0, "text": "Bridge works • crews are taking a detour"}, {"at": 205.0, "type": "festival", "duration": 48.0, "text": "Festival rush • extra calls from the square"}]},
+		{"title": "RISING WATER", "subtitle": "Keep the harbor's lights alive.", "weather": "rain", "target": 44, "introduction": "Flood calls need engineers and medics. Supplies buy precious time.", "accent": "7bc8f0", "interval": 19.0, "max_active": 4, "weights": [2, 3, 7, 3, 2], "disruptions": [{"at": 85.0, "type": "rain", "duration": 58.0, "text": "Cloudburst • flood calls intensify"}, {"at": 211.0, "type": "shortage", "duration": 45.0, "text": "Supply delay • supply replenishment paused"}]},
+		{"title": "AFTER DARK", "subtitle": "Be the calm in the blackout.", "weather": "night", "target": 60, "introduction": "Unconfirmed calls reward scouting. Keep an engineer in reserve.", "accent": "bda6ff", "interval": 17.5, "max_active": 5, "weights": [3, 4, 2, 7, 3], "disruptions": [{"at": 93.0, "type": "blackout", "duration": 56.0, "text": "Grid failure • scout unconfirmed calls for a clear picture"}, {"at": 213.0, "type": "comms", "duration": 44.0, "text": "Radio interference • incoming reports need a closer look"}]},
+		{"title": "STORMFRONT", "subtitle": "Different teams. One heartbeat.", "weather": "storm", "target": 64, "introduction": "Use the coffee boost when calls pile up. It speeds every crew for twenty seconds.", "accent": "8cceef", "interval": 16.0, "max_active": 5, "weights": [4, 4, 6, 5, 3], "disruptions": [{"at": 82.0, "type": "storm", "duration": 62.0, "text": "Storm surge • travel slows; every second matters"}, {"at": 202.0, "type": "shortage", "duration": 40.0, "text": "Warehouse flooded • make the supplies you have count"}]},
+		{"title": "BEACON NIGHT", "subtitle": "A whole town, looking out for each other.", "weather": "sunset", "target": 72, "introduction": "Your final watch. Use every lesson, every upgrade, every teammate.", "accent": "ffa784", "interval": 14.5, "max_active": 5, "weights": [5, 5, 5, 5, 5], "disruptions": [{"at": 75.0, "type": "comms", "duration": 44.0, "text": "Radio interference • trust your field reports"}, {"at": 167.0, "type": "storm", "duration": 51.0, "text": "One last squall • the bay needs all of us"}, {"at": 254.0, "type": "clear", "duration": 60.0, "text": "The beacon shines • neighbors help finish the watch"}]}
 	]
 	var intervals: Array[float] = [18.5, 16.7, 15.5, 14.3, 13.2, 12.2]
 	var capacities: Array[int] = [4, 5, 5, 6, 6, 6]
@@ -39,12 +39,9 @@ static func upgrades() -> Array[Dictionary]:
 		{"id": "training", "name": "Steady hands", "description": "Rescue work is 12% faster per level.", "cost": 80, "max_level": 3, "icon": "heart", "kind": "team"},
 		{"id": "radio", "name": "Clear signal", "description": "Every new call gets 7 extra seconds per level.", "cost": 70, "max_level": 2, "icon": "radio", "kind": "support"},
 		{"id": "supplies", "name": "Ready supplies", "description": "Carry one more supply; deliveries arrive 5 seconds sooner.", "cost": 60, "max_level": 3, "icon": "box", "kind": "support"},
-		{"id": "fire_crew", "name": "Ember brigade", "description": "Add a permanent fire crew to your fleet.", "cost": 115, "max_level": 1, "icon": "fire", "kind": "fleet"},
-		{"id": "medic_crew", "name": "Kindred care", "description": "Add a permanent medical crew to your fleet.", "cost": 115, "max_level": 1, "icon": "medic", "kind": "fleet"},
-		{"id": "engineer_crew", "name": "Harbor hands", "description": "Add a permanent engineering crew to your fleet.", "cost": 115, "max_level": 1, "icon": "engineer", "kind": "fleet"},
 		{"id": "rest", "name": "Good coffee", "description": "Crews recover sooner and tire 35% less per level.", "cost": 55, "max_level": 2, "icon": "coffee", "kind": "team"},
-		{"id": "rally", "name": "Town spirit", "description": "Rally recharges 15 seconds sooner per level.", "cost": 85, "max_level": 2, "icon": "star", "kind": "support"},
-		{"id": "scouting", "name": "Local knowledge", "description": "Scouting grants 6 more seconds and 10% faster work.", "cost": 60, "max_level": 2, "icon": "eye", "kind": "team"}
+		{"id": "rally", "name": "Town spirit", "description": "The coffee boost recharges 15 seconds sooner per level.", "cost": 85, "max_level": 2, "icon": "star", "kind": "support"},
+		{"id": "scouting", "name": "Local knowledge", "description": "The scout team is ready 2.5 seconds sooner per level.", "cost": 60, "max_level": 2, "icon": "eye", "kind": "team"}
 	]
 
 static func upgrade_data(id: String) -> Dictionary:
@@ -61,9 +58,10 @@ static func responder_profile(kind: String, crew_index: int) -> Dictionary:
 	var profiles: Dictionary = {
 		"fire": [["Bram", "Finn"], ["Kai", "Rosa"], ["Idris", "Piper"]],
 		"medic": [["Elio", "Theo"], ["Noor", "Bea"], ["Ada", "Elias"]],
-		"engineer": [["Tess", "Niko"], ["Olavi", "Zara"], ["Esme", "Otto"]]
+		"engineer": [["Tess", "Niko"], ["Olavi", "Zara"], ["Esme", "Otto"]],
+		"police": [["Nova", "Juno"], ["Mika", "Remy"], ["Sol", "Ines"]]
 	}
-	var kind_index: int = ["fire", "medic", "engineer"].find(kind)
+	var kind_index: int = ["fire", "medic", "engineer", "police"].find(kind)
 	var pair: Array = profiles.get(kind, profiles.fire)[clampi(crew_index, 0, 2)]
 	return {"crew_name": str(pair[0]), "partner_name": str(pair[1]), "appearance": maxi(0, kind_index) * 3 + clampi(crew_index, 0, 2)}
 
@@ -72,7 +70,7 @@ static func locations() -> Array[Dictionary]:
 		{"name": "Willow Cottage", "pos": Vector2(64, 44) / Vector2(532, 316)},
 		{"name": "Moonrise Bakery", "pos": Vector2(171, 41) / Vector2(532, 316)},
 		{"name": "Little Lantern School", "pos": Vector2(268, 199) / Vector2(532, 316)},
-		{"name": "North Pier", "pos": Vector2(355, 286) / Vector2(532, 316)},
+		{"name": "North Pier", "pos": Vector2(355, 266) / Vector2(532, 316)},
 		{"name": "The Corner Store", "pos": Vector2(128, 115) / Vector2(532, 316)},
 		{"name": "Magnolia House", "pos": Vector2(411, 34) / Vector2(532, 316)},
 		{"name": "Sunflower Apartments", "pos": Vector2(488, 35) / Vector2(532, 316)},
@@ -92,7 +90,8 @@ static func incident_title(kind: String, severity: int, variant: int) -> String:
 		"fire": ["Kitchen smoke", "Sparking fuse", "Workshop fire", "Chimney blaze", "Rooftop fire"],
 		"medical": ["A neighbor needs help", "Bicycle tumble", "Heat exhaustion", "First aid needed", "Urgent care"],
 		"flood": ["Basement rising", "Stranded neighbors", "Burst water main", "Overflowing harbor", "Flooded walkway"],
-		"power": ["Lights out", "Fallen power line", "Lift stopped", "Signal failure", "Generator trouble"]
+		"power": ["Lights out", "Fallen power line", "Lift stopped", "Signal failure", "Generator trouble"],
+		"police": ["Car collision", "Lost child", "Crowd at the square", "Break-in reported", "Blocked junction"]
 	}
 	var list: Array = titles.get(kind, titles.medical)
 	return str(list[(variant + severity - 1) % list.size()])

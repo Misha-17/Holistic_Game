@@ -2,8 +2,19 @@ class_name RescueSimulation
 extends RefCounted
 
 const Campaign = preload("res://scripts/campaign.gd")
-const UNIT_KINDS: Array[String] = ["fire", "medic", "engineer"]
-const INCIDENT_KINDS: Array[String] = ["fire", "medical", "flood", "power"]
+const UNIT_KINDS: Array[String] = ["fire", "medic", "engineer", "police"]
+const INCIDENT_KINDS: Array[String] = ["fire", "medical", "flood", "power", "police"]
+# Which departments join a call, in order, as its severity grows.
+const TEAM_ORDER := {
+	"fire": ["fire", "medic", "police", "engineer"],
+	"medical": ["medic", "police", "fire", "engineer"],
+	"flood": ["engineer", "medic", "fire", "police"],
+	"power": ["engineer", "police", "fire", "medic"],
+	"police": ["police", "medic", "fire", "engineer"],
+}
+# Countdowns tick in real seconds, so each call's deadline includes the time the crews need to work on scene.
+const WORK_TIME_ALLOWANCE := 1.35
+const CREWS_PER_DEPARTMENT := 3
 const ROAD_X: Array[float] = [0.18, 0.40, 0.62, 0.84]
 const ROAD_Y: Array[float] = [0.20, 0.45, 0.72]
 
@@ -51,6 +62,7 @@ var rapid_response_count: int = 0
 var peak_active: int = 0
 var scout_cooldown: float = 0.0
 var dispatch_cooldown: float = 0.0
+var department_cooldowns: Dictionary = {}
 var wrong_dispatches: int = 0
 var last_action_effect: Dictionary = {}
 
@@ -113,6 +125,7 @@ func start_shift(index: int) -> void:
 	peak_active = 0
 	scout_cooldown = 0.0
 	dispatch_cooldown = 0.0
+	department_cooldowns = {}
 	wrong_dispatches = 0
 	last_action_effect = {}
 	_next_spawn = 2.8
@@ -145,6 +158,8 @@ func _tick_step(delta: float) -> void:
 	special_duration = maxf(0.0, special_duration - delta)
 	scout_cooldown = maxf(0.0, scout_cooldown - delta)
 	dispatch_cooldown = maxf(0.0, dispatch_cooldown - delta)
+	for department: String in department_cooldowns.keys():
+		department_cooldowns[department] = maxf(0.0, float(department_cooldowns[department]) - delta)
 	_tick_surges(delta)
 	if disruption_remaining > 0.0:
 		disruption_remaining = maxf(0.0, disruption_remaining - delta)
@@ -239,8 +254,8 @@ func dispatch(incident_id: int, unit_kind: String, unit_id: int = -1) -> bool:
 		unit_kind = "medic"
 	if unit_kind not in UNIT_KINDS:
 		return false
-	if dispatch_cooldown > 0.0:
-		_emit("action_denied", "Dispatch is transmitting • one order at a time")
+	if float(department_cooldowns.get(unit_kind, 0.0)) > 0.0:
+		_emit("action_denied", "%s radio is transmitting • one order at a time" % kind_name(unit_kind))
 		return false
 	
 	
@@ -275,7 +290,7 @@ func dispatch(incident_id: int, unit_kind: String, unit_id: int = -1) -> bool:
 	selected.path = selected_path
 	selected.path_index = 0
 	selected.remaining = best_eta
-	dispatch_cooldown = 0.65
+	department_cooldowns[unit_kind] = 0.65
 	incident.assigned.append(int(selected.id))
 	incident.status = "working"
 	incident.last_action = elapsed
@@ -294,32 +309,28 @@ func dispatch(incident_id: int, unit_kind: String, unit_id: int = -1) -> bool:
 	return true
 
 func scout(incident_id: int) -> bool:
+	# Scouting only reveals what an unconfirmed report needs. It gives no extra time.
 	if not running:
 		return false
 	var incident: Dictionary = get_incident(incident_id)
-	if incident.is_empty() or not _is_active(incident) or bool(incident.get("scouted", false)):
+	if incident.is_empty() or not _is_active(incident):
+		return false
+	if bool(incident.get("discovered", true)):
+		_emit("action_denied", "This call is already confirmed • nothing to scout")
 		return false
 	if scout_cooldown > 0.0:
 		_emit("action_denied", "Field team ready in %ds" % ceili(scout_cooldown))
 		return false
-	var before_deadline: float = float(incident.deadline)
-	var before_hazard: float = float(incident.get("hazard", 0.0))
-	var before_work: float = _current_work_seconds(incident)
 	incident.discovered = true
 	incident.scouted = true
-	var time_granted: float = 9.0 + 6.0 * upgrade_level("scouting")
-	incident.deadline = maxf(float(incident.deadline), minf(float(incident.max_deadline) + 24.0, float(incident.deadline) + time_granted))
-	incident.work_bonus = float(incident.work_bonus) + 0.1 + 0.1 * upgrade_level("scouting")
 	incident.last_action = elapsed
-	incident.hazard = maxf(0.0, float(incident.get("hazard", 0.0)) - 0.16)
-	incident.stabilized_until = maxf(float(incident.get("stabilized_until", 0.0)), elapsed + 4.0)
 	scout_count += 1
-	scout_cooldown = 8.0
-	last_action_effect = {"action": "scout", "incident_id": incident_id, "time_added": float(incident.deadline) - before_deadline, "hazard_reduced": before_hazard - float(incident.hazard), "work_bonus_added": 0.1 + 0.1 * upgrade_level("scouting"), "work_seconds_saved": maxf(0.0, before_work - _current_work_seconds(incident)), "estimated": true}
-	var message: String = str(incident.bonus)
-	var scout_effect: Dictionary = last_action_effect.duplicate(true)
-	scout_effect.pos = incident.pos
-	_emit("scout", "Field report • +%ds • %s" % [int(last_action_effect.time_added), message], scout_effect)
+	scout_cooldown = maxf(3.0, 8.0 - 2.5 * upgrade_level("scouting"))
+	last_action_effect = {"action": "scout", "incident_id": incident_id, "time_added": 0.0}
+	var needed: Array[String] = []
+	for kind: String in UNIT_KINDS:
+		if int(incident.needs.get(kind, 0)) > 0: needed.append(kind_name(kind).to_lower())
+	_emit("scout", "Field report • %s needs %s" % [incident.name, " + ".join(needed)], {"incident_id": incident_id, "pos": incident.pos, "time_added": 0.0})
 	return true
 
 func supply(incident_id: int) -> bool:
@@ -327,6 +338,14 @@ func supply(incident_id: int) -> bool:
 		return false
 	var incident: Dictionary = get_incident(incident_id)
 	if incident.is_empty() or not _is_active(incident):
+		return false
+	var crew_on_scene: bool = false
+	for id: int in incident.assigned:
+		var crew: Dictionary = get_unit(id)
+		if not crew.is_empty() and crew.state == "working" and bool(crew.get("assignment_suitable", true)):
+			crew_on_scene = true
+	if not crew_on_scene:
+		_emit("action_denied", "Supplies go to a crew on scene • send a crew first")
 		return false
 	if supplies <= 0:
 		_emit("action_denied", "Supplies are replenishing")
@@ -360,7 +379,7 @@ func use_special() -> bool:
 		if _is_active(incident):
 			incident.deadline = maxf(float(incident.deadline), minf(float(incident.max_deadline) + 16.0, float(incident.deadline) + 8.0))
 	reputation = minf(100.0, reputation + 3.0)
-	_emit("rally", "Town rally! • every crew moves and works faster")
+	_emit("rally", "Coffee boost! • every crew moves and works faster for 20 seconds")
 	return true
 
 func buy_upgrade(id: String) -> bool:
@@ -532,12 +551,9 @@ func _completion_estimate(incident: Dictionary, candidate: Dictionary = {}, cand
 			hazard = maxf(0.0, hazard - step * 0.015)
 		elif elapsed + time >= float(incident.get("stabilized_until", 0.0)):
 			var growth: float = (0.012 + shift_index * 0.0014) * 0.68
-			if bool(incident.scouted): growth *= 0.65
 			if special_duration > time: growth *= 0.65
 			hazard = minf(1.0, hazard + step * growth)
-		var burn: float = (0.26 if complete else (0.72 if any_arrived else 1.0)) * (1.0 + hazard * 0.35)
-		if bool(incident.scouted) and disruption in ["blackout", "comms"] and time < disruption_remaining:
-			burn *= 0.8
+		var burn: float = 1.0
 		budget -= step * burn
 		if complete:
 			progress += step * _work_rate(incident, hazard, time) / float(incident.work_duration)
@@ -564,6 +580,28 @@ func drain_events() -> Array[Dictionary]:
 	return result
 
 func snapshot() -> Dictionary:
+	return _snapshot_encode(_raw_state())
+
+# Network copy of the state: plain Godot values, no save-file encoding.
+# var_to_bytes already handles floats, ints and vectors exactly, and this is
+# ~10x smaller and much faster for the guest to apply than snapshot().
+func net_snapshot() -> Dictionary:
+	var state: Dictionary = _raw_state()
+	state["_net"] = true
+	# Settled calls only matter for a few seconds (verdict cards); older ones are history.
+	var recent: Array = []
+	for incident: Dictionary in incidents:
+		if str(incident.get("status", "")) in ["resolved", "failed"] and elapsed - float(incident.get("resolved_at", elapsed)) > 8.0:
+			continue
+		recent.append(incident)
+	state["incidents"] = recent
+	# The shift plan never changes mid-shift; the guest rebuilds it from shift_index.
+	state.erase("_shift")
+	# Effects reach guests through their own event messages, not the snapshot.
+	state.erase("events")
+	return state
+
+func _raw_state() -> Dictionary:
 	var state: Dictionary = {
 		"snapshot_version": 4,
 		"shift_index": shift_index, "elapsed": elapsed, "duration": duration,
@@ -581,7 +619,7 @@ func snapshot() -> Dictionary:
 		"rush_remaining": rush_remaining, "events": events.duplicate(true),
 		"breather_remaining": breather_remaining, "surge_warning_remaining": surge_warning_remaining,
 		"surge_count": surge_count, "escalation_count": escalation_count, "rapid_response_count": rapid_response_count, "peak_active": peak_active,
-		"scout_cooldown": scout_cooldown, "dispatch_cooldown": dispatch_cooldown,
+		"scout_cooldown": scout_cooldown, "dispatch_cooldown": dispatch_cooldown, "department_cooldowns": department_cooldowns.duplicate(true),
 		"wrong_dispatches": wrong_dispatches, "last_action_effect": last_action_effect.duplicate(true),
 		"_surge_index": _surge_index, "_surge_warned_index": _surge_warned_index,
 		"_surge_pending": _surge_pending, "_surge_spawn_timer": _surge_spawn_timer, "_surge_breather_length": _surge_breather_length,
@@ -591,12 +629,12 @@ func snapshot() -> Dictionary:
 		
 		"_rng_seed": str(_rng.seed), "_rng_state": str(_rng.state), "_shift": _shift.duplicate(true)
 	}
-	return _snapshot_encode(state)
+	return state
 
 func apply_snapshot(data: Dictionary) -> void:
 	if data.is_empty():
 		return
-	var restored: Dictionary = _snapshot_decode(data)
+	var restored: Dictionary = data if bool(data.get("_net", false)) else _snapshot_decode(data)
 	for key: String in restored:
 		if key in ["incidents", "units", "events"]:
 			var typed: Array[Dictionary] = []
@@ -605,7 +643,7 @@ func apply_snapshot(data: Dictionary) -> void:
 			set(key, typed)
 		elif key in ["breather_remaining", "surge_warning_remaining", "surge_count", "escalation_count", "rapid_response_count", "peak_active", "_surge_index", "_surge_warned_index", "_surge_pending", "_surge_spawn_timer", "_surge_breather_length"]:
 			set(key, restored[key])
-		elif key in ["scout_cooldown", "dispatch_cooldown", "wrong_dispatches", "last_action_effect", "minimum_confidence"]:
+		elif key in ["scout_cooldown", "dispatch_cooldown", "department_cooldowns", "wrong_dispatches", "last_action_effect", "minimum_confidence"]:
 			set(key, restored[key])
 		elif key in ["shift_index", "elapsed", "duration", "running", "finished", "won", "score", "reputation", "rescued", "combo", "best_combo", "credits", "upgrades", "weather", "notice", "supplies", "max_supplies", "supply_regen", "special_cooldown", "special_duration", "disruption", "disruption_remaining", "resolved_count", "failed_count", "total_spawned", "stars", "target", "shift_reward", "successful_dispatches", "scout_count", "supply_count", "rush_remaining", "_next_spawn", "_next_id", "_disruption_index", "_reported_final_minute", "_reported_target", "_previous_spawn_location"]:
 			set(key, restored[key])
@@ -633,6 +671,7 @@ func _migrate_revision_state(restored: Dictionary) -> void:
 	for key: String in ["scout_cooldown", "dispatch_cooldown", "wrong_dispatches"]:
 		if not restored.has(key): set(key, 0)
 	if not restored.has("last_action_effect"): last_action_effect = {}
+	if not restored.has("department_cooldowns"): department_cooldowns = {}
 	if not restored.has("minimum_confidence"): minimum_confidence = 25.0
 	if not restored.has("_surge_index"):
 		_surge_index = 0
@@ -649,7 +688,7 @@ func _migrate_revision_state(restored: Dictionary) -> void:
 		for key: String in defaults:
 			if not incident.has(key):
 				incident[key] = defaults[key]
-	var counts: Dictionary = {"fire": 0, "medic": 0, "engineer": 0}
+	var counts: Dictionary = {"fire": 0, "medic": 0, "engineer": 0, "police": 0}
 	for unit: Dictionary in units:
 		var profile: Dictionary = Campaign.responder_profile(str(unit.kind), int(counts.get(unit.kind, 0)))
 		counts[unit.kind] = int(counts.get(unit.kind, 0)) + 1
@@ -738,15 +777,15 @@ func shift_summary() -> Dictionary:
 	return {"shift": shift_index, "title": _shift.get("title", ""), "won": won, "stars": stars, "score": score, "rescued": rescued, "target": target, "resolved": resolved_count, "missed": failed_count, "reputation": snappedf(reputation, 0.1), "best_combo": best_combo, "credits_earned": shift_reward, "duration": elapsed, "dispatches": successful_dispatches, "scouts": scout_count, "supplies_used": supply_count, "surges": surge_count, "escalations": escalation_count, "rapid_responses": rapid_response_count, "peak_calls": peak_active, "wrong_dispatches": wrong_dispatches, "minimum_confidence": minimum_confidence}
 
 func kind_name(kind: String) -> String:
-	return str({"fire": "Fire", "medic": "Medical", "medical": "Medical", "engineer": "Engineer", "flood": "Flood", "power": "Power"}.get(kind, kind.capitalize()))
+	return str({"fire": "Fire", "medic": "Medical", "medical": "Medical", "engineer": "Engineer", "flood": "Flood", "power": "Power", "police": "Police"}.get(kind, kind.capitalize()))
 
 func _build_fleet() -> void:
-	var crew_names: Dictionary = {"fire": ["Ember", "Cinder", "Spark"], "medic": ["Clover", "Willow", "Fern"], "engineer": ["Bolt", "Copper", "Wren"]}
-	var homes: Dictionary = {"fire": Vector2(0.18, 0.45), "medic": Vector2(0.62, 0.45), "engineer": Vector2(0.84, 0.45)}
-	var standby: Dictionary = {"fire": Vector2(0.84, 0.20), "medic": Vector2(0.40, 0.72), "engineer": Vector2(0.18, 0.20)}
+	var crew_names: Dictionary = {"fire": ["Ember", "Cinder", "Spark"], "medic": ["Clover", "Willow", "Fern"], "engineer": ["Bolt", "Copper", "Wren"], "police": ["Badge", "Patrol", "Siren"]}
+	var homes: Dictionary = {"fire": Vector2(0.18, 0.45), "medic": Vector2(0.62, 0.45), "engineer": Vector2(0.84, 0.45), "police": Vector2(0.18, 0.72)}
+	var standby: Dictionary = {"fire": Vector2(0.84, 0.20), "medic": Vector2(0.40, 0.72), "engineer": Vector2(0.18, 0.20), "police": Vector2(0.40, 0.20)}
 	var id: int = 0
 	for kind: String in UNIT_KINDS:
-		var count: int = 2 + upgrade_level(kind + "_crew")
+		var count: int = CREWS_PER_DEPARTMENT
 		for crew_index: int in range(count):
 			var home: Vector2 = standby[kind] if crew_index == 1 else homes[kind] + Vector2(0.009 * crew_index, 0.0)
 			var unit: Dictionary = {"id": id, "name": crew_names[kind][crew_index], "kind": kind, "pos": home, "home": home, "target": -1, "state": "idle", "remaining": 0.0, "fatigue": 0.0, "path": [], "path_index": 0, "heading": Vector2.RIGHT, "jobs": 0, "arrival_at": -1.0, "work_elapsed": 0.0, "work_phase": "idle", "assignment_suitable": true, "inspection_remaining": 0.0, "dispatch_guard_until": 0.0, "divert_after": 0.0}
@@ -769,13 +808,10 @@ func _spawn_incident() -> void:
 	var place: Dictionary = places[location_index]
 	var kind: String = _choose_kind()
 	var severity: int = 1
-	if shift_index > 0 and _rng.randf() < 0.30 + 0.05 * shift_index:
+	if shift_index > 0 and _rng.randf() < 0.28 + 0.04 * shift_index:
 		severity = 2
-	if shift_index >= 3 and elapsed > 80.0 and _rng.randf() < 0.18:
-		severity = 3
-	
 	if shift_index == 0:
-		kind = ["medical", "fire", "power", "medical", "fire", "medical", "power", "flood"][total_spawned % 8]
+		kind = ["medical", "fire", "police", "power", "medical", "fire", "police", "medical", "power", "flood"][total_spawned % 10]
 		if kind == "flood" or (elapsed > 95.0 and _rng.randf() < 0.28):
 			severity = 2
 	var report_clear: bool = _rng.randf() < (0.66 if shift_index < 2 else 0.57)
@@ -784,31 +820,21 @@ func _spawn_incident() -> void:
 	if shift_index == 0 and total_spawned == 1:
 		report_clear = false
 		severity = 2
-	var needs: Dictionary = {"fire": 0, "medic": 0, "engineer": 0}
-	match kind:
-		"fire":
-			needs.fire = 1
-			if severity >= 2:
-				needs.medic = 1
-			if severity >= 3:
-				needs.engineer = 1
-		"medical":
-			needs.medic = 1
-			if severity >= 3:
-				needs.fire = 1
-				needs.engineer = 1
-		"flood":
-			needs.engineer = 1
-			if severity >= 2:
-				needs.medic = 1
-			if severity >= 3:
-				needs.fire = 1
-		"power":
-			needs.engineer = 1
-			if severity >= 2:
-				needs.fire = 1
-			if severity >= 3:
-				needs.medic = 1
+	# All-four-department calls in every shift, from shift 1, after the opening minute.
+	# Each shift is guaranteed at least one by its 8th call and two by its 16th.
+	if elapsed > 60.0 and total_spawned >= 4:
+		var four_team_calls: int = 0
+		for earlier: Dictionary in incidents:
+			if int(earlier.severity) >= 3: four_team_calls += 1
+		var chance: float = [0.10, 0.12, 0.14, 0.16, 0.16, 0.20][clampi(shift_index, 0, 5)]
+		if _rng.randf() < chance or (four_team_calls == 0 and total_spawned >= 7) or (four_team_calls < 2 and total_spawned >= 15):
+			severity = 3
+	# Every call needs a team: severity 1 = two departments, 2 = three, 3 = all four.
+	var needs: Dictionary = {"fire": 0, "medic": 0, "engineer": 0, "police": 0}
+	var order: Array = TEAM_ORDER.get(kind, UNIT_KINDS)
+	var team_size: int = clampi(severity + 1, 2, 4)
+	for index: int in range(team_size):
+		needs[order[index]] = 1
 	var work_duration: float = 10.0 + severity * 4.2
 	var arrival_budget: float = 0.0
 	for needed_kind: String in UNIT_KINDS:
@@ -824,7 +850,7 @@ func _spawn_incident() -> void:
 		arrival_budget = maxf(arrival_budget, fastest)
 	var decision_slack: float = 18.0 - shift_index * 1.2
 	if total_spawned > 2 and _rng.randf() < 0.25: decision_slack *= 0.58
-	var deadline: float = arrival_budget * 1.12 + work_duration * 0.30 + decision_slack + _rng.randf_range(-2.0, 4.0) + 7.0 * upgrade_level("radio")
+	var deadline: float = arrival_budget * 1.12 + work_duration * WORK_TIME_ALLOWANCE + decision_slack + _rng.randf_range(-2.0, 4.0) + 7.0 * upgrade_level("radio")
 	if not report_clear: deadline += 4.0
 	if shift_index == 0 and total_spawned == 0: deadline += 10.0
 	var bonuses: Array[String] = ["Neighbors cleared the way.", "A safe route is marked. Crews can work faster.", "Everyone is accounted for. Rescue plan confirmed.", "Local volunteers are helping. You've got this."]
@@ -849,11 +875,15 @@ func _spawn_incident() -> void:
 	_emit("incident", "%s • %s" % [incident.title if report_clear else "Unverified report", incident.name], {"incident_id": incident.id, "kind": kind, "pos": incident.pos, "severity": severity})
 
 func _choose_kind() -> String:
-	var weights: Array = _shift.get("weights", [4, 4, 2, 2]).duplicate()
+	var weights: Array = _shift.get("weights", [4, 4, 2, 2, 3]).duplicate()
+	while weights.size() < INCIDENT_KINDS.size():
+		weights.append(3)
 	if disruption == "rain" or disruption == "storm":
 		weights[2] = int(weights[2]) + 4
 	if disruption == "blackout":
 		weights[3] = int(weights[3]) + 5
+	if disruption in ["market", "festival"]:
+		weights[4] = int(weights[4]) + 4
 	var total: int = 0
 	for weight: int in weights:
 		total += weight
@@ -951,11 +981,8 @@ func _tick_incident(incident: Dictionary, delta: float) -> void:
 		if arrived < int(incident.needs.get(kind, 0)):
 			complete_team = false
 	_update_hazard(incident, delta, arrived_total, complete_team)
-	var deadline_speed: float = 0.26 if complete_team else (0.72 if arrived_total > 0 else 1.0)
-	deadline_speed *= 1.0 + float(incident.hazard) * 0.35
-	if bool(incident.scouted) and disruption in ["blackout", "comms"]:
-		deadline_speed *= 0.8
-	incident.deadline = maxf(0.0, float(incident.deadline) - delta * deadline_speed)
+	# The countdown is real time: one second per second, always.
+	incident.deadline = maxf(0.0, float(incident.deadline) - delta)
 	incident.phase = "deploy" if deploying else ("contain" if arrived_total > 0 else ("enroute" if not incident.assigned.is_empty() else "waiting"))
 	if complete_team:
 		if not bool(incident.arrival_sent):
@@ -992,8 +1019,6 @@ func _update_hazard(incident: Dictionary, delta: float, arrived: int, complete_t
 				qualified_enroute = true
 		if qualified_enroute:
 			growth *= 0.68
-		if bool(incident.scouted):
-			growth *= 0.65
 		if special_duration > 0.0:
 			growth *= 0.65
 		hazard += delta * growth
@@ -1004,7 +1029,7 @@ func _update_hazard(incident: Dictionary, delta: float, arrived: int, complete_t
 		incident.highest_hazard_stage = stage
 		incident.escalated = true
 		escalation_count += 1
-		var descriptions: Dictionary = {"fire": "Fire spreading", "medical": "Condition worsening", "flood": "Water rising", "power": "Grid destabilizing"}
+		var descriptions: Dictionary = {"fire": "Fire spreading", "medical": "Condition worsening", "flood": "Water rising", "power": "Grid destabilizing", "police": "Situation getting tense"}
 		_emit("escalated", "%s • %s" % [descriptions.get(incident.kind, "Hazard rising") if bool(incident.discovered) else "Unverified report escalating", incident.name], {"incident_id": incident.id, "pos": incident.pos, "hazard_stage": stage, "hazard": incident.hazard})
 	if (stage >= 3 or float(incident.deadline) < 12.0) and not bool(incident.get("critical_sent", false)):
 		incident.critical_sent = true

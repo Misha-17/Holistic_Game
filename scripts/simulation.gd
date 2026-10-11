@@ -15,8 +15,12 @@ const TEAM_ORDER := {
 # Countdowns tick in real seconds, so each call's deadline includes the time the crews need to work on scene.
 const WORK_TIME_ALLOWANCE := 1.35
 const CREWS_PER_DEPARTMENT := 3
-const ROAD_X: Array[float] = [0.18, 0.40, 0.62, 0.84]
-const ROAD_Y: Array[float] = [0.20, 0.45, 0.72]
+const ROAD_X: Array[float] = [128.0 / 2304, 384.0 / 2304, 640.0 / 2304, 896.0 / 2304, 1152.0 / 2304, 1408.0 / 2304, 1664.0 / 2304, 1920.0 / 2304, 2176.0 / 2304]
+const ROAD_Y: Array[float] = [192.0 / 1536, 448.0 / 1536, 704.0 / 1536, 928.0 / 1536, 1184.0 / 1536, 1440.0 / 1536]
+# The new navigable world has larger buildings and streets. Use one uniform
+# physical speed in both axes, calibrated to cross the full width in 19.2s.
+# More pixels add navigable detail, not a proportional penalty to every rescue.
+const WORLD_DISTANCE_SCALE := Campaign.MAP_SIZE / Vector2(1024, 1024)
 
 var shift_index: int = 0
 var elapsed: float = 0.0
@@ -65,6 +69,9 @@ var dispatch_cooldown: float = 0.0
 var department_cooldowns: Dictionary = {}
 var wrong_dispatches: int = 0
 var last_action_effect: Dictionary = {}
+var chaos_phase: String = "normal"
+var chaos_phase_index: int = -1
+var arrival_index: int = 0
 
 var _rng := RandomNumberGenerator.new()
 var _shift: Dictionary = {}
@@ -128,6 +135,9 @@ func start_shift(index: int) -> void:
 	department_cooldowns = {}
 	wrong_dispatches = 0
 	last_action_effect = {}
+	chaos_phase = "normal"
+	chaos_phase_index = -1
+	arrival_index = 0
 	_next_spawn = 2.8
 	_next_id = 1
 	_disruption_index = 0
@@ -141,6 +151,7 @@ func start_shift(index: int) -> void:
 	_surge_breather_length = 0.0
 	_build_fleet()
 	_emit("shift_started", notice, {"shift": shift_index})
+	_tick_chaos_schedule()
 
 func tick(delta: float) -> void:
 	if not running or finished:
@@ -160,7 +171,7 @@ func _tick_step(delta: float) -> void:
 	dispatch_cooldown = maxf(0.0, dispatch_cooldown - delta)
 	for department: String in department_cooldowns.keys():
 		department_cooldowns[department] = maxf(0.0, float(department_cooldowns[department]) - delta)
-	_tick_surges(delta)
+	_tick_chaos_schedule()
 	if disruption_remaining > 0.0:
 		disruption_remaining = maxf(0.0, disruption_remaining - delta)
 		if disruption_remaining <= 0.0:
@@ -178,22 +189,7 @@ func _tick_step(delta: float) -> void:
 			_emit("supply_ready", "Fresh supplies have arrived")
 	elif supplies >= max_supplies:
 		supply_regen = 0.0
-	_next_spawn -= delta
-	if _next_spawn <= 0.0 and elapsed < duration - 45.0 and breather_remaining <= 0.0:
-		if active_count() < int(_shift.max_active):
-			_spawn_incident()
-			var interval: float = float(_shift.interval)
-			if elapsed < 42.0 and shift_index == 0:
-				interval = 13.0
-			elif elapsed > 140.0:
-				interval *= 0.91
-			if rush_remaining > 0.0:
-				interval *= 0.7
-			if disruption == "festival":
-				interval *= 0.72
-			_next_spawn = interval + _rng.randf_range(-2.2, 2.2)
-		else:
-			_next_spawn = 3.0
+	_tick_arrivals()
 	for unit: Dictionary in units:
 		_tick_unit(unit, delta)
 	for incident: Dictionary in incidents:
@@ -208,41 +204,47 @@ func _tick_step(delta: float) -> void:
 	if reputation <= 0.0 or elapsed >= duration:
 		_finish_shift()
 
-func _tick_surges(delta: float) -> void:
-	breather_remaining = maxf(0.0, breather_remaining - delta)
-	var previous_rush: float = rush_remaining
-	rush_remaining = maxf(0.0, rush_remaining - delta)
-	if previous_rush > 0.0 and rush_remaining <= 0.0:
-		_surge_pending = 0
-		breather_remaining = _surge_breather_length
-		_emit("surge_end", "The radio eases • clear the remaining calls", {"breather": breather_remaining})
-	var schedule: Array = _shift.get("surges", [])
-	surge_warning_remaining = 0.0
-	if _surge_index < schedule.size():
-		var wave: Dictionary = schedule[_surge_index]
-		var until: float = float(wave.at) - elapsed
-		if until <= 7.0 and until > 0.0:
-			surge_warning_remaining = until
-			if _surge_warned_index != _surge_index:
-				_surge_warned_index = _surge_index
-				_emit("surge_warning", "%s in 7 seconds • prepare your crews" % wave.name, {"in": until, "surge_name": wave.name})
-		if until <= 0.0:
-			rush_remaining = float(wave.duration)
-			_surge_breather_length = float(wave.breather)
-			_surge_pending = int(wave.calls)
-			_surge_spawn_timer = 0.0
-			breather_remaining = 0.0
-			surge_count += 1
-			_surge_index += 1
-			_next_spawn = maxf(_next_spawn, 7.0)
-			_emit("surge_started", "%s • all stations, stand by" % wave.name, {"surge_name": wave.name, "duration": rush_remaining, "calls": _surge_pending})
-	if _surge_pending > 0 and rush_remaining > 0.0:
-		_surge_spawn_timer -= delta
-		if _surge_spawn_timer <= 0.0:
-			if active_count() < int(_shift.max_active):
-				_spawn_incident()
-				_surge_pending -= 1
-			_surge_spawn_timer = 2.6
+func _tick_chaos_schedule() -> void:
+	var schedule: Array = _shift.get("chaos_phases", [])
+	while chaos_phase_index + 1 < schedule.size() and elapsed + 0.000001 >= float(schedule[chaos_phase_index + 1].at):
+		chaos_phase_index += 1
+		chaos_phase = str(schedule[chaos_phase_index].phase)
+		var record: Dictionary = chaos_context()
+		record["observed_elapsed"] = elapsed
+		_emit_research("chaos_phase_changed", record)
+
+# This information is for the research logger only. No player-facing component
+# should render it or use it to anticipate incoming calls.
+func chaos_context() -> Dictionary:
+	var schedule: Array = _shift.get("chaos_phases", [])
+	if chaos_phase_index < 0 or chaos_phase_index >= schedule.size():
+		return {}
+	var phase: Dictionary = schedule[chaos_phase_index]
+	return {"schedule_version": Campaign.CHAOS_SCHEDULE_VERSION,
+		"shift": shift_index, "phase": chaos_phase, "phase_index": chaos_phase_index,
+		"at": float(phase.at), "until": float(phase.until),
+		"duration": float(phase.until) - float(phase.at),
+		"campaign_at": shift_index * Campaign.SHIFT_SECONDS + float(phase.at)}
+
+func _tick_arrivals() -> void:
+	var schedule: Array = _shift.get("arrival_schedule", [])
+	while arrival_index < schedule.size() and elapsed + 0.000001 >= float(schedule[arrival_index].at):
+		var scheduled: Dictionary = schedule[arrival_index]
+		var capacity: int = int(_shift.max_active) + (1 if chaos_phase == "high" else 0)
+		if active_count() < capacity:
+			_spawn_incident()
+		else:
+			# Never move the next phase or arrival because a group is busy. The
+			# skipped opportunity is retained in research data for comparison.
+			_emit_research("arrival_capacity_skipped", {"schedule_version": Campaign.CHAOS_SCHEDULE_VERSION,
+				"shift": shift_index, "at": float(scheduled.at), "arrival_index": arrival_index,
+				"phase_index": int(scheduled.phase_index), "active_calls": active_count()})
+		arrival_index += 1
+
+func _emit_research(type: String, payload: Dictionary) -> void:
+	var record: Dictionary = {"type": type, "text": "", "research_only": true}
+	record.merge(payload)
+	events.append(record)
 
 func dispatch(incident_id: int, unit_kind: String, unit_id: int = -1) -> bool:
 	if not running:
@@ -437,7 +439,7 @@ func pressure_level() -> float:
 			hazard_total += float(incident.get("hazard", 0.0))
 			if float(incident.deadline) < 20.0:
 				urgent += 1
-	return clampf(float(active_count()) * 0.11 + hazard_total * 0.075 + urgent * 0.1 + (0.16 if rush_remaining > 0.0 else 0.0), 0.0, 1.0)
+	return clampf(float(active_count()) * 0.11 + hazard_total * 0.075 + urgent * 0.1 , 0.0, 1.0)
 
 func next_surge_in() -> float:
 	var surges: Array = _shift.get("surges", [])
@@ -499,11 +501,11 @@ func road_conditions() -> Array[Dictionary]:
 			result.append({"name": entry.name, "position": entry.position, "size": entry.size, "speed_factor": float(entry.speed_factor), "remaining": ends - elapsed})
 	if disruption_remaining > 0.0:
 		if disruption in ["market", "festival"]:
-			result.append({"name": "Market queues", "position": Vector2(0.28, 0.425), "size": Vector2(0.27, 0.05), "speed_factor": 0.42, "remaining": disruption_remaining})
+			result.append({"name": "Market queues", "position": Vector2(240, 428) / Campaign.MAP_SIZE, "size": Vector2(380, 40) / Campaign.MAP_SIZE, "speed_factor": 0.42, "remaining": disruption_remaining})
 		elif disruption == "roadworks":
-			result.append({"name": "Bridge works", "position": Vector2(0.595, 0.19), "size": Vector2(0.05, 0.28), "speed_factor": 0.38, "remaining": disruption_remaining})
+			result.append({"name": "Bridge works", "position": Vector2(876, 178) / Campaign.MAP_SIZE, "size": Vector2(40, 270) / Campaign.MAP_SIZE, "speed_factor": 0.38, "remaining": disruption_remaining})
 		elif disruption in ["rain", "storm"]:
-			result.append({"name": "Flooded harbor road", "position": Vector2(0.59, 0.695), "size": Vector2(0.35, 0.05), "speed_factor": 0.48, "remaining": disruption_remaining})
+			result.append({"name": "Flooded harbor road", "position": Vector2(876, 684) / Campaign.MAP_SIZE, "size": Vector2(400, 40) / Campaign.MAP_SIZE, "speed_factor": 0.48, "remaining": disruption_remaining})
 	return result
 
 func _unit_available(unit: Dictionary) -> bool:
@@ -603,7 +605,9 @@ func net_snapshot() -> Dictionary:
 
 func _raw_state() -> Dictionary:
 	var state: Dictionary = {
-		"snapshot_version": 4,
+		"snapshot_version": 5, "map_version": Campaign.MAP_VERSION,
+		"chaos_schedule_version": Campaign.CHAOS_SCHEDULE_VERSION,
+		"chaos_phase": chaos_phase, "chaos_phase_index": chaos_phase_index, "arrival_index": arrival_index,
 		"shift_index": shift_index, "elapsed": elapsed, "duration": duration,
 		"running": running, "finished": finished, "won": won, "score": score,
 		"reputation": reputation, "rescued": rescued, "combo": combo, "best_combo": best_combo,
@@ -643,6 +647,8 @@ func apply_snapshot(data: Dictionary) -> void:
 			set(key, typed)
 		elif key in ["breather_remaining", "surge_warning_remaining", "surge_count", "escalation_count", "rapid_response_count", "peak_active", "_surge_index", "_surge_warned_index", "_surge_pending", "_surge_spawn_timer", "_surge_breather_length"]:
 			set(key, restored[key])
+		elif key in ["chaos_phase", "chaos_phase_index", "arrival_index"]:
+			set(key, restored[key])
 		elif key in ["scout_cooldown", "dispatch_cooldown", "department_cooldowns", "wrong_dispatches", "last_action_effect", "minimum_confidence"]:
 			set(key, restored[key])
 		elif key in ["shift_index", "elapsed", "duration", "running", "finished", "won", "score", "reputation", "rescued", "combo", "best_combo", "credits", "upgrades", "weather", "notice", "supplies", "max_supplies", "supply_regen", "special_cooldown", "special_duration", "disruption", "disruption_remaining", "resolved_count", "failed_count", "total_spawned", "stars", "target", "shift_reward", "successful_dispatches", "scout_count", "supply_count", "rush_remaining", "_next_spawn", "_next_id", "_disruption_index", "_reported_final_minute", "_reported_target", "_previous_spawn_location"]:
@@ -666,6 +672,7 @@ func apply_snapshot(data: Dictionary) -> void:
 		_previous_spawn_location = int(incidents.back().get("location_index", -1)) if not incidents.is_empty() else -1
 	_restore_legacy_vectors()
 	_migrate_revision_state(restored)
+	_migrate_world_and_schedule(restored)
 
 func _migrate_revision_state(restored: Dictionary) -> void:
 	for key: String in ["scout_cooldown", "dispatch_cooldown", "wrong_dispatches"]:
@@ -706,6 +713,103 @@ func _migrate_revision_state(restored: Dictionary) -> void:
 		if not unit.has("assignment_suitable"):
 			var call: Dictionary = get_incident(int(unit.target))
 			unit.assignment_suitable = call.is_empty() or int(call.needs.get(unit.kind, 0)) > 0
+
+func _migrate_world_and_schedule(restored: Dictionary) -> void:
+	var previous_map_version: int = int(restored.get("map_version", 1))
+	if previous_map_version == 3:
+		_expand_version_3_map(restored.has("_shift"))
+	elif previous_map_version < Campaign.MAP_VERSION:
+		_migrate_map_layout(previous_map_version)
+	if not restored.has("chaos_schedule_version"):
+		_shift["surges"] = []
+		_shift["chaos_phases"] = Campaign.chaos_schedule(shift_index)
+		_shift["arrival_schedule"] = Campaign.arrival_schedule(shift_index, float(_shift.interval))
+		chaos_phase_index = -1
+		for phase: Dictionary in _shift.chaos_phases:
+			if float(phase.at) <= elapsed + 0.000001:
+				chaos_phase_index = int(phase.index)
+		chaos_phase = str(_shift.chaos_phases[maxi(0, chaos_phase_index)].phase)
+		arrival_index = 0
+		while arrival_index < _shift.arrival_schedule.size() and float(_shift.arrival_schedule[arrival_index].at) <= elapsed + 0.000001:
+			arrival_index += 1
+	# Kept as inert compatibility fields for older UI/tutorial resources.
+	rush_remaining = 0.0
+	breather_remaining = 0.0
+	surge_warning_remaining = 0.0
+	_surge_pending = 0
+
+func _expand_version_3_map(has_saved_shift: bool) -> void:
+	# v4 adds new land east/south of v3. Preserve exact physical positions and
+	# every waypoint; multiplying normalized values by this ratio does not
+	# teleport, stretch or relocate any existing part of the city.
+	var factor: Vector2 = Campaign.MAP_V3_SIZE / Campaign.MAP_SIZE
+	for incident: Dictionary in incidents:
+		incident.pos *= factor
+	for unit: Dictionary in units:
+		unit.pos *= factor
+		unit.home *= factor
+		for index: int in range(unit.path.size()): unit.path[index] *= factor
+	# A lean network snapshot rebuilds the plan in current coordinates.
+	if has_saved_shift:
+		for traffic: Dictionary in _shift.get("traffic", []):
+			traffic.position *= factor
+			traffic.size *= factor
+	for event: Dictionary in events:
+		if event.get("pos") is Vector2: event.pos *= factor
+	if last_action_effect.get("pos") is Vector2: last_action_effect.pos *= factor
+	_emit_research("map_migrated", {"at": elapsed, "from_map_version": 3,
+		"map_version": Campaign.MAP_VERSION, "physical_positions_preserved": true})
+
+func _migrate_map_layout(previous_version: int) -> void:
+	# v1 (532x316) and v2 (664x396) both stored normalized coordinates,
+	# but v3 rearranges the city. Remap call identities and station homes;
+	# merely multiplying old coordinates would leave calls in the wrong lot.
+	var places: Array[Dictionary] = Campaign.locations()
+	for incident: Dictionary in incidents:
+		var index: int = int(incident.get("location_index", -1))
+		if index >= 0 and index < places.size():
+			incident.pos = places[index].pos
+		else:
+			for place: Dictionary in places:
+				if str(place.name) == str(incident.get("name", "")):
+					incident.pos = place.pos
+					break
+	_shift["traffic"] = Campaign.shift_data(shift_index).traffic
+	var counts: Dictionary = {}
+	var extra_travel: Dictionary = {}
+	for unit: Dictionary in units:
+		var crew_index: int = int(counts.get(unit.kind, 0))
+		counts[unit.kind] = crew_index + 1
+		unit.home = _fleet_home(str(unit.kind), crew_index)
+		var call: Dictionary = get_incident(int(unit.target))
+		if unit.state == "working" and not call.is_empty():
+			unit.pos = call.pos
+		elif unit.state in ["idle", "rest"]:
+			unit.pos = unit.home
+		elif unit.state in ["travel", "return"]:
+			# Older layouts were relocated into v3; keep that relative placement
+			# inside the original district rather than stretching into new land.
+			unit.pos = Vector2(unit.pos).clamp(Vector2.ZERO, Vector2.ONE) * Campaign.MAP_V3_SIZE / Campaign.MAP_SIZE
+			var destination: Vector2 = call.pos if unit.state == "travel" and not call.is_empty() else unit.home
+			var old_eta: float = float(unit.remaining)
+			var route: Dictionary = _best_route(unit, unit.pos, destination)
+			unit.path = route.path
+			unit.path_index = 0
+			unit.remaining = float(route.eta)
+			if not route.path.is_empty(): unit.heading = (Vector2(route.path[0]) - Vector2(unit.pos)).normalized()
+			if unit.state == "travel" and not call.is_empty():
+				extra_travel[call.id] = maxf(float(extra_travel.get(call.id, 0.0)), maxf(0.0, float(route.eta) - old_eta))
+	for id: int in extra_travel:
+		var call: Dictionary = get_incident(id)
+		call.deadline += float(extra_travel[id])
+		call.max_deadline += float(extra_travel[id])
+	# Repair any pending spatial effect before an old save's events are shown.
+	for event: Dictionary in events:
+		if event.has("pos"):
+			var call: Dictionary = get_incident(int(event.get("incident_id", -1)))
+			if not call.is_empty(): event.pos = call.pos
+	_emit_research("map_migrated", {"at": elapsed, "from_map_version": previous_version,
+		"map_version": Campaign.MAP_VERSION, "travel_allowance_added": extra_travel})
 
 func _snapshot_encode(value: Variant) -> Variant:
 	if value is Vector2:
@@ -774,20 +878,23 @@ func _read_legacy_vector(value: Variant) -> Vector2:
 	return Vector2.ZERO
 
 func shift_summary() -> Dictionary:
-	return {"shift": shift_index, "title": _shift.get("title", ""), "won": won, "stars": stars, "score": score, "rescued": rescued, "target": target, "resolved": resolved_count, "missed": failed_count, "reputation": snappedf(reputation, 0.1), "best_combo": best_combo, "credits_earned": shift_reward, "duration": elapsed, "dispatches": successful_dispatches, "scouts": scout_count, "supplies_used": supply_count, "surges": surge_count, "escalations": escalation_count, "rapid_responses": rapid_response_count, "peak_calls": peak_active, "wrong_dispatches": wrong_dispatches, "minimum_confidence": minimum_confidence}
+	return {"shift": shift_index, "title": _shift.get("title", ""), "won": won, "stars": stars, "score": score, "rescued": rescued, "target": target, "resolved": resolved_count, "missed": failed_count, "reputation": snappedf(reputation, 0.1), "best_combo": best_combo, "credits_earned": shift_reward, "duration": elapsed, "dispatches": successful_dispatches, "scouts": scout_count, "supplies_used": supply_count, "escalations": escalation_count, "rapid_responses": rapid_response_count, "peak_calls": peak_active, "wrong_dispatches": wrong_dispatches, "minimum_confidence": minimum_confidence}
 
 func kind_name(kind: String) -> String:
 	return str({"fire": "Fire", "medic": "Medical", "medical": "Medical", "engineer": "Engineer", "flood": "Flood", "power": "Power", "police": "Police"}.get(kind, kind.capitalize()))
 
+func _fleet_home(kind: String, crew_index: int) -> Vector2:
+	var homes: Dictionary = {"fire": Vector2(384, 448), "medic": Vector2(896, 448), "engineer": Vector2(1152, 448), "police": Vector2(384, 704)}
+	var standby: Dictionary = {"fire": Vector2(1664, 448), "medic": Vector2(1152, 1440), "engineer": Vector2(1920, 928), "police": Vector2(2176, 704)}
+	return (standby[kind] if crew_index == 1 else homes[kind] + Vector2(8.0 * crew_index, 0.0)) / Campaign.MAP_SIZE
+
 func _build_fleet() -> void:
 	var crew_names: Dictionary = {"fire": ["Ember", "Cinder", "Spark"], "medic": ["Clover", "Willow", "Fern"], "engineer": ["Bolt", "Copper", "Wren"], "police": ["Badge", "Patrol", "Siren"]}
-	var homes: Dictionary = {"fire": Vector2(0.18, 0.45), "medic": Vector2(0.62, 0.45), "engineer": Vector2(0.84, 0.45), "police": Vector2(0.18, 0.72)}
-	var standby: Dictionary = {"fire": Vector2(0.84, 0.20), "medic": Vector2(0.40, 0.72), "engineer": Vector2(0.18, 0.20), "police": Vector2(0.40, 0.20)}
 	var id: int = 0
 	for kind: String in UNIT_KINDS:
 		var count: int = CREWS_PER_DEPARTMENT
 		for crew_index: int in range(count):
-			var home: Vector2 = standby[kind] if crew_index == 1 else homes[kind] + Vector2(0.009 * crew_index, 0.0)
+			var home: Vector2 = _fleet_home(kind, crew_index)
 			var unit: Dictionary = {"id": id, "name": crew_names[kind][crew_index], "kind": kind, "pos": home, "home": home, "target": -1, "state": "idle", "remaining": 0.0, "fatigue": 0.0, "path": [], "path_index": 0, "heading": Vector2.RIGHT, "jobs": 0, "arrival_at": -1.0, "work_elapsed": 0.0, "work_phase": "idle", "assignment_suitable": true, "inspection_remaining": 0.0, "dispatch_guard_until": 0.0, "divert_after": 0.0}
 			unit.merge(Campaign.responder_profile(kind, crew_index))
 			units.append(unit)
@@ -1083,7 +1190,7 @@ func _send_home(unit: Dictionary) -> void:
 	unit.remaining = float(route.eta)
 
 func _travel_speed(unit: Dictionary, offset: float = 0.0) -> float:
-	var speed: float = 0.095 * (1.0 + upgrade_level("engines") * 0.14)
+	var speed: float = 0.1171875 * (1.0 + upgrade_level("engines") * 0.14) # 120 world pixels/second
 	speed *= 1.0 - float(unit.fatigue) * 0.12
 	if special_duration > offset and special_duration > 0.0:
 		speed *= 1.5
@@ -1131,7 +1238,7 @@ func _travel_segment(unit: Dictionary, start: Vector2, destination: Vector2, off
 	
 	
 	var difference: Vector2 = destination - start
-	var length: float = difference.length()
+	var length: float = (difference * WORLD_DISTANCE_SCALE).length()
 	if length < 0.000001:
 		return {"pos": destination, "time": 0.0, "done": true}
 	var cuts: Array[float] = [0.0, 1.0]
@@ -1197,7 +1304,7 @@ func _route_length(start: Vector2, points: Array) -> float:
 	var length: float = 0.0
 	var previous: Vector2 = start
 	for point: Vector2 in points:
-		length += previous.distance_to(point)
+		length += ((point - previous) * WORLD_DISTANCE_SCALE).length()
 		previous = point
 	return length
 

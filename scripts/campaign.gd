@@ -1,6 +1,56 @@
 class_name BeaconCampaign
 extends RefCounted
 
+const BASE_MAP_SIZE := Vector2(532, 316)
+const PREVIOUS_MAP_SIZE := Vector2(664, 396)
+const MAP_V3_SIZE := Vector2(1536, 1024)
+const MAP_SIZE := Vector2(2304, 1536)
+const MAP_VERSION := 4
+const CHAOS_SCHEDULE_VERSION := "beacon-chaos-v1"
+const SHIFT_SECONDS := 330.0
+
+# The order looks irregular to a player, but is an immutable study protocol.
+# Times are active seconds since this shift started, never wall-clock time.
+# Keep old versions available if a future study changes this protocol.
+static func chaos_schedule(index: int) -> Array[Dictionary]:
+	var starts: Array = [
+		[0, 42, 73, 106, 142, 174, 204, 244, 278],
+		[0, 37, 68, 101, 137, 172, 211, 246, 280],
+		[0, 45, 79, 109, 143, 176, 209, 242, 279],
+		[0, 39, 72, 103, 139, 173, 206, 241, 280],
+		[0, 43, 76, 107, 141, 176, 210, 245, 280],
+		[0, 35, 68, 101, 136, 170, 205, 244, 279]
+	]
+	var orders: Array = [
+		["normal", "high", "low", "normal", "high", "low", "high", "normal", "low"],
+		["normal", "high", "low", "high", "normal", "low", "normal", "high", "low"],
+		["normal", "high", "low", "normal", "high", "normal", "low", "high", "low"],
+		["normal", "high", "low", "high", "normal", "high", "low", "normal", "low"],
+		["normal", "high", "low", "normal", "low", "high", "normal", "high", "low"],
+		["normal", "high", "low", "high", "normal", "low", "high", "normal", "low"]
+	]
+	var shift: int = clampi(index, 0, 5)
+	var result: Array[Dictionary] = []
+	for phase_index: int in range(starts[shift].size()):
+		var begins: float = float(starts[shift][phase_index])
+		var ends: float = float(starts[shift][phase_index + 1]) if phase_index + 1 < starts[shift].size() else SHIFT_SECONDS
+		result.append({"at": begins, "until": ends, "phase": orders[shift][phase_index], "index": phase_index})
+	return result
+
+static func arrival_schedule(index: int, base_interval: float) -> Array[Dictionary]:
+	# A dedicated seed is used once to prepare arrival opportunities. Gameplay,
+	# occupied locations and random art can never consume this random stream.
+	var timing_rng := RandomNumberGenerator.new()
+	timing_rng.seed = 141307 + clampi(index, 0, 5) * 117
+	var result: Array[Dictionary] = []
+	for phase: Dictionary in chaos_schedule(index):
+		var multiplier: float = {"normal": 1.0, "high": 0.58, "low": 1.85}[phase.phase]
+		var offset: float = {"normal": 3.5, "high": 1.8, "low": 11.0}[phase.phase]
+		var at: float = float(phase.at) + (2.8 if int(phase.index) == 0 else offset)
+		while at < minf(float(phase.until), SHIFT_SECONDS - 45.0):
+			result.append({"at": snappedf(at, 0.001), "phase_index": phase.index})
+			at += base_interval * multiplier * timing_rng.randf_range(0.92, 1.08)
+	return result
 
 static func shifts() -> Array[Dictionary]:
 	var scenarios: Array[Dictionary] = [
@@ -15,19 +65,17 @@ static func shifts() -> Array[Dictionary]:
 	var capacities: Array[int] = [4, 5, 5, 6, 6, 6]
 	
 	var rescue_targets: Array[int] = [60, 72, 78, 90, 104, 116]
-	var wave_names: Array[String] = ["School bell rush", "Festival overflow", "Harbor rescue wave", "Citywide grid failure", "Storm emergency wave", "All-stations response"]
 	for index: int in range(scenarios.size()):
 		scenarios[index].interval = intervals[index]
 		scenarios[index].max_active = capacities[index]
 		scenarios[index].target = rescue_targets[index]
 		scenarios[index].surges = []
+		scenarios[index].chaos_phases = chaos_schedule(index)
+		scenarios[index].arrival_schedule = arrival_schedule(index, intervals[index])
 		scenarios[index].traffic = [
-			{"at": 12.0, "duration": 55.0, "name": "School crossing", "position": Vector2(0.375, 0.19), "size": Vector2(0.05, 0.28), "speed_factor": 0.45},
-			{"at": 154.0, "duration": 46.0, "name": "Harbor deliveries", "position": Vector2(0.62, 0.425), "size": Vector2(0.30, 0.05), "speed_factor": 0.50}
+			{"at": 12.0, "duration": 55.0, "name": "School crossing", "position": Vector2(364, 178) / MAP_SIZE, "size": Vector2(40, 240) / MAP_SIZE, "speed_factor": 0.45},
+			{"at": 154.0, "duration": 46.0, "name": "Harbor deliveries", "position": Vector2(876, 684) / MAP_SIZE, "size": Vector2(390, 40) / MAP_SIZE, "speed_factor": 0.50}
 		]
-		var wave_times: Array = [42.0, 112.0, 182.0, 246.0] if index == 0 else [32.0, 94.0, 166.0, 239.0]
-		for wave: int in range(wave_times.size()):
-			scenarios[index].surges.append({"at": wave_times[wave], "name": wave_names[index], "calls": 2 if index < 2 else 3, "duration": 18.0 + index, "breather": 9.0 if index < 3 else 12.0})
 	return scenarios
 
 static func shift_data(index: int) -> Dictionary:
@@ -66,23 +114,56 @@ static func responder_profile(kind: String, crew_index: int) -> Dictionary:
 	return {"crew_name": str(pair[0]), "partner_name": str(pair[1]), "appearance": maxi(0, kind_index) * 3 + clampi(crew_index, 0, 2)}
 
 static func locations() -> Array[Dictionary]:
+	# Stable indices preserve existing incident identities across map revisions.
 	return [
-		{"name": "Willow Cottage", "pos": Vector2(64, 44) / Vector2(532, 316)},
-		{"name": "Moonrise Bakery", "pos": Vector2(171, 41) / Vector2(532, 316)},
-		{"name": "Little Lantern School", "pos": Vector2(268, 199) / Vector2(532, 316)},
-		{"name": "North Pier", "pos": Vector2(355, 266) / Vector2(532, 316)},
-		{"name": "The Corner Store", "pos": Vector2(128, 115) / Vector2(532, 316)},
-		{"name": "Magnolia House", "pos": Vector2(411, 34) / Vector2(532, 316)},
-		{"name": "Sunflower Apartments", "pos": Vector2(488, 35) / Vector2(532, 316)},
-		{"name": "Harbor Workshop", "pos": Vector2(384, 117) / Vector2(532, 316)},
-		{"name": "Juniper Gardens", "pos": Vector2(53, 199) / Vector2(532, 316)},
-		{"name": "Pelican Cafe", "pos": Vector2(174, 119) / Vector2(532, 316)},
-		{"name": "Beacon Clinic", "pos": Vector2(268, 121) / Vector2(532, 316)},
-		{"name": "Old Lighthouse", "pos": Vector2(514, 201) / Vector2(532, 316)},
-		{"name": "Harbor Warehouse", "pos": Vector2(487, 111) / Vector2(532, 316)},
-		{"name": "Seabreeze Cottages", "pos": Vector2(366, 201) / Vector2(532, 316)},
-		{"name": "Market Square", "pos": Vector2(153, 254) / Vector2(532, 316)},
-		{"name": "Juniper Library", "pos": Vector2(179, 201) / Vector2(532, 316)}
+		{"name": "Willow Cottage", "pos": Vector2(256, 84) / MAP_SIZE},
+		{"name": "Moonrise Bakery", "pos": Vector2(512, 84) / MAP_SIZE},
+		{"name": "Little Lantern School", "pos": Vector2(512, 540) / MAP_SIZE},
+		{"name": "North Pier", "pos": Vector2(1024, 836) / MAP_SIZE},
+		{"name": "The Corner Store", "pos": Vector2(256, 276) / MAP_SIZE},
+		{"name": "Magnolia House", "pos": Vector2(768, 84) / MAP_SIZE},
+		{"name": "Sunflower Apartments", "pos": Vector2(1024, 84) / MAP_SIZE},
+		{"name": "Harbor Workshop", "pos": Vector2(1024, 276) / MAP_SIZE},
+		{"name": "Juniper Gardens", "pos": Vector2(256, 540) / MAP_SIZE},
+		{"name": "Pelican Cafe", "pos": Vector2(512, 276) / MAP_SIZE},
+		{"name": "Beacon Clinic", "pos": Vector2(768, 276) / MAP_SIZE},
+		{"name": "Old Lighthouse", "pos": Vector2(1470, 836) / MAP_SIZE},
+		{"name": "Harbor Warehouse", "pos": Vector2(1280, 276) / MAP_SIZE},
+		{"name": "Seabreeze Cottages", "pos": Vector2(1024, 540) / MAP_SIZE},
+		{"name": "Market Square", "pos": Vector2(256, 406) / MAP_SIZE},
+		{"name": "Juniper Library", "pos": Vector2(512, 406) / MAP_SIZE},
+		{"name": "Eastwood Homes", "pos": Vector2(1280, 84) / MAP_SIZE},
+		{"name": "Bay Transit Depot", "pos": Vector2(1280, 406) / MAP_SIZE},
+		{"name": "Harbor Market", "pos": Vector2(1024, 670) / MAP_SIZE},
+		{"name": "East Quay", "pos": Vector2(1280, 836) / MAP_SIZE},
+		{"name": "South Park", "pos": Vector2(66, 836) / MAP_SIZE},
+		{"name": "Lifeboat Station", "pos": Vector2(512, 836) / MAP_SIZE},
+		{"name": "Marina Apartments", "pos": Vector2(768, 836) / MAP_SIZE},
+		{"name": "Ferry Terminal", "pos": Vector2(1280, 670) / MAP_SIZE},
+		{"name": "Community Hall", "pos": Vector2(768, 406) / MAP_SIZE},
+		{"name": "Power Substation", "pos": Vector2(1024, 406) / MAP_SIZE},
+		{"name": "Bay Stadium", "pos": Vector2(768, 540) / MAP_SIZE},
+		{"name": "Seaport Museum", "pos": Vector2(1280, 540) / MAP_SIZE},
+		{"name": "West Pump House", "pos": Vector2(256, 670) / MAP_SIZE},
+		{"name": "Civic Apartments", "pos": Vector2(512, 670) / MAP_SIZE},
+		{"name": "Harbor Hotel", "pos": Vector2(768, 670) / MAP_SIZE},
+		{"name": "Coastguard Station", "pos": Vector2(256, 836) / MAP_SIZE},
+		{"name": "Eastgate Homes", "pos": Vector2(1536, 276) / MAP_SIZE},
+		{"name": "Orchard School", "pos": Vector2(1792, 276) / MAP_SIZE},
+		{"name": "Hillcrest Clinic", "pos": Vector2(2048, 276) / MAP_SIZE},
+		{"name": "East Library", "pos": Vector2(1536, 540) / MAP_SIZE},
+		{"name": "Orchard Market", "pos": Vector2(1792, 540) / MAP_SIZE},
+		{"name": "Reservoir Works", "pos": Vector2(2048, 540) / MAP_SIZE},
+		{"name": "Cargo Terminal", "pos": Vector2(1536, 670) / MAP_SIZE},
+		{"name": "Dockside Warehouse", "pos": Vector2(1792, 836) / MAP_SIZE},
+		{"name": "Fisherman's Pier", "pos": Vector2(2048, 836) / MAP_SIZE},
+		{"name": "South Harbor Homes", "pos": Vector2(256, 1050) / MAP_SIZE},
+		{"name": "Botanical Gardens", "pos": Vector2(768, 1050) / MAP_SIZE},
+		{"name": "Maritime Academy", "pos": Vector2(1280, 1050) / MAP_SIZE},
+		{"name": "East Rescue Station", "pos": Vector2(1792, 1050) / MAP_SIZE},
+		{"name": "South Marina", "pos": Vector2(512, 1310) / MAP_SIZE},
+		{"name": "Island Clinic", "pos": Vector2(1280, 1310) / MAP_SIZE},
+		{"name": "Outer Ferry Terminal", "pos": Vector2(2048, 1310) / MAP_SIZE}
 	]
 
 static func incident_title(kind: String, severity: int, variant: int) -> String:

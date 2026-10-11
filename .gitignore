@@ -5,6 +5,9 @@
 /.agents/
 /research/
 /logs/
+/.test-user/
+/test_output/
+/artifacts/
 **/__pycache__/
 *.pyc
 *.tmp

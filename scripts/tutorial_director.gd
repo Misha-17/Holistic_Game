@@ -40,7 +40,7 @@ func begin(practice_sim: RescueSimulation) -> void:
 	sim.start_shift(0)
 	sim._rng.seed = 44004
 	sim._shift = sim._shift.duplicate(true)
-	for key: String in ["surges", "disruptions", "traffic"]: sim._shift[key] = []
+	for key: String in ["surges", "disruptions", "traffic", "chaos_phases", "arrival_schedule"]: sim._shift[key] = []
 	sim._shift["interval"] = 1000000.0
 	sim._shift["max_active"] = 3
 	sim._next_spawn = 1000000.0

@@ -1,11 +1,9 @@
 # Asset credits
 
-The title backdrop, crew concept sheet, tutorial portraits, environment studies and transparent character exploration boards were generated for Beacon Bay with imagegen. Earlier concept variants are included as development assets.
+Version 0.8 uses the original Beacon Bay pixel drawing code for its buildings, vehicles, responders and rescue animations, with softer colours, improved street details and an expanded world. Shared native drawing is in `scripts/pixel_town_art.gd` and `scripts/responder_art.gd`. The original pixel coastline title and friendly tutorial portrait sheet are used again; those images were generated for the original project.
 
-The live pixel town, campaign responders and separate character sprite atlases are drawn from the original Godot code in this project. Character animation resources and exported PNG atlases are included.
+Version 0.7's illustrated experiments remain in `assets/illustrated/` in the source history. They are excluded from the playable version 0.8 packages. Their generation prompts are retained alongside them. No frames from the user's supplied Parasoul animation are included in the game.
 
-All shipped WAV music and effects were synthesized for this project with `assets/audio/generate_audio.py`. The notes, voicings, waveforms and rhythms are original to the project; no sampled recordings or third-party soundfonts are used. The lighthouse SVG icon is also original project content.
+The new original soft score is `assets/audio/beacon_bay_soft_v080.wav`, reproducibly synthesized by `assets/audio/generate_soft_music_v080.py`. It uses soft keys and sustained chords at 72 BPM, without sampled instruments or percussion. Original music and sound effects were synthesized by `assets/audio/generate_audio.py`; earlier tracks remain in the source. The lighthouse SVG icon is original project content.
 
-User-supplied reference PDFs and JPGs informed subject matter and presentation style. Those reference documents are not included in this repository copy or used as playable game assets.
-
-The project runs in Godot, which is MIT licensed. Godot is not bundled in this source repository. The game uses the engine's bundled fallback font; no separate font files are included.
+The project runs in Godot, which is MIT licensed. The Windows package includes the official Godot 4.7 runtime and notices in `licenses/`. The game uses the engine's bundled fallback font.

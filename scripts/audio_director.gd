@@ -5,15 +5,14 @@ class_name AudioDirector
 
 const MUSIC_BUS := &"Music"
 const SFX_BUS := &"SFX"
-const MUSIC_PATH := "res://assets/audio/beacon_bay_90bpm.wav"
-const TENSION_PATH := "res://assets/audio/beacon_bay_tension.wav"
-const PRESSURE_PATH := "res://assets/audio/beacon_bay_pressure.wav"
+const MUSIC_PATH := "res://assets/audio/beacon_bay_soft_v080.wav"
+const MUSIC_FADE_IN_SECONDS := 4.0
+const MUSIC_FADE_OUT_SECONDS := 2.0
 const CUE_NAMES := ["dispatch", "rescue", "alarm", "click", "upgrade", "fail", "shift", "combo", "surge", "urgent", "arrival", "work"]
 # Drop-in sounds: put a file named <name>.ogg / .wav / .mp3 in this folder and it replaces the built-in one.
 const CUSTOM_DIR := "res://assets/audio/custom/"
 # Newer cues; until a custom file exists they borrow a built-in sound.
 const EXTRA_CUES := {"new_call": "alarm", "tick": "click", "select": "click", "boost": "upgrade", "win": "shift", "lose": "fail"}
-var _custom_music := false
 # Countdown tick: a short clip is played once a second; a long clip (a ticking-clock loop) loops while needed.
 var _tick_player: AudioStreamPlayer
 var _ticking := false
@@ -23,19 +22,14 @@ const SFX_POOL_SIZE := 10
 var music_enabled := true
 var sfx_enabled := true
 var intensity := 0.0
-var music_volume_db := -8.0
+var music_volume_db := -20.0
 var sfx_volume_db := -6.0
 
 var _music: AudioStreamPlayer
-var _tension: AudioStreamPlayer
-var _pressure: AudioStreamPlayer
 var _pool: Array[AudioStreamPlayer] = []
 var _cues: Dictionary = {}
 var _music_wanted := false
 var _music_gain := 0.0
-var _tension_gain := 0.0
-var _pressure_gain := 0.0
-var _smoothed_intensity := 0.0
 var _last_cue_ms: Dictionary = {}
 var _last_attention_ms := -10000
 var _pool_cursor := 0
@@ -46,18 +40,11 @@ func _ready() -> void:
 	_ensure_bus(MUSIC_BUS)
 	_ensure_bus(SFX_BUS)
 	_music = _make_player("CoastlineScore", MUSIC_BUS)
-	_tension = _make_player("ResponseRhythm", MUSIC_BUS)
-	_pressure = _make_player("PressurePulse", MUSIC_BUS)
-	var calm: AudioStream = _load_custom("music_calm", true)
-	var tense: AudioStream = _load_custom("music_tense", true)
-	var panic: AudioStream = _load_custom("music_panic", true)
-	_custom_music = calm != null or tense != null or panic != null
-	_music.stream = calm if calm != null else _load_wav(MUSIC_PATH, true)
-	_tension.stream = tense if tense != null else _load_wav(TENSION_PATH, true)
-	_pressure.stream = panic if panic != null else _load_wav(PRESSURE_PATH, true)
+	# This score stays gentle throughout the shift, including busy calls. The older
+	# calm/tense/panic files remain available as source assets, but aren't played.
+	var soft: AudioStream = _load_custom("music_soft", true)
+	_music.stream = soft if soft != null else _load_wav(MUSIC_PATH, true)
 	_music.volume_db = -80.0
-	_tension.volume_db = -80.0
-	_pressure.volume_db = -80.0
 	for cue_name in CUE_NAMES:
 		var custom: AudioStream = _load_custom(cue_name, false)
 		_cues[cue_name] = custom if custom != null else _load_wav("res://assets/audio/%s.wav" % cue_name, false)
@@ -106,31 +93,11 @@ func _process(delta: float) -> void:
 	if not is_instance_valid(_music):
 		return
 	var target := 1.0 if music_enabled and _music_wanted else 0.0
-	var intensity_speed := 0.60 if intensity > _smoothed_intensity else 0.24
-	_smoothed_intensity = move_toward(_smoothed_intensity, intensity, delta * intensity_speed)
-	var pressure_mix := smoothstep(0.48, 0.97, _smoothed_intensity)
-	if _custom_music:
-		# Separate tracks don't line up beat-for-beat, so crossfade calm -> tense -> panic instead of layering.
-		var to_tense := smoothstep(0.18, 0.45, _smoothed_intensity)
-		var to_panic := smoothstep(0.62, 0.85, _smoothed_intensity)
-		_music_gain = move_toward(_music_gain, target * (1.0 - to_tense), delta * 0.8)
-		_tension_gain = move_toward(_tension_gain, target * to_tense * (1.0 - to_panic), delta * 0.8)
-		_pressure_gain = move_toward(_pressure_gain, target * to_panic, delta * 0.8)
-		_music.volume_db = linear_to_db(maxf(_music_gain, 0.0001))
-		_tension.volume_db = linear_to_db(maxf(_tension_gain, 0.0001))
-		_pressure.volume_db = linear_to_db(maxf(_pressure_gain, 0.0001))
-		return
-	_music_gain = move_toward(_music_gain, target * (1.0 - 0.16 * pressure_mix), delta * 1.7)
-	var tension_target := smoothstep(0.12, 0.80, _smoothed_intensity) * 0.85 * target
-	_tension_gain = move_toward(_tension_gain, tension_target, delta * (2.4 if target == 0.0 else 0.42))
-	_pressure_gain = move_toward(_pressure_gain, pressure_mix * 0.95 * target, delta * (2.8 if target == 0.0 else 0.62))
-	_music.volume_db = linear_to_db(maxf(_music_gain, 0.0001))
-	_tension.volume_db = linear_to_db(maxf(_tension_gain, 0.0001))
-	_pressure.volume_db = linear_to_db(maxf(_pressure_gain, 0.0001))
-	if not _music_wanted and maxf(_music_gain, maxf(_tension_gain, _pressure_gain)) <= 0.0001:
+	var fade_seconds := MUSIC_FADE_IN_SECONDS if target > _music_gain else MUSIC_FADE_OUT_SECONDS
+	_music_gain = move_toward(_music_gain, target, delta / fade_seconds)
+	_music.volume_db = linear_to_db(maxf(smoothstep(0.0, 1.0, _music_gain), 0.0001))
+	if target == 0.0 and _music_gain <= 0.0001:
 		_music.stop()
-		_tension.stop()
-		_pressure.stop()
 
 
 func play_cue(cue_name: String) -> void:
@@ -208,8 +175,6 @@ func start_music() -> void:
 	if not is_instance_valid(_music) or not music_enabled or _music.playing:
 		return
 	_music.play()
-	_tension.play()
-	_pressure.play()
 
 
 func stop_music() -> void:

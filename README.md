@@ -1,97 +1,69 @@
-# Beacon Bay
+# Beacon Bay 0.8
 
-A 2D pixel rescue coordination game made with Godot. Six 5:30 shifts provide 33 minutes of active campaign time, plus a character-led tutorial and equipment upgrades.
+A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engineering and Police each have three crews; calls need several departments working together.
 
-## Run the game
+## Play
 
-Open `project.godot` in Godot 4.7 and press F5. The project uses the Compatibility renderer. The source and assets are included; no external add-ons are required.
+In the Windows package, double-click **Play.cmd**. Keep BeaconBay.exe and BeaconBay.pck together. For source, open project.godot with **Godot 4.7 stable**.
 
-## Controls
+Choose **Meet the crew** for practice, **Play solo**, or **Play with friends**. Host a room on your LAN or join the Azure server address. All players and the server must use this build (network protocol 8).
 
-Select a numbered call, then choose a specific responder on the map. Hover over a station or vehicle to inspect its crew. Click the crew, review the route, then press Enter or the map's Send button.
+- Pick a crew, then click a call. Or hover a call and press **1–4** for the nearest available crew in that department.
+- **Q:** scout. **E:** supply a crew on scene. **Space:** coffee boost.
+- **Left-drag:** pan (middle-drag also works). **Wheel:** zoom toward the pointer. **WASD / arrows:** pan.
+- **Minimap:** click or drag to jump to another district. **OVERVIEW:** see the whole town; **EXPLORE:** return to a movable close view. Dragging, arrow keys, wheel input and minimap clicks also leave overview automatically.
+- Zooming out during play stops before the map fills the window, so you can always keep panning.
+- **Right-click / Esc:** clear selection. **F:** rescue close-up.
+- Enable **Microphone** in Settings; hold **V** to talk. Use headphones.
+- **Esc:** menu. Solo pauses; a shared shift continues while personal menus are open.
 
-- 1 / 2 / 3: highlight fire / medical / engineering crews
-- Q: scout the selected call
-- E: use supplies
-- Space: Rally the team
-- F: show the live rescue close-up
-- Tab: cycle calls
-- Escape: pause
-- F11: fullscreen
+Departments split automatically between connected players. The campaign has six 5:30 shifts. The world is **2304 by 1536**, with **48 playable locations**. Sixteen new locations and streets extend beyond the previous eastern and southern boundaries; the existing 32 sites remain in their original positions. The game starts in a close, movable view. A click selects or dispatches on release; dragging across a crew or call never dispatches it. Travel is calibrated to keep the more distant districts practical to reach. Original crew rules, joint calls, upgrades and campaign remain.
 
-Crew cards locate responders on the map. Different starting positions and road conditions affect response time. A wrong specialist spends the trip without completing the rescue. Play Meet the Crew to learn the controls through five practice rescues.
+## Softer music
 
-## Project contents
+A new gentle, drum-free score uses soft keys and sustained chords at 72 BPM. Music is 12 dB quieter than version 0.7, fades in over four seconds, and stays calm during busy periods. Voice and sound-effect levels are unchanged.
 
-- `scripts/`: game and character showcase code
-- `scenes/`: main game and separate character showcase
-- `assets/art/`: game art and concept studies
-- `assets/characters/`: transparent boards, pixel sprite atlases and animation resources
-- `assets/audio/`: original music, effects and their Python generator
+## Local recordings
 
-The separate character showcase can be run from `scenes/character_showcase.tscn` with F6.
+Use **Settings** or the in-game **AUDIO** button. All capture switches start off each launch.
 
-## Department prototype (branch idea, Oct 2026)
+| Setting | Effect |
+| --- | --- |
+| Microphone | Enables in-game push-to-talk on V. |
+| Allow team recording | Allows teammates to include your transmitted voice in their local files. |
+| Save team voice | Saves your own voice plus consenting teammates in one mixed WAV per shift on your computer. |
+| Record my mouse | Saves your own in-game movements, every mouse button press/release and wheel input in a local JSONL file. |
 
-This copy tests a "one role for everyone" model instead of the four specialist roles (Dispatcher, Resource manager, Field coordinator, Support lead).
+**Open recordings** opens the game data folder. Mouse/game logs are under `research/`; audio and its timing sidecar are under `research/voice/`. No recordings upload to Azure. The server relays voice but does not record. Only speech sent using in-game voice is captured; Discord/Teams calls and system audio are not included. Teammates' mouse input is never collected on your computer.
 
-- There are four departments: Fire, Medical, Engineering and **Police** (new).
-- Every player has the same job: send the crews of the departments they command. Departments split automatically by player count:
-  - 1 player: all four
-  - 2 players: Fire + Engineering / Medical + Police
-  - 3 players: host gets Fire + Police, the others Medical / Engineering
-  - 4 players: one department each
-- If someone leaves, departments reshuffle for the remaining players.
-- Everyone sees the whole map and can scout, use supplies, rally and ping. You cannot send another player's crews (the host also enforces this), so calls that need two crew types force players to talk.
-- The dispatch cooldown is now per department, so four players can send crews at the same moment.
-- Police calls: car collision, lost child, crowd at the square, break-in, blocked junction. Police also back up severe floods (evacuation) and power cuts (traffic lights out). Market and festival disruptions bring more police calls.
-- Keys 1-4 highlight Fire / Medical / Engineering / Police crews.
-- The tutorial still teaches only the original three crews.
+Files begin when a shift starts, including when joining late; tutorials are excluded. Turning saving off pauses capture; turning it back on during the same shift keeps one WAV and inserts silence in the paused interval. End-of-shift, disconnect and normal exit finalize files. WAV headers checkpoint every second and interrupted files can recover on the next launch. Disk failures stop saving without stopping play.
 
-### Changes from 4 Oct 2026
+## Repeatable emergency waves
 
-- **Sending a crew:** pick a crew first (click a station, a vehicle on the road, a crew card, or press 1-4), then click the call. The selected crew gets a pulsing gold ring. Hover a call to see the route and whether they make it in time. Right-click or ESC clears the selection. There are no crew pop-up menus any more.
-- **Teams:** every call needs 2-4 departments (no single-department calls since 7.10.2026). Severity 1 = two departments, 2 = three, 3 = all four. All-four calls appear in every shift, including shift 1, after the first minute: 10% of calls in shift 1, 12% / 14% / 16% / 16% / 20% in shifts 2-6, and every shift is guaranteed at least one by its 8th call and two by its 16th. Three-department calls are slightly less common in later shifts (28% + 4% per shift instead of 30% + 5%) to keep shift 5 fair. Icons under each call show which crews it still needs. The tutorial still uses one-crew calls to teach one thing at a time.
-- Balance check (bot with human-like delays): wins all six shifts. Shift 1 has 3 four-department calls, 0 failures (116/60). Shift 5 is the tightest: 114/104 with community at 56 against a 50 minimum. Four-department calls fail no more often than smaller ones, so deadlines were not changed.
-- **3 crews per department** (12 in total) so team calls stay winnable.
-- **Scouting** only reveals what a "?" call needs. It no longer adds time.
-- **Supplies** only work once a crew is on scene.
-- **Upgrades** that add extra crews are gone; the other upgrades stay for now.
-- **Full HD:** the game canvas is 1600x900 (16:9), so fullscreen (F11) fills 1920x1080 exactly and everything is 20% bigger and crisp.
-- **Less text:** the game name, level name, map labels, hint line, workshop credits and the "watch crew" button are gone from the game screen. The top bar shows rescued / target, community, time, and a flashing warning before each wave. New calls pulse on the map and in the list.
-- The tutorial follows the new flow (scout, send Bram, supply once he arrives).
-- **Full-screen map (later on 4 Oct):** the town now fills the whole window at an exact 3x pixel scale. The top bar (rescued, community, time, rally, help, pause) floats over the map, see-through and click-through except its buttons, and call markers are pushed out from under it. The crew strip at the bottom is also see-through. The call list, the crew/call side panel and the crew-updates ticker are gone; the selected call's map card shows what it still needs, who to ask in co-op, and the Q/E hints. North Pier's call spot moved slightly inland so it never sits under the crew strip.
-- **Attention and readability (4 Oct, later):** every call has a countdown ring (green, yellow, red) with the seconds in big outlined numbers. New calls flash gold with a NEW tag; calls still missing crews pulse; calls under 20 s that still need crews throb with big red rings. Map text uses a heavier outlined font; the call card says IN TIME +12s / TOO LATE -5s. Vehicle rings are quieter so they don't look like calls.
-- **Temporary send shortcut:** hover a call (or select one) and press 1 / 2 / 3 / 4 to send the nearest free fire / medic / engineer / police crew there. The call card shows which keys it still needs ("PRESS 1 FIRE 2 MED").
-- "Rally" is now **Coffee Boost** (SPACE).
-- **Font:** back to the normal font (the artificially bolded version rendered with holes); map text keeps its larger size and dark outline.
-- **Countdowns are real seconds now.** Before, a call's timer slowed to about a quarter speed once crews arrived and sped up as danger rose. Now it always ticks one second per second; each deadline includes the crews' work time instead (balance re-checked with the bot).
-- **Sound:** drop-in sound folder `assets/audio/custom/` (see SOUND_LIST.txt there). New sound slots: new_call, tick (every second while a call is about to fail without its crews), select, boost, win, lose. With custom music the game crossfades calm -> tense -> panic as the town's pressure rises.
+A fixed, versioned normal/high/low sequence and seeded arrival opportunities repeat at the same **active gameplay times** for every group. Phase boundaries never depend on team performance. Solo pause stops the active clock; shared menus do not. All play uses normal speed.
 
-### Playing on two or more computers
+Wave names, transition times and skipped arrivals appear only in local logs when logging is enabled. There are no wave banners, countdowns or phase sound cues. If a group has filled the active-call limit, an arrival opportunity is skipped and logged; later phases retain their original times. Team actions can still change which calls remain unresolved and their outcomes.
 
-The host clicks PLAY WITH FRIENDS > HOST A ROOM. The lobby shows the addresses to share.
+The game contains no classifier, workload model, adaptive assistance or required questionnaire.
 
-- **Same Wi-Fi / LAN (easiest):** others type the "Same network" address (e.g. 192.168.1.23) and press JOIN.
-  - The first time, Windows asks whether Godot / Beacon Bay may use the network: tick **Private networks** and allow. If you clicked away, allow `Godot` (or the exported game) in Windows Defender Firewall, or allow UDP port 24680.
-  - Your Wi-Fi must be set to a *Private* network in Windows. Campus or guest Wi-Fi often blocks devices from seeing each other; use a phone hotspot or Tailscale instead.
-- **Over the internet:** the host's game asks the router to open UDP port 24680 (UPnP). If it works, the lobby shows "friends can join <public IP>". Many routers and mobile networks don't allow this.
-- **Reliable fallback (no router settings):** install Tailscale (free) on every computer, sign in to the same account/tailnet, and join using the host's 100.x.x.x address, which also appears in the lobby. ZeroTier or Radmin VPN work the same way.
-- A join gives up after ~9 seconds with a hint instead of hanging.
-- Smooth guests (laptop lag fix): the host now sends a lean network copy of the game state (no save-file encoding, no shift plan, no event log, settled calls dropped after 8 s): about 5x smaller and about 4x faster for the guest to apply. Between updates the guest runs the same simulation itself, so crews glide and countdowns tick every frame; each host update corrects it (measured error under 2 px, timers within 0.02 s). A guest's own dispatch moves the crew immediately instead of waiting for the host. Crew markers on the road now move every frame (also on the host), and the town backdrop is no longer repainted on every update.
-- Press **F3** in game to show FPS, ping to the host and how often host updates arrive. Low FPS = the computer is slow at drawing; high ping or long update gaps = the network.
-- The IP box in the lobby was hidden behind the menu panel after the full-screen change; it is visible again.
+## Build and verification
 
-To test multiplayer on one computer: in the Godot editor choose Debug > Customize Run Instances, enable multiple instances (2-4), press F5, host in one window and join 127.0.0.1 in the others.
+Run `powershell -ExecutionPolicy Bypass -File tools/package.ps1` on Windows; pass `-GodotConsole` and `-GodotGui` for other engine paths. It builds the Windows portable package, Linux-server resource pack and clean source ZIP under `artifacts/`. The portable build includes the official Godot runtime because export templates were unavailable locally; its license texts are in `licenses/`.
 
-A backup of the code before this change is in `_backup_before_departments/` (ignored by Godot).
+Tests:
 
-## Data and multiplayer
+```
+godot --headless --path . --script tests/test_simulation.gd
+godot --headless --path . --script tests/test_player_capture.gd
+godot --headless --path . --script tests/test_map_navigation.gd
+godot --path . --script tests/test_map_viewport_input.gd
+godot --headless --path . --script tests/test_music_audio.gd
+godot --headless --path . --script tests/test_session_lifecycle.gd
+godot --headless --path . --script tests/test_snapshot_transport.gd
+python tests/run_voice_tests.py --godot /path/to/godot
+python tests/run_main_network_tests.py --godot /path/to/godot
+```
 
-Progress saves locally. Research logging is optional, off on each launch, and stays on the player's computer. No microphone recording or automatic data upload is implemented. LAN play supports up to four players; separate-machine LAN compatibility has not been verified.
+Simulation tests cover all six shifts, tutorial progression, map routes, hidden phases under divergent player decisions, arrival caps and save/network continuity. Voice tests use synthetic PCM and real loopback ENet sessions with four clients. Physical microphones, separate computers and the live Azure subscription still require a real-team smoke test.
 
-## Export
-
-Install the matching Godot export templates, open Project > Export, and use Windows Desktop. Create the local `build` folder if needed. Compiled builds and generated caches are excluded from Git.
-
-See `ASSET_CREDITS.md` for asset provenance.
+See [Azure server setup](azure-connect.md), [validation notes](docs/GAME_POLISH_VALIDATION.md), [navigation evidence](docs/MAP_NAVIGATION_VALIDATION.md), and [asset credits](ASSET_CREDITS.md).

@@ -24,9 +24,9 @@ var selected_id: int = -1
 var selected_unit_id: int = -1
 var tutorial_active: bool = false
 var occlusions: Array[Rect2] = []
-var map_rect := Rect2(24, 146, 1064, 632)
+var map_rect := Rect2(Vector2(56, 34), BeaconCampaign.MAP_SIZE * 1.5)
 # The part of the map that is actually visible; markers are kept inside it.
-var view_rect := Rect2(24, 146, 1064, 632)
+var view_rect := Rect2(Vector2(56, 34), BeaconCampaign.MAP_SIZE * 1.5)
 # Co-op: which player commands the departments you don't (kind -> "P2").
 var owner_labels: Dictionary = {}
 var reduced_motion: bool = false
@@ -108,6 +108,7 @@ func _follow_moving_crews() -> void:
 		var unit: Dictionary = _unit(int(item.unit.id))
 		if unit.is_empty(): continue
 		var point: Vector2 = _world(unit.pos)
+		if not view_rect.has_point(point): continue
 		var marker := Rect2(point - Vector2(15, 15), Vector2(30, 30))
 		item.unit = unit
 		item.point = point
@@ -182,7 +183,7 @@ func _occluded(point: Vector2) -> bool:
 	return false
 
 func _hit_at(point: Vector2) -> Dictionary:
-	if not is_visible_in_tree() or sim == null or _occluded(point):
+	if not is_visible_in_tree() or sim == null or not view_rect.has_point(point) or _occluded(point):
 		return {}
 	for i in range(_hits.size() - 1, -1, -1):
 		if _hits[i].rect.has_point(point):
@@ -240,23 +241,26 @@ func handle_input(event: InputEvent) -> bool:
 			queue_redraw()
 			return true
 		Input.set_default_cursor_shape(Input.CURSOR_ARROW)
-	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-		var point: Vector2 = get_global_transform_with_canvas().affine_inverse() * event.position
-		var hit: Dictionary = _hit_at(point)
-		if not hit.is_empty():
-			get_viewport().set_input_as_handled()
-			match str(hit.type):
-				# The game decides: with a crew selected, clicking a call sends it there.
-				"call": incident_selected.emit(int(hit.id))
-				"unit": unit_selected.emit(int(hit.id))
-				"base":
-					var pick: int = _station_pick(str(hit.base_key))
-					if pick >= 0:
-						unit_selected.emit(pick)
-					elif not (hit.get("units", []) as Array).is_empty():
-						unit_selected.emit(int(hit.units[0]))
-			return true
+	# Main owns the click-versus-drag gesture; activation is committed on release.
 	return false
+
+func pointer_target(screen_position: Vector2) -> Dictionary:
+	var point: Vector2 = get_global_transform_with_canvas().affine_inverse() * screen_position
+	return _hit_at(point).duplicate(true)
+
+func activate_target(hit: Dictionary) -> void:
+	if hit.is_empty() or not is_visible_in_tree() or sim == null: return
+	match str(hit.get("type", "")):
+		"call":
+			var call := _call(int(hit.id))
+			if not call.is_empty() and call.get("status", "") in ["active", "working"]:
+				incident_selected.emit(int(hit.id))
+		"unit":
+			if not _unit(int(hit.id)).is_empty(): unit_selected.emit(int(hit.id))
+		"base":
+			var pick: int = _station_pick(str(hit.base_key))
+			if pick >= 0: unit_selected.emit(pick)
+			elif not (hit.get("units", []) as Array).is_empty(): unit_selected.emit(int(hit.units[0]))
 
 func _refresh_layout() -> void:
 	_calls.clear()
@@ -300,6 +304,7 @@ func _refresh_layout() -> void:
 	for incident in active:
 		var id: int = int(incident.id)
 		var point: Vector2 = _world(incident.get("pos", Vector2.ZERO))
+		if not view_rect.has_point(point): continue
 		if _pin_origins.get(id, Vector2(INF, INF)) != point:
 			_pin_positions.erase(id)
 			_pin_origins[id] = point
@@ -341,8 +346,7 @@ func _layout_roads() -> void:
 		area = area.intersection(view_rect)
 		if area.size.x <= 0 or area.size.y <= 0:
 			continue
-		var speed: float = float(zone.get("speed_factor", 1.0))
-		var label: String = "%s · %d%% speed · %ds" % [zone.get("name", "Slow road"), roundi(speed * 100), ceili(float(zone.get("remaining", 0)))]
+		var label: String = "%s · %ds" % [zone.get("name", "Slow traffic"), ceili(float(zone.get("remaining", 0)))]
 		var width: float = minf(310, ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 26)
 		var size := Vector2(width, 24)
 		var choices: Array[Vector2] = [Vector2(area.position.x, area.position.y - 30), Vector2(area.position.x, area.end.y + 7), area.get_center() + Vector2(22, -38), Vector2(area.position.x - width - 8, area.get_center().y - 12), Vector2(area.end.x + 8, area.get_center().y - 12)]
@@ -368,6 +372,7 @@ func _layout_bases() -> void:
 			_station_members[int(unit.id)] = str(group.key)
 	for group in groups:
 		var point: Vector2 = _world(group.home)
+		if not view_rect.has_point(point): continue
 		if _base_origins.get(group.key, Vector2(INF, INF)) != point:
 			_base_positions.erase(group.key)
 			_base_origins[group.key] = point
@@ -425,6 +430,7 @@ func _layout_mobile_crews() -> void:
 		if _station_members.has(int(unit.id)): continue
 		var id: int = int(unit.id)
 		var point: Vector2 = _world(unit.pos)
+		if not view_rect.has_point(point): continue
 		var marker := Rect2(point - Vector2(15, 15), Vector2(30, 30))
 		var hit := {"rect": marker.grow(8), "type": "unit", "id": id}
 		_crews.append({"unit": unit, "rect": marker, "point": point, "base": false, "expanded": false, "marker": marker, "hit": hit})
@@ -561,12 +567,30 @@ func _draw_routes() -> void:
 			route.append(_world(point))
 		_draw_route(route, GOLD, true, true)
 
+func _clip_route_segment(start: Vector2, finish: Vector2) -> PackedVector2Array:
+	var delta := finish - start
+	var enter := 0.0
+	var leave := 1.0
+	var bounds := view_rect.grow(-5)
+	for axis in range(2):
+		if absf(delta[axis]) < .0001:
+			if start[axis] < bounds.position[axis] or start[axis] > bounds.end[axis]: return PackedVector2Array()
+		else:
+			var a: float = (bounds.position[axis] - start[axis]) / delta[axis]
+			var b: float = (bounds.end[axis] - start[axis]) / delta[axis]
+			enter = maxf(enter, minf(a, b))
+			leave = minf(leave, maxf(a, b))
+			if enter > leave: return PackedVector2Array()
+	return PackedVector2Array([start + delta * enter, start + delta * leave])
+
 func _draw_route(points: Array[Vector2], color: Color, dashed: bool, emphasis: bool) -> void:
 	if points.size() < 2:
 		return
 	for i in range(points.size() - 1):
-		var start: Vector2 = points[i]
-		var finish: Vector2 = points[i + 1]
+		var segment := _clip_route_segment(points[i], points[i + 1])
+		if segment.is_empty(): continue
+		var start: Vector2 = segment[0]
+		var finish: Vector2 = segment[1]
 		if start.distance_to(finish) < 1:
 			continue
 		var width: float = 3 if emphasis else 2
@@ -586,6 +610,7 @@ func _draw_route(points: Array[Vector2], color: Color, dashed: bool, emphasis: b
 				var perpendicular := Vector2(-direction.y, direction.x)
 				draw_colored_polygon(PackedVector2Array([center + direction * 6, center - direction * 4 + perpendicular * 4, center - direction * 4 - perpendicular * 4]), color)
 	var origin: Vector2 = points[0]
+	if not view_rect.has_point(origin): return
 	draw_rect(Rect2(origin - Vector2(4, 4), Vector2(8, 8)), INK)
 	draw_rect(Rect2(origin - Vector2(2, 2), Vector2(4, 4)), color)
 
@@ -646,14 +671,14 @@ func _draw_pin(point: Vector2, incident: Dictionary) -> void:
 	if not reduced_motion:
 		if age >= 0.0 and age < 5.0:
 			var wave: float = fposmod(age * 2.0, 1.0)
-			draw_arc(point, 30 + wave * 44, 0, TAU, 40, Color(GOLD, 1.0 - wave), 5, false)
+			draw_arc(point, 30 + wave * 30, 0, TAU, 40, Color(GOLD, .72 * (1.0 - wave)), 3, false)
 		elif urgent and waiting:
 			var wave: float = fposmod(_elapsed * 1.4, 1.0)
-			draw_arc(point, 30 + wave * 60, 0, TAU, 40, Color(RED, 1.0 - wave), 6, false)
-			draw_arc(point, 30 + fposmod(wave + .5, 1.0) * 60, 0, TAU, 40, Color(RED, (1.0 - fposmod(wave + .5, 1.0)) * .6), 3, false)
+			draw_arc(point, 30 + wave * 36, 0, TAU, 40, Color(RED, 1.0 - wave), 6, false)
+			draw_arc(point, 30 + fposmod(wave + .5, 1.0) * 36, 0, TAU, 40, Color(RED, (1.0 - fposmod(wave + .5, 1.0)) * .6), 3, false)
 		elif waiting:
 			var wave: float = fposmod(_elapsed * 0.45 + int(incident.id) * 0.37, 1.0)
-			draw_arc(point, 30 + wave * 34, 0, TAU, 36, Color(color, 0.75 * (1.0 - wave)), 3, false)
+			draw_arc(point, 30 + wave * 19, 0, TAU, 36, Color(color, 0.35 * (1.0 - wave)), 2, false)
 	# Shadow + countdown ring around the marker.
 	draw_circle(point + Vector2(3, 4), 30, Color(0, 0, 0, .35))
 	draw_circle(point, 30, Color(INK, .92))
@@ -682,8 +707,6 @@ func _draw_pin(point: Vector2, incident: Dictionary) -> void:
 		draw_arc(point, 36, 0, TAU, 40, CREAM, 3, false)
 	# Time left, big and outlined, above the marker.
 	_btext("%d" % ceili(deadline), point + Vector2(0, -42), 21, RED if urgent else CREAM, true)
-	if age >= 0.0 and age < 6.0:
-		_btext("NEW", point + Vector2(28, -24), 13, GOLD)
 
 # How many crews this call still needs (unknown calls count as needing help until a crew arrives).
 func _missing(incident: Dictionary) -> int:
@@ -748,7 +771,7 @@ func _draw_call(item: Dictionary) -> void:
 	var line: String = ""
 	var line_color: Color = MUTED
 	if not known:
-		line = "Unknown needs · Q to scout"
+		line = "Unconfirmed report"
 		line_color = GOLD
 	elif int(_preview_target) == int(incident.id) and not _preview.is_empty():
 		var name: String = str(_preview.get("name", "Crew"))
@@ -770,9 +793,9 @@ func _draw_call(item: Dictionary) -> void:
 		for kind in ROLES:
 			if _assigned(incident, kind) < int(incident.get("needs", {}).get(kind, 0)) and _owned(kind):
 				keys.append("%s %s" % [KEY_OF[kind], ROLE_SHORT[kind]])
-		if not keys.is_empty(): hint = "PRESS  " + "   ".join(keys)
+		if not keys.is_empty(): hint = "   ".join(keys)
 	elif selected and _crew_on_scene(incident) and int(incident.get("supply_count", 0)) < 2:
-		hint = "E  SUPPLIES (%d LEFT)" % int(sim.supplies)
+		hint = "E  SUPPLIES: %d" % int(sim.supplies)
 	if not known:
 		hint = "Q  SCOUT"
 	if hint != "":
@@ -792,13 +815,13 @@ func _margin_text(estimate: Dictionary) -> String:
 			for kind in ROLES:
 				if _assigned(call, kind) < int(call.get("needs", {}).get(kind, 0)) and not (not estimate.is_empty() and str(estimate.get("kind", "")) == kind):
 					missing.append(ROLE_SHORT[kind])
-		return "also needs " + " + ".join(missing) if not missing.is_empty() else "waiting for crews"
+		return "Needs " + " + ".join(missing) if not missing.is_empty() else "Awaiting crews"
 	var margin: float = float(estimate.get("margin", 0))
 	return ("IN TIME  +%ds" % floori(margin)) if margin >= 0 else ("TOO LATE  -%ds" % ceili(-margin))
 
 func _team_status(incident: Dictionary) -> String:
 	if not bool(incident.get("discovered", true)):
-		return "Unknown needs · Q to scout"
+		return "Unconfirmed report"
 	var missing: Array[String] = []
 	for kind in ROLES:
 		if _assigned(incident, kind) < int(incident.get("needs", {}).get(kind, 0)):
@@ -825,6 +848,7 @@ func _draw_crew(item: Dictionary) -> void:
 	var hovered: bool = int(unit.id) == hovered_unit_id
 	var available: bool = _available(unit)
 	var center: Vector2 = item.point
+	if not view_rect.grow(-18).has_point(center): return
 	var marker: Rect2 = item.marker
 	if selected:
 		var pulse: float = 0.0 if reduced_motion else (sin(_elapsed * 6.0) + 1.0) * 2.0

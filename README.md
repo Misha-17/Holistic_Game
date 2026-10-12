@@ -1,13 +1,8 @@
-# Beacon Bay 0.8
+# Beacon Bay
 
 A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engineering and Police each have three crews; calls need several departments working together.
 
 ## Play
-
-In the Windows package, double-click **Play.cmd**. Keep BeaconBay.exe and BeaconBay.pck together. For source, open project.godot with **Godot 4.7 stable**.
-
-Choose **Meet the crew** for practice, **Play solo**, or **Play with friends**. Host a room on your LAN or join the Azure server address. All players and the server must use this build (network protocol 8).
-
 - Pick a crew, then click a call. Or hover a call and press **1–4** for the nearest available crew in that department.
 - **Q:** scout. **E:** supply a crew on scene. **Space:** coffee boost.
 - **Left-drag:** pan (middle-drag also works). **Wheel:** zoom toward the pointer. **WASD / arrows:** pan.
@@ -20,8 +15,6 @@ Choose **Meet the crew** for practice, **Play solo**, or **Play with friends**. 
 Departments split automatically between connected players. The campaign has six 5:30 shifts. The world is **2304 by 1536**, with **48 playable locations**. Sixteen new locations and streets extend beyond the previous eastern and southern boundaries; the existing 32 sites remain in their original positions. The game starts in a close, movable view. A click selects or dispatches on release; dragging across a crew or call never dispatches it. Travel is calibrated to keep the more distant districts practical to reach. Original crew rules, joint calls, upgrades and campaign remain.
 
 ## Softer music
-
-A new gentle, drum-free score uses soft keys and sustained chords at 72 BPM. Music is 12 dB quieter than version 0.7, fades in over four seconds, and stays calm during busy periods. Voice and sound-effect levels are unchanged.
 
 ## Local recordings
 

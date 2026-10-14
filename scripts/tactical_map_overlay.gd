@@ -369,6 +369,9 @@ func _layout_roads() -> void:
 		var road: Dictionary = sim.get_road_event(road_id) if road_id >= 0 and sim.has_method("get_road_event") else {}
 		var label: String = "%s · %ds" % [zone.get("name", "Slow traffic"), ceili(float(zone.get("remaining", 0)))]
 		var kind: String = str(road.get("clear_kind", ""))
+		if bool(road.get("hazard", false)):
+			_layout_hazard(road, area, zone)
+			continue
 		if not road.is_empty():
 			var who: String = "POLICE" if kind == "police" else "ENGINEERS"
 			var crew: Dictionary = _unit(int(road.assigned_unit))
@@ -390,6 +393,34 @@ func _layout_roads() -> void:
 			_hits.insert(0, {"rect": area.grow(10), "type": "road", "id": road_id})
 			_hits.append({"rect": Rect2(area.get_center() - Vector2(34, 18), Vector2(68, 36)), "type": "road", "id": road_id})
 			_hits.append({"rect": rect, "type": "road", "id": road_id})
+
+# Blackouts get a substation badge (where an engineer restores power) and a
+# label; storms get a label only (nobody can clear them, so nothing to click).
+func _layout_hazard(road: Dictionary, area: Rect2, zone: Dictionary) -> void:
+	var road_id: int = int(road.id)
+	var seconds: int = ceili(float(zone.get("remaining", 0)))
+	var crew: Dictionary = _unit(int(road.get("assigned_unit", -1)))
+	var label: String
+	var anchor: Vector2
+	if str(road.type) == "blackout":
+		anchor = _world(Vector2(road.get("target", Vector2(road.position) + Vector2(road.size) * .5)))
+		if str(road.status) == "clearing": label = "%s RESTORING POWER · %s" % [str(crew.get("crew_name", "CREW")).to_upper(), str(road.street).to_upper()]
+		elif not crew.is_empty(): label = "%s ON THE WAY TO THE SUBSTATION" % str(crew.get("crew_name", "CREW")).to_upper()
+		else: label = "BLACKOUT · %s · ENGINEER TO SUBSTATION · %ds" % [str(road.street).to_upper(), seconds]
+	else:
+		anchor = area.get_center() + Vector2(0, 40)
+		label = "%s · EVERYONE DRIVES SLOWLY · %ds" % [str(road.name).to_upper(), seconds]
+	var width: float = minf(520, ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x + 40)
+	var size := Vector2(width, 28)
+	var badge := Rect2(anchor - Vector2(36, 20), Vector2(72, 40))
+	if str(road.type) == "blackout": _occupied.append(badge.grow(6))
+	var choices: Array[Vector2] = [anchor + Vector2(-width * .5, -66), anchor + Vector2(-width * .5, 34), anchor + Vector2(44, -14), anchor + Vector2(-width - 44, -14)]
+	var rect: Rect2 = _place_rect(choices, size)
+	_roads.append({"area": area, "rect": rect, "text": label, "road": road, "kind": str(road.clear_kind), "hazard": true, "anchor": anchor})
+	_occupied.append(rect.grow(5))
+	if str(road.type) == "blackout":
+		_hits.append({"rect": badge.grow(6), "type": "road", "id": road_id})
+		_hits.append({"rect": rect, "type": "road", "id": road_id})
 
 func _layout_bases() -> void:
 	var groups: Array[Dictionary] = []
@@ -561,9 +592,27 @@ func _draw() -> void:
 		_draw_crew(item)
 
 func _draw_roads() -> void:
+	# Flooded bridges (level 3): blue stripes, nobody can cross until it reopens.
+	if sim.has_method("flooded_bridges"):
+		for flood: Dictionary in sim.flooded_bridges():
+			var area := Rect2(_world(flood.position), Vector2(flood.size) * map_rect.size)
+			draw_rect(area, Color(0.12, 0.35, 0.65, 0.55))
+			for y in range(int(area.position.y), int(area.end.y), 16):
+				draw_line(Vector2(area.position.x, y), Vector2(area.end.x, minf(y + area.size.x * .6, area.end.y)), Color("9fd3ff"), 3, false)
+			draw_rect(area, Color("9fd3ff"), false, 3)
+			var label: String = "%s FLOODED · %ds" % [str(flood.name).to_upper(), ceili(float(flood.remaining))]
+			var width: float = ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x + 24
+			var rect := Rect2(Vector2(area.get_center().x - width * .5, area.position.y - 34), Vector2(width, 26))
+			_panel(rect, Color("12304ff2"), Color("9fd3ff"), 2)
+			_text(label, rect.position + Vector2(12, 18), 12, CREAM)
+	_draw_forecast()
 	for item in _roads:
 		var rect: Rect2 = item.area
 		var road: Dictionary = item.get("road", {})
+		if bool(item.get("hazard", false)):
+			var tint: Color = HAZARD_COLOR.get(str(road.type), GOLD)
+			draw_rect(rect, Color(tint, .55), false, 3)
+			continue
 		if road.is_empty():
 			draw_rect(rect, Color(1.0, .66, .29, .15))
 			draw_rect(rect, Color("daa763"), false, 1)
@@ -610,18 +659,72 @@ func _draw_roads() -> void:
 			draw_rect(bar, Color(CREAM, .25))
 			draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(float(road.get("clear_progress", 0.0)), 0.0, 1.0), bar.size.y)), GREEN)
 
+const HAZARD_COLOR := {"blackout": Color("bda6ff"), "sandstorm": Color("f0b36b"), "squall": Color("9fc4e0"), "flood": Color("9fd3ff")}
+
+func _draw_hazard_marker(item: Dictionary) -> void:
+	var road: Dictionary = item.road
+	if str(road.type) != "blackout": return
+	var anchor: Vector2 = item.anchor
+	var hovered: bool = int(road.id) == hovered_road_id
+	var invites: bool = int(road.assigned_unit) < 0 and _unit(selected_unit_id).get("kind", "") == "engineer"
+	var pulse: float = 0.0 if reduced_motion else (sin(_elapsed * 6.0) + 1.0) * .5
+	draw_circle(anchor, 34.0 + pulse * 6.0, Color(ROLE_COLOR.engineer, .18))
+	var badge := Rect2(anchor - Vector2(36, 20), Vector2(72, 40))
+	_panel(badge, Color(INK, .96), GOLD if invites or hovered else ROLE_COLOR.engineer, 3 if invites or hovered else 2)
+	# Lightning bolt + ENG: an engineer here turns the lights back on.
+	var b: Vector2 = badge.position + Vector2(14, 8)
+	draw_colored_polygon(PackedVector2Array([b + Vector2(6, 0), b + Vector2(0, 13), b + Vector2(5, 13), b + Vector2(2, 24), b + Vector2(12, 8), b + Vector2(7, 8)]), ROLE_COLOR.engineer)
+	_btext("ENG", badge.position + Vector2(48, 26), 14, ROLE_COLOR.engineer, true)
+	if str(road.status) == "clearing":
+		var bar := Rect2(badge.position + Vector2(5, 33), Vector2(62, 4))
+		draw_rect(bar, Color(CREAM, .25))
+		draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(float(road.get("clear_progress", 0.0)), 0.0, 1.0), bar.size.y)), GREEN)
+
+# Hazards about to start: a dashed outline with a countdown, so the team can
+# move crews out of the way (or into position) before it hits.
+func _draw_forecast() -> void:
+	if not sim.has_method("upcoming_hazards"): return
+	for item: Dictionary in sim.upcoming_hazards():
+		var full := Rect2(_world(item.position), Vector2(item.size) * map_rect.size)
+		var area: Rect2 = full.intersection(view_rect)
+		if area.size.x <= 0 or area.size.y <= 0: continue
+		var tint: Color = HAZARD_COLOR.get(str(item.type), GOLD)
+		var blink: float = 1.0 if reduced_motion else (.55 + .45 * (sin(_elapsed * 8.0) + 1.0) * .5)
+		var dash: float = 18.0
+		for edge: Array in [[area.position, Vector2(area.end.x, area.position.y)], [Vector2(area.end.x, area.position.y), area.end], [area.end, Vector2(area.position.x, area.end.y)], [Vector2(area.position.x, area.end.y), area.position]]:
+			var a: Vector2 = edge[0]
+			var b: Vector2 = edge[1]
+			var length: float = a.distance_to(b)
+			var t: float = 0.0
+			while t < length:
+				draw_line(a.lerp(b, t / length), a.lerp(b, minf(length, t + dash * .6) / length), Color(tint, blink), 3, false)
+				t += dash
+		var label: String = "%s IN %ds" % [str(item.title).to_upper(), ceili(float(item["in"]))]
+		var width: float = ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x + 28
+		# Small areas (a bridge): label just above it. Districts: label in the middle.
+		var label_y: float = area.position.y - 38.0 if area.size.y < 300.0 else area.get_center().y - 60.0
+		var at := Vector2(clampf(area.get_center().x - width * .5, view_rect.position.x + 8, view_rect.end.x - width - 8), clampf(label_y, view_rect.position.y + 150, view_rect.end.y - 60))
+		var rect := Rect2(at, Vector2(width, 28))
+		_panel(rect, Color(INK, .92), Color(tint, blink), 2)
+		_text(label, rect.position + Vector2(14, 19), 13, tint)
+
 func _draw_road_labels() -> void:
 	for item in _roads:
 		var rect: Rect2 = item.rect
 		var area: Rect2 = item.area
 		var road: Dictionary = item.get("road", {})
 		var tint: Color = ROLE_COLOR.get(str(item.get("kind", "")), GOLD) if not road.is_empty() else GOLD
+		if bool(item.get("hazard", false)): tint = HAZARD_COLOR.get(str(road.get("type", "")), GOLD)
 		var anchor: Vector2 = rect.get_center().clamp(area.position, area.end)
+		if item.has("anchor"): anchor = item.anchor
 		draw_line(anchor, rect.get_center(), Color(tint, .7), 2, false)
 		var hovered: bool = not road.is_empty() and int(road.id) == hovered_road_id
-		_panel(rect, Color("3a1f1cf2") if not road.is_empty() else Color("493e2df5"), tint if not hovered else GOLD, 2 if hovered else 1)
-		draw_rect(Rect2(rect.position + Vector2(8, 9), Vector2(10, 10)), Color("ff6b57") if not road.is_empty() else GOLD)
+		var hazard: bool = bool(item.get("hazard", false))
+		_panel(rect, Color("1c2340f2") if hazard else (Color("3a1f1cf2") if not road.is_empty() else Color("493e2df5")), tint if not hovered else GOLD, 2 if hovered or hazard else 1)
+		draw_rect(Rect2(rect.position + Vector2(8, 9), Vector2(10, 10)), tint if hazard else (Color("ff6b57") if not road.is_empty() else GOLD))
 		_text(_fit(item.text, rect.size.x - 30, 12), rect.position + Vector2(24, 19), 12, CREAM if not road.is_empty() else GOLD)
+	for item in _roads:
+		if bool(item.get("hazard", false)): _draw_hazard_marker(item)
 
 func _remaining_route(unit: Dictionary) -> Array[Vector2]:
 	var result: Array[Vector2] = [_world(unit.get("pos", Vector2.ZERO))]
@@ -837,7 +940,21 @@ func _draw_call(item: Dictionary) -> void:
 	var color: Color = _pin_color(incident)
 	draw_line(point, pin, Color("e1d5af99"), 1, false)
 	draw_rect(Rect2(point - Vector2(3, 3), Vector2(6, 6)), INK, false, 1)
-	_draw_pin(pin, incident)
+	# New calls drop in with a bounce and send out a shockwave ring.
+	var age: float = float(sim.elapsed) - float(incident.get("created_at", -10.0))
+	if age >= 0.0 and age < 1.1 and not reduced_motion:
+		var wave: float = age / 1.1
+		draw_arc(pin, 26 + wave * 90, 0, TAU, 48, Color(GOLD, 1.0 - wave), 6 * (1.0 - wave) + 1, true)
+		draw_arc(pin, 26 + wave * 55, 0, TAU, 40, Color(CREAM, (1.0 - wave) * .6), 2, true)
+	if age >= 0.0 and age < 0.45 and not reduced_motion:
+		var k: float = age / 0.45
+		var drop: float = -70.0 * pow(1.0 - k, 2)
+		var squash: float = 1.0 + 0.25 * sin(k * PI) * (1.0 - k)
+		draw_set_transform(pin - pin * squash + Vector2(0, drop), 0, Vector2.ONE * squash)
+		_draw_pin(pin, incident)
+		draw_set_transform(Vector2.ZERO, 0, Vector2.ONE)
+	else:
+		_draw_pin(pin, incident)
 	_draw_needs(pin + Vector2(0, 34), incident)
 	var progress: float = float(incident.get("progress", 0))
 	if progress > 0:

@@ -56,15 +56,15 @@ static func shifts() -> Array[Dictionary]:
 	var scenarios: Array[Dictionary] = [
 		{"title": "FIRST LIGHT", "subtitle": "A small town. A very big heart.", "weather": "clear", "target": 30, "introduction": "Select a call. Send the matching crew. Bring everyone home.", "accent": "66dbc0", "interval": 23.0, "max_active": 4, "weights": [4, 5, 1, 2, 3], "disruptions": [{"at": 112.0, "type": "market", "duration": 35.0, "text": "Morning market • the whole town is out"}, {"at": 224.0, "type": "clear", "duration": 25.0, "text": "Neighbors lend a hand • crews work faster"}]},
 		{"title": "MARKET DAY", "subtitle": "The festival is counting on you.", "weather": "golden", "target": 42, "introduction": "Some calls need two teams. Scout a call for extra breathing room.", "accent": "ffd17b", "interval": 20.5, "max_active": 4, "weights": [4, 5, 2, 3, 5], "disruptions": [{"at": 205.0, "type": "festival", "duration": 48.0, "text": "Festival rush • the whole town is out"}]},
-		{"title": "RISING WATER", "subtitle": "Keep the harbor's lights alive.", "weather": "rain", "target": 44, "introduction": "Flood calls need engineers and medics. Supplies buy precious time.", "accent": "7bc8f0", "interval": 19.0, "max_active": 4, "weights": [2, 3, 7, 3, 2], "disruptions": [{"at": 85.0, "type": "rain", "duration": 58.0, "text": "Cloudburst • flood calls intensify"}, {"at": 211.0, "type": "shortage", "duration": 45.0, "text": "Supply delay • supply replenishment paused"}]},
-		{"title": "AFTER DARK", "subtitle": "Be the calm in the blackout.", "weather": "night", "target": 60, "introduction": "Unconfirmed calls reward scouting. Keep an engineer in reserve.", "accent": "bda6ff", "interval": 17.5, "max_active": 5, "weights": [3, 4, 2, 7, 3], "disruptions": [{"at": 93.0, "type": "blackout", "duration": 56.0, "text": "Grid failure • scout unconfirmed calls for a clear picture"}, {"at": 213.0, "type": "comms", "duration": 44.0, "text": "Radio interference • incoming reports need a closer look"}]},
-		{"title": "STORMFRONT", "subtitle": "Different teams. One heartbeat.", "weather": "storm", "target": 64, "introduction": "Use the coffee boost when calls pile up. It speeds every crew for twenty seconds.", "accent": "8cceef", "interval": 16.0, "max_active": 5, "weights": [4, 4, 6, 5, 3], "disruptions": [{"at": 82.0, "type": "storm", "duration": 62.0, "text": "Storm surge • flood calls rise; every second matters"}, {"at": 202.0, "type": "shortage", "duration": 40.0, "text": "Warehouse flooded • make the supplies you have count"}]},
-		{"title": "BEACON NIGHT", "subtitle": "A whole town, looking out for each other.", "weather": "sunset", "target": 72, "introduction": "Your final watch. Use every lesson and every teammate.", "accent": "ffa784", "interval": 14.5, "max_active": 5, "weights": [5, 5, 5, 5, 5], "disruptions": [{"at": 75.0, "type": "comms", "duration": 44.0, "text": "Radio interference • trust your field reports"}, {"at": 167.0, "type": "storm", "duration": 51.0, "text": "One last squall • the bay needs all of us"}, {"at": 254.0, "type": "clear", "duration": 60.0, "text": "The beacon shines • neighbors help finish the watch"}]}
+		{"title": "TWO BANKS", "subtitle": "One river. Three bridges. Don't get caught on the wrong side.", "weather": "rain", "target": 44, "introduction": "A river splits the town and only three bridges cross it. Watch the forecast: when a bridge floods, find another way across.", "accent": "7bc8f0", "interval": 19.0, "max_active": 4, "weights": [2, 3, 7, 3, 2], "disruptions": []},
+		{"title": "LIGHTS OUT", "subtitle": "Moon Lake. A dark town. Keep the lights on.", "weather": "night", "target": 60, "introduction": "Districts lose power one by one. Calls in the dark can't be seen and crews drive slowly. Send an engineer to the substation to bring the lights back.", "accent": "bda6ff", "interval": 17.5, "max_active": 5, "weights": [3, 4, 2, 7, 3], "disruptions": []},
+		{"title": "DUNE SPRINGS", "subtitle": "A desert town. Here comes the sand.", "weather": "desert", "target": 64, "introduction": "Sandstorms sweep across the town. Inside a storm everyone drives slowly and calls are hard to see. Get crews out before it arrives.", "accent": "f0b36b", "interval": 16.0, "max_active": 5, "weights": [4, 4, 3, 6, 3], "disruptions": []},
+		{"title": "BEACON NIGHT", "subtitle": "A whole town, looking out for each other.", "weather": "sunset", "target": 72, "introduction": "Your final watch: the river, a blackout and a squall. Use every lesson and every teammate.", "accent": "ffa784", "interval": 14.5, "max_active": 5, "weights": [5, 5, 5, 5, 5], "disruptions": [{"at": 286.0, "type": "clear", "duration": 44.0, "text": "The beacon shines • neighbors help finish the watch"}]}
 	]
-	var intervals: Array[float] = [18.5, 16.7, 15.5, 14.3, 13.2, 12.2]
+	var intervals: Array[float] = [18.5, 16.7, 15.5, 14.3, 14.0, 13.2]
 	var capacities: Array[int] = [4, 5, 5, 6, 6, 6]
 	
-	var rescue_targets: Array[int] = [60, 72, 78, 90, 104, 116]
+	var rescue_targets: Array[int] = [60, 72, 78, 90, 92, 108]
 	for index: int in range(scenarios.size()):
 		scenarios[index].interval = intervals[index]
 		scenarios[index].max_active = capacities[index]
@@ -133,14 +133,15 @@ static func location_index(name: String) -> int:
 
 static func road_events(index: int) -> Array[Dictionary]:
 	# [at, type, title, stretch, which building on it, call kind at that building]
-	# Each shift's four closures land in four different parts of town.
+	# Each shift's closures land in different parts of town.
 	var plans: Array = [
 		[[46.0, "jam", "Crash", "harbor_road", 0, "medical"], [112.0, "jam", "Market crowd", "marina_road", 1, "fire"], [146.0, "debris", "Fallen tree", "east_hill_road", 1, "medical"], [208.0, "debris", "Burst water main", "island_road", 0, "fire"]],
 		[[41.0, "jam", "Fender-bender", "ferry_road", 0, "medical"], [104.0, "debris", "Bridge works", "quay_road", 0, "fire"], [213.0, "jam", "Festival crowd", "market_street", 1, "medical"], [250.0, "debris", "Fallen tree", "north_avenue", 2, "fire"]],
 		[[49.0, "jam", "Stalled bus", "orchard_road", 1, "medical"], [112.0, "debris", "Flooded underpass", "seawall_road", 1, "fire"], [147.0, "debris", "Burst water main", "harbor_road", 3, "medical"], [246.0, "jam", "Crash", "dock_road", 2, "fire"]],
-		[[43.0, "jam", "Crash", "corner_road", 1, "medical"], [106.0, "debris", "Downed power line", "ferry_road", 1, "fire"], [177.0, "jam", "Dark junction", "marina_road", 2, "medical"], [243.0, "debris", "Fallen tree", "east_hill_road", 0, "fire"]],
-		[[47.0, "jam", "Stalled truck", "quay_road", 3, "medical"], [110.0, "debris", "Storm debris", "island_road", 1, "fire"], [180.0, "jam", "Crash", "orchard_road", 0, "medical"], [249.0, "debris", "Flooded underpass", "seawall_road", 0, "fire"]],
-		[[39.0, "jam", "Crash", "dock_road", 0, "medical"], [105.0, "debris", "Fallen tree", "corner_road", 2, "fire"], [168.0, "debris", "Storm debris", "harbor_road", 1, "medical"], [209.0, "jam", "Crowd at the market", "market_street", 0, "fire"]]
+		# Lights Out: blackouts already keep Engineering busy, so its closures are Police jams.
+		[[60.0, "jam", "Crash", "corner_road", 1, "medical"], [140.0, "jam", "Dark junction", "marina_road", 2, "fire"], [250.0, "jam", "Stalled bus", "east_hill_road", 0, "medical"]],
+		[[60.0, "jam", "Stalled truck", "quay_road", 3, "medical"], [112.0, "debris", "Sand drift", "corner_road", 0, "fire"], [186.0, "jam", "Crash", "north_avenue", 1, "medical"], [252.0, "debris", "Sand drift", "seawall_road", 0, "fire"]],
+		[[110.0, "jam", "Crash", "dock_road", 2, "medical"], [150.0, "debris", "Fallen tree", "corner_road", 2, "fire"], [236.0, "jam", "Crowd at the market", "market_street", 0, "fire"]]
 	]
 	var result: Array[Dictionary] = []
 	var number: int = 1
@@ -154,6 +155,13 @@ static func road_events(index: int) -> Array[Dictionary]:
 			"position": stretch.position, "size": stretch.size, "speed_factor": ROAD_EVENT_SPEED,
 			"call_site": str(stretch.sites[mini(int(plan[4]), stretch.sites.size() - 1)]), "call_kind": str(plan[5])})
 		number += 1
+	# Level hazards (blackouts, sandstorms, squalls) use the same machinery as
+	# road events, so they are scripted, saved and sent to co-op guests alike.
+	for hazard: Dictionary in level_hazards(index):
+		hazard["id"] = number
+		result.append(hazard)
+		number += 1
+	result.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.at) < float(b.at))
 	return result
 
 # Which department leads each call, by call number. Every block of four calls
@@ -172,6 +180,144 @@ static func lead_order(index: int) -> Array:
 			departments[j] = swap
 		result.append_array(departments)
 	return result
+
+# LEVEL LAYOUTS (Oct 2026). Levels 1-2 use the normal full grid of roads (an
+# empty layout). Levels 3-6 each have their own map and one signature hazard:
+#   3 TWO BANKS    a river with three bridges; scripted floods close a bridge
+#   4 LIGHTS OUT   night, Moon Lake in the middle; districts black out and an
+#                  engineer at the substation turns the lights back on
+#   5 DUNE SPRINGS desert, an oasis and sand dunes over some streets;
+#                  sandstorms sweep across the town in three steps
+#   6 BEACON NIGHT the river again, plus a blackout and a squall (finale)
+# Everything happens at fixed times, so every session plays out the same.
+#   water:   areas with no roads and no buildings (rivers, lakes, oases)
+#   bridges: road column -> name; the only roads that cross the river
+#   blocked: extra missing road pieces [horizontal?, column, row] (dunes);
+#            horizontal pieces run column -> column+1, vertical row -> row+1
+#   floods:  [bridge column, starts at (s), lasts (s)]
+const RIVER_TOP := 736.0
+const RIVER_BOTTOM := 896.0
+# Every bridge flood, blackout and storm is announced this many seconds ahead.
+const HAZARD_WARNING_SECONDS := 12.0
+
+# Nine districts (3 x 3) used to name blackouts.
+const DISTRICTS := {
+	"lantern_hill": ["Lantern Hill", 0, 0], "north_end": ["North End", 1, 0], "orchard_heights": ["Orchard Heights", 2, 0],
+	"westside": ["Westside", 0, 1], "old_town": ["Old Town", 1, 1], "east_docks": ["East Docks", 2, 1],
+	"saltmarsh": ["Saltmarsh", 0, 2], "south_harbour": ["South Harbour", 1, 2], "cliffside": ["Cliffside", 2, 2]
+}
+
+static func layout(index: int) -> Dictionary:
+	match clampi(index, 0, 5):
+		2:
+			return {"name": "two_banks", "theme": "river",
+				"water": [Rect2(0.0, RIVER_TOP, MAP_SIZE.x, RIVER_BOTTOM - RIVER_TOP)],
+				"river": Rect2(0.0, RIVER_TOP, MAP_SIZE.x, RIVER_BOTTOM - RIVER_TOP),
+				"river_row": 2,          # the gap is between ROAD_Y[2] and ROAD_Y[3]
+				"bridges": {1: "West Bridge", 4: "Town Bridge", 7: "East Bridge"},
+				# Each starts in a high-chaos phase.
+				"floods": [[7, 50.0, 45.0], [4, 146.0, 60.0], [1, 245.0, 45.0]]}
+		3:
+			return {"name": "lights_out", "theme": "night",
+				"water": [Rect2(930.0, 480.0, 700.0, 420.0)], "lake_name": "MOON LAKE"}
+		4:
+			return {"name": "dune_springs", "theme": "desert",
+				"water": [Rect2(980.0, 600.0, 380.0, 220.0)], "lake_name": "PALM OASIS",
+				# Sand dunes have buried a few streets for good.
+				"blocked": [[false, 1, 3], [false, 7, 1], [true, 5, 4], [true, 2, 0], [false, 3, 4]]}
+		5:
+			return {"name": "beacon_night", "theme": "river",
+				"water": [Rect2(0.0, RIVER_TOP, MAP_SIZE.x, RIVER_BOTTOM - RIVER_TOP)],
+				"river": Rect2(0.0, RIVER_TOP, MAP_SIZE.x, RIVER_BOTTOM - RIVER_TOP),
+				"river_row": 2,
+				"bridges": {1: "West Bridge", 4: "Town Bridge", 7: "East Bridge"},
+				"floods": [[4, 104.0, 50.0], [7, 208.0, 40.0]]}
+	return {}
+
+# Blackouts and storms, as road-event records (see road_events()).
+#   blackout: one district; everyone but Engineering drives slowly (40%) and
+#             new calls there are unconfirmed; an engineer at the substation
+#             (8 s) restores power, otherwise it lasts 70 s.
+#   sandstorm / squall: a third of the town at a time, everyone drives slowly
+#             and new calls there are unconfirmed; nobody can clear it. Three
+#             steps in a row make the storm sweep across the town.
+static func level_hazards(index: int) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	match clampi(index, 0, 5):
+		3:
+			result.append(_blackout(42.0, "lantern_hill", Vector2(384, 448)))
+			result.append(_blackout(106.0, "east_docks", Vector2(1920, 704)))
+			result.append(_blackout(176.0, "saltmarsh", Vector2(384, 1184)))
+			result.append(_blackout(244.0, "north_end", Vector2(1152, 192)))
+		4:
+			result.append_array(_storm(46.0, "sandstorm", true, 28.0, 22.0))
+			result.append_array(_storm(178.0, "sandstorm", false, 28.0, 22.0))
+		5:
+			result.append(_blackout(38.0, "orchard_heights", Vector2(1920, 448)))
+			result.append_array(_storm(140.0, "squall", true, 28.0, 22.0))
+	return result
+
+static func district_rect(key: String) -> Rect2:
+	var spec: Array = DISTRICTS[key]
+	var size: Vector2 = MAP_SIZE / 3.0
+	return Rect2(Vector2(float(spec[1]), float(spec[2])) * size, size)
+
+static func _blackout(at: float, district: String, substation: Vector2) -> Dictionary:
+	var area: Rect2 = district_rect(district)
+	var name: String = str(DISTRICTS[district][0])
+	return {"at": at, "duration": 70.0, "type": "blackout", "clear_kind": "engineer", "clear_time": 8.0,
+		"name": "Blackout in %s" % name, "street": name, "position": area.position / MAP_SIZE, "size": area.size / MAP_SIZE,
+		"speed_factor": 0.4, "call_site": "", "call_kind": "", "target": substation / MAP_SIZE, "hazard": true}
+
+# A storm in three steps across the map (west -> east, or east -> west).
+static func _storm(at: float, type: String, eastward: bool, step_seconds: float, step_gap: float) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var names: Array[String] = ["the west", "the centre", "the east"]
+	var label: String = "Sandstorm" if type == "sandstorm" else "Squall"
+	for step: int in range(3):
+		var column: int = step if eastward else 2 - step
+		var area := Rect2(column * MAP_SIZE.x / 3.0, 0.0, MAP_SIZE.x / 3.0, MAP_SIZE.y)
+		result.append({"at": at + step * step_gap, "duration": step_seconds, "type": type, "clear_kind": "", "clear_time": 0.0,
+			"name": "%s over %s" % [label, names[column]], "street": names[column],
+			"position": area.position / MAP_SIZE, "size": area.size / MAP_SIZE,
+			"speed_factor": 0.65, "call_site": "", "call_kind": "",
+			"target": area.get_center() / MAP_SIZE, "hazard": true, "eastward": eastward})
+	return result
+
+# Whether a piece of road is missing on this layout (under water or a dune).
+# Bridges are open here; their floods are timed and handled by the simulation.
+static func edge_blocked(data: Dictionary, horizontal: bool, ix: int, iy: int) -> bool:
+	if data.is_empty(): return false
+	for piece: Array in data.get("blocked", []):
+		if bool(piece[0]) == horizontal and int(piece[1]) == ix and int(piece[2]) == iy: return true
+	if not horizontal and data.has("bridges") and iy == int(data.get("river_row", -1)) and data.bridges.has(ix): return false
+	if horizontal and ix + 1 >= ROAD_X_PX.size(): return true
+	if not horizontal and iy + 1 >= ROAD_Y_PX.size(): return true
+	var a := Vector2(ROAD_X_PX[ix], ROAD_Y_PX[iy])
+	var b: Vector2 = Vector2(ROAD_X_PX[ix + 1], a.y) if horizontal else Vector2(a.x, ROAD_Y_PX[iy + 1])
+	var piece_area := Rect2(a, b - a).abs().grow(1.0)
+	for water: Rect2 in data.get("water", []):
+		if water.grow(-2.0).intersects(piece_area): return true
+	return false
+
+static func is_hazard_type(type: String) -> bool:
+	return type in ["blackout", "sandstorm", "squall"]
+
+# Sites in the water, or on a street that a dune has buried, can't have calls.
+static func site_open(index: int, site_pos_normalized: Vector2) -> bool:
+	var data: Dictionary = layout(index)
+	if data.is_empty(): return true
+	var point: Vector2 = site_pos_normalized * MAP_SIZE
+	for water: Rect2 in data.get("water", []):
+		if water.grow(20.0).has_point(point): return false
+	var row: int = 0
+	for i: int in range(ROAD_Y_PX.size()):
+		if absf(ROAD_Y_PX[i] - point.y) < absf(ROAD_Y_PX[row] - point.y): row = i
+	var left: int = -1
+	for i: int in range(ROAD_X_PX.size()):
+		if ROAD_X_PX[i] <= point.x: left = i
+	if left >= 0 and left + 1 < ROAD_X_PX.size() and edge_blocked(data, true, left, row): return false
+	return true
 
 static func shift_data(index: int) -> Dictionary:
 	return shifts()[clampi(index, 0, 5)].duplicate(true)

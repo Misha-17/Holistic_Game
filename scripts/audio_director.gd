@@ -12,7 +12,9 @@ const CUE_NAMES := ["dispatch", "rescue", "alarm", "click", "upgrade", "fail", "
 # Drop-in sounds: put a file named <name>.ogg / .wav / .mp3 in this folder and it replaces the built-in one.
 const CUSTOM_DIR := "res://assets/audio/custom/"
 # Newer cues; until a custom file exists they borrow a built-in sound.
-const EXTRA_CUES := {"new_call": "alarm", "tick": "click", "select": "click", "boost": "upgrade", "win": "shift", "lose": "fail"}
+const EXTRA_CUES := {"new_call": "alarm", "tick": "click", "select": "click", "boost": "upgrade", "win": "shift", "lose": "fail",
+	# Level hazards (Oct 2026), made by assets/audio/generate_level_cues.py.
+	"hazard": "surge", "power_down": "fail", "power_up": "upgrade", "wind": "surge"}
 # Countdown tick: a short clip is played once a second; a long clip (a ticking-clock loop) loops while needed.
 var _tick_player: AudioStreamPlayer
 var _ticking := false
@@ -100,7 +102,7 @@ func _process(delta: float) -> void:
 		_music.stop()
 
 
-func play_cue(cue_name: String) -> void:
+func play_cue(cue_name: String, pitch: float = 1.0) -> void:
 	if not sfx_enabled or not _cues.has(cue_name) or _pool.is_empty():
 		return
 	var now := Time.get_ticks_msec()
@@ -112,6 +114,8 @@ func play_cue(cue_name: String) -> void:
 		minimum_interval = 800
 	elif cue_name == "surge":
 		minimum_interval = 6500
+	elif cue_name in ["hazard", "wind", "power_down", "power_up"]:
+		minimum_interval = 1500
 	elif cue_name == "urgent":
 		minimum_interval = 3500
 	elif cue_name == "dispatch":
@@ -137,6 +141,7 @@ func play_cue(cue_name: String) -> void:
 	player.stop()
 	player.stream = _cues[cue_name]
 	player.pitch_scale = randf_range(0.985, 1.015) if cue_name in ["click", "rescue", "combo"] else 1.0
+	if pitch != 1.0: player.pitch_scale = pitch
 	player.volume_db = -3.0 if cue_name in ["alarm", "arrival"] else 0.0
 	if cue_name == "work":
 		player.volume_db = -5.0

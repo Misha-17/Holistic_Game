@@ -26,16 +26,26 @@ func _check(condition: bool, message: String) -> void:
 func _test_schedule() -> void:
 	for shift: int in range(6):
 		var plan: Array = Campaign.shift_data(shift).traffic
-		_check(plan.size() == 4, "Shift %d should have four road events" % (shift + 1))
+		var closures: int = 0
 		var kinds := {}
+		var previous_at: float = -1.0
 		for event: Dictionary in plan:
-			kinds[event.clear_kind] = true
+			_check(float(event.at) >= previous_at, "Shift %d: road events must be in time order" % (shift + 1))
+			previous_at = float(event.at)
+			if bool(event.get("hazard", false)):
+				kinds[event.clear_kind] = true
+				# A storm moving on may pass through a calm phase; only its start is checked.
+				if event.type in ["sandstorm", "squall"] and not str(event.name).ends_with(("the west" if bool(event.eastward) else "the east")): continue
+			else:
+				closures += 1
+				kinds[event.clear_kind] = true
 			for phase: Dictionary in Campaign.chaos_schedule(shift):
 				if float(event.at) >= float(phase.at) and float(event.at) < float(phase.until):
 					_check(phase.phase != "low", "Shift %d: %s starts in a low-chaos phase" % [shift + 1, event.name])
 			var area := Rect2(Vector2(event.position) * Campaign.MAP_SIZE, Vector2(event.size) * Campaign.MAP_SIZE)
 			_check(Rect2(Vector2.ZERO, Campaign.MAP_SIZE).encloses(area), "%s lies outside the map" % event.name)
-		_check(kinds.has("police") and kinds.has("engineer"), "Shift %d needs both Police and Engineering road events" % (shift + 1))
+		_check(closures >= 3, "Shift %d should have at least three road closures" % (shift + 1))
+		_check(kinds.has("police") and kinds.has("engineer"), "Shift %d needs work for both Police and Engineering" % (shift + 1))
 	# Same plan every time.
 	_check(str(Campaign.shift_data(0).traffic) == str(Campaign.shift_data(0).traffic), "Road events must be deterministic")
 

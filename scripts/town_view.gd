@@ -80,7 +80,8 @@ func _unit_position(unit: Dictionary) -> Vector2:
 
 func set_theme(index: int) -> void:
 	shift_theme = clampi(index, 0, 5)
-	theme_index = [0,2,3,1,3,2][shift_theme]
+	# 0 day, 1 night, 2 golden, 3 rain, 4 desert
+	theme_index = [0,2,3,1,4,2][shift_theme]
 	if is_instance_valid(_backdrop):
 		_backdrop.queue_redraw()
 	queue_redraw()
@@ -120,36 +121,56 @@ func _incident_at(point: Vector2) -> int:
 func _paint_static(canvas: Node2D) -> void:
 	var art := PixelArt.new(canvas)
 	art.theme_index = theme_index
+	var layout: Dictionary = BeaconCampaign.layout(shift_theme)
+	var desert: bool = str(layout.get("theme","")) == "desert"
 	var grass := Color("9fbd87") if theme_index != 2 else Color("b7bc88")
+	if desert: grass = Color("dcc58f")
 	canvas.draw_rect(Rect2(Vector2.ZERO,MAP_SIZE),grass)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 29401
 	# Subtle patches and tiny grass clusters keep the original handmade pixel feel.
 	for i: int in range(1500):
 		var point := Vector2(rng.randi_range(0,int(MAP_SIZE.x)),rng.randi_range(0,1470))
-		canvas.draw_rect(Rect2(point,Vector2(3,2)),Color("91af7e") if i%3 else Color("b3ca96"))
+		if desert: canvas.draw_rect(Rect2(point,Vector2(4,2)),Color("cdb27a") if i%3 else Color("e8d6a6"))
+		else: canvas.draw_rect(Rect2(point,Vector2(3,2)),Color("91af7e") if i%3 else Color("b3ca96"))
 	for district: Dictionary in [
 		{"area":Rect2(1438,214,452,454),"color":Color("a4bf8b")},
 		{"area":Rect2(1950,214,194,454),"color":Color("9bb895")},
 		{"area":Rect2(162,980,710,164),"color":Color("a8c493")},
 		{"area":Rect2(930,1216,1220,190),"color":Color("b0bf96")}
 	]:
-		canvas.draw_rect(district.area,district.color)
-	# Harbor basin in the original district, plus an extended southern waterfront.
-	_draw_basin(canvas,Rect2(948,856,428,106))
-	canvas.draw_rect(Rect2(0,1473,MAP_SIZE.x,MAP_SIZE.y-1473),Color("4f8f98"))
-	canvas.draw_rect(Rect2(0,1484,MAP_SIZE.x,MAP_SIZE.y-1484),Color("367f8e"))
-	for x: int in range(0,int(MAP_SIZE.x),24):
-		canvas.draw_rect(Rect2(x,1470+(x/24)%3*2,24,8),Color("ded2ac"))
-		canvas.draw_rect(Rect2(x,1478+(x/24)%3*2,24,3),Color("809889"))
-	_draw_roads(canvas)
+		canvas.draw_rect(district.area,district.color if not desert else Color(district.color.lerp(Color("d5b980"),0.85)))
+	if desert:
+		# Wind-ripples in the sand instead of the sea.
+		for i: int in range(260):
+			var at := Vector2(rng.randi_range(0,int(MAP_SIZE.x)),rng.randi_range(0,1500))
+			canvas.draw_line(at,at+Vector2(26,-3),Color("c9ad74"),2.0)
+		_draw_dune_band(canvas)
+	else:
+		# Harbor basin in the original district, plus an extended southern waterfront.
+		if not str(layout.get("theme","")) == "night": _draw_basin(canvas,Rect2(948,856,428,106))
+		canvas.draw_rect(Rect2(0,1473,MAP_SIZE.x,MAP_SIZE.y-1473),Color("4f8f98"))
+		canvas.draw_rect(Rect2(0,1484,MAP_SIZE.x,MAP_SIZE.y-1484),Color("367f8e"))
+		for x: int in range(0,int(MAP_SIZE.x),24):
+			canvas.draw_rect(Rect2(x,1470+(x/24)%3*2,24,8),Color("ded2ac"))
+			canvas.draw_rect(Rect2(x,1478+(x/24)%3*2,24,3),Color("809889"))
+	_draw_roads(canvas, layout)
+	if layout.has("river"):
+		_draw_river(canvas, art, layout)
+	elif layout.has("water"):
+		for water: Rect2 in layout.water:
+			_draw_lake(canvas, art, water, str(layout.get("lake_name","")), desert)
+	if layout.has("blocked"):
+		_draw_dunes(canvas, layout)
 	# New outer blocks contain local streets, orchards, parks and waterfront lots.
 	for x: float in ROAD_X:
 		for y: float in [126.0,348.0,610.0,798.0,1118.0,1374.0]:
 			for side: int in [-1,1]:
 				var foot := Vector2(x+side*54,y)
+				if _in_water(layout, foot, 14.0): continue
 				if Rect2(Vector2(18,18),MAP_SIZE-Vector2(36,100)).has_point(foot):
-					art.tree(foot,14.0+int(x+y)%6,(int(x+y)/32)%3)
+					if desert: _cactus(canvas, foot, int(x+y)%3)
+					else: art.tree(foot,14.0+int(x+y)%6,(int(x+y)/32)%3)
 					if int(x+y)%2==0:
 						art._lamp(x+side*32,y+20)
 	var sites: Array[Dictionary] = BeaconCampaign.locations()
@@ -161,12 +182,14 @@ func _paint_static(canvas: Node2D) -> void:
 			for site: Dictionary in sites:
 				if point.distance_to(site.pos*MAP_SIZE)<112: free=false
 			if not free or Rect2(922,820,480,160).has_point(point): continue
+			if _in_water(layout, point, 40.0): continue
 			canvas.draw_set_transform(point-Vector2(65,55),0,Vector2.ONE*1.5)
 			art._building(0,0,32,30,(column+row)%3,"house")
 			art._building(43,4,30,27,(column+row+1)%3,"house")
 			art._fence(0,34,70)
 			canvas.draw_set_transform(Vector2.ZERO)
 	for i: int in range(sites.size()):
+		if not BeaconCampaign.site_open(shift_theme, sites[i].pos): continue
 		var foot: Vector2 = sites[i].pos*MAP_SIZE
 		var lane_y: float = ROAD_Y[0]
 		for y: float in ROAD_Y:
@@ -177,16 +200,125 @@ func _paint_static(canvas: Node2D) -> void:
 	# Distinct scenery makes exploring the east and south recognisable.
 	for row: int in range(3):
 		for col: int in range(5):
-			art.tree(Vector2(1720+col*32,70+row*27),12.0,(row+col)%3)
+			if desert: _cactus(canvas, Vector2(1720+col*32,70+row*27), (row+col)%3)
+			else: art.tree(Vector2(1720+col*32,70+row*27),12.0,(row+col)%3)
 	for x: int in range(100,800,54):
-		art._flowerbed(x,1230,30,8)
+		if not desert: art._flowerbed(x,1230,30,8)
 		art._bench(x+3,1248)
-	for point: Vector2 in [Vector2(978,885),Vector2(1320,887),Vector2(1690,1508),Vector2(490,1509)]:
-		art._boat(point,1,false)
+	if not desert:
+		for point: Vector2 in [Vector2(978,885),Vector2(1320,887),Vector2(1690,1508),Vector2(490,1509)]:
+			if not _in_water(layout, point, 0.0) or layout.has("river"): art._boat(point,1,false)
 	if theme_index == 1:
-		canvas.draw_rect(Rect2(Vector2.ZERO,MAP_SIZE),Color(0.08,0.18,0.26,0.20))
+		canvas.draw_rect(Rect2(Vector2.ZERO,MAP_SIZE),Color(0.05,0.08,0.22,0.5 if str(layout.get("theme","")) == "night" else 0.20))
 	elif theme_index == 3:
 		canvas.draw_rect(Rect2(Vector2.ZERO,MAP_SIZE),Color(0.12,0.22,0.28,0.06))
+	elif theme_index == 4:
+		canvas.draw_rect(Rect2(Vector2.ZERO,MAP_SIZE),Color(1.0,0.78,0.45,0.07))
+
+func _in_water(layout: Dictionary, point: Vector2, margin: float) -> bool:
+	for water: Rect2 in layout.get("water", []):
+		if water.grow(margin).has_point(point): return true
+	return false
+
+# A lake (Lights Out) or an oasis (Dune Springs), drawn in code like the rest of the town.
+func _draw_lake(canvas: Node2D, art, water: Rect2, name: String, desert: bool) -> void:
+	var center: Vector2 = water.get_center()
+	var radii: Vector2 = water.size * 0.5
+	var shore := PackedVector2Array()
+	var deep := PackedVector2Array()
+	var pool := PackedVector2Array()
+	for i: int in range(48):
+		var angle: float = TAU * i / 48.0
+		var wobble: float = 1.0 + 0.05 * sin(angle * 5.0) + 0.03 * cos(angle * 3.0)
+		var dir := Vector2(cos(angle), sin(angle))
+		shore.append(center + dir * radii * wobble + dir * 16.0)
+		pool.append(center + dir * radii * wobble)
+		deep.append(center + dir * radii * wobble * 0.62)
+	canvas.draw_colored_polygon(shore, Color("e2cf9c") if desert else Color("c9c39b"))
+	canvas.draw_colored_polygon(pool, Color("4f9aa3") if desert else Color("3f7f8d"))
+	canvas.draw_colored_polygon(deep, Color("3d8792") if desert else Color("2f6c7c"))
+	var rng := RandomNumberGenerator.new()
+	rng.seed = int(water.position.x) * 7 + 3
+	for i: int in range(70):
+		var angle: float = rng.randf() * TAU
+		var p: Vector2 = center + Vector2(cos(angle), sin(angle)) * radii * rng.randf_range(0.1, 0.85)
+		canvas.draw_rect(Rect2(p, Vector2(rng.randi_range(8, 18), 2)), Color("74a8a7"))
+	if desert:
+		# Palms around the oasis.
+		for i: int in range(14):
+			var angle: float = TAU * i / 14.0 + 0.2
+			_palm(canvas, center + Vector2(cos(angle), sin(angle)) * (radii + Vector2(34, 30)))
+	else:
+		# Reeds, a jetty and the moon's reflection.
+		for i: int in range(26):
+			var angle: float = TAU * i / 26.0
+			var p: Vector2 = center + Vector2(cos(angle), sin(angle)) * (radii * 0.98)
+			for blade: int in range(3):
+				canvas.draw_line(p + Vector2(blade * 3 - 3, 0), p + Vector2(blade * 3 - 4, -10 - blade * 2), Color("5f8a5c"), 2.0)
+		canvas.draw_rect(Rect2(center + Vector2(radii.x * 0.55, -6), Vector2(radii.x * 0.5, 12)), Color("8a6d4f"))
+		art._boat(center + Vector2(-radii.x * 0.35, radii.y * 0.25), 2, false)
+		art._boat(center + Vector2(radii.x * 0.15, -radii.y * 0.45), 0, false)
+		canvas.draw_circle(center + Vector2(-radii.x * 0.2, -radii.y * 0.15), 26, Color(1.0, 0.97, 0.82, 0.25))
+		canvas.draw_circle(center + Vector2(-radii.x * 0.2, -radii.y * 0.15), 15, Color(1.0, 0.97, 0.85, 0.35))
+	if not name.is_empty():
+		var font: Font = ThemeDB.fallback_font
+		var width: float = font.get_string_size(name, HORIZONTAL_ALIGNMENT_LEFT, -1, 22).x
+		canvas.draw_string_outline(font, center + Vector2(-width * 0.5, radii.y * 0.62), name, HORIZONTAL_ALIGNMENT_LEFT, -1, 22, 6, Color(0.1, 0.2, 0.25, 0.6))
+		canvas.draw_string(font, center + Vector2(-width * 0.5, radii.y * 0.62), name, HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color(0.92, 0.95, 0.88, 0.85))
+
+func _palm(canvas: Node2D, foot: Vector2) -> void:
+	canvas.draw_line(foot, foot + Vector2(4, -30), Color("8a6a43"), 5.0)
+	var top: Vector2 = foot + Vector2(4, -32)
+	for angle: float in [-2.6, -2.0, -1.2, -0.5, 0.1]:
+		canvas.draw_line(top, top + Vector2(cos(angle), sin(angle) * 0.6) * 20.0, Color("4f8a4a"), 5.0)
+		canvas.draw_line(top, top + Vector2(cos(angle), sin(angle) * 0.6) * 15.0, Color("6fab5d"), 2.0)
+
+func _cactus(canvas: Node2D, foot: Vector2, variant: int) -> void:
+	var h: float = 22.0 + variant * 5.0
+	canvas.draw_rect(Rect2(foot + Vector2(-3, 0), Vector2(10, 3)), Color(0.4, 0.3, 0.2, 0.25))
+	canvas.draw_rect(Rect2(foot + Vector2(-4, -h), Vector2(8, h)), Color("5f9a5a"))
+	canvas.draw_rect(Rect2(foot + Vector2(-2, -h), Vector2(2, h)), Color("7fbb6d"))
+	canvas.draw_rect(Rect2(foot + Vector2(-12, -h * 0.65), Vector2(8, 5)), Color("5f9a5a"))
+	canvas.draw_rect(Rect2(foot + Vector2(-12, -h * 0.85), Vector2(5, 12)), Color("5f9a5a"))
+	if variant != 1:
+		canvas.draw_rect(Rect2(foot + Vector2(4, -h * 0.5), Vector2(8, 5)), Color("5f9a5a"))
+		canvas.draw_rect(Rect2(foot + Vector2(7, -h * 0.72), Vector2(5, 13)), Color("5f9a5a"))
+
+# Desert edge of the map: rolling dunes instead of the sea.
+func _draw_dune_band(canvas: Node2D) -> void:
+	canvas.draw_rect(Rect2(0, 1470, MAP_SIZE.x, MAP_SIZE.y - 1470), Color("e3c98f"))
+	for i: int in range(0, int(MAP_SIZE.x) + 200, 180):
+		var base := Vector2(i - 60, 1536)
+		var hump := PackedVector2Array([base, base + Vector2(90, -58 - (i / 180) % 3 * 10), base + Vector2(240, 0)])
+		canvas.draw_colored_polygon(hump, Color("d4b273"))
+		canvas.draw_line(base + Vector2(90, -58 - (i / 180) % 3 * 10), base + Vector2(240, 0), Color("bf9a5c"), 3.0)
+
+# Sand dunes that have buried a stretch of road for good (Dune Springs).
+func _draw_dunes(canvas: Node2D, layout: Dictionary) -> void:
+	for piece: Array in layout.blocked:
+		var horizontal: bool = bool(piece[0])
+		var a := Vector2(ROAD_X[int(piece[1])], ROAD_Y[int(piece[2])])
+		var b: Vector2 = Vector2(ROAD_X[int(piece[1]) + 1], a.y) if horizontal else Vector2(a.x, ROAD_Y[int(piece[2]) + 1])
+		var from: Vector2 = a.lerp(b, 0.16)
+		var to: Vector2 = a.lerp(b, 0.84)
+		var across: Vector2 = Vector2(0, 1) if horizontal else Vector2(1, 0)
+		var along: Vector2 = (to - from)
+		var dune := PackedVector2Array()
+		for i: int in range(17):
+			var t: float = i / 16.0
+			dune.append(from + along * t - across * (40.0 * sin(t * PI) + 8.0))
+		for i: int in range(16, -1, -1):
+			var t: float = i / 16.0
+			dune.append(from + along * t + across * (34.0 * sin(t * PI) + 8.0))
+		canvas.draw_colored_polygon(dune, Color("d9b878"))
+		var ridge := PackedVector2Array()
+		for i: int in range(17):
+			var t: float = i / 16.0
+			ridge.append(from + along * t - across * (10.0 * sin(t * PI * 2.0)))
+		canvas.draw_polyline(ridge, Color("bc9758"), 3.0)
+		for i: int in range(5):
+			var p: Vector2 = from + along * (0.2 + i * 0.15) + across * (14.0 if i % 2 else -18.0)
+			canvas.draw_line(p, p + along.normalized() * 22.0, Color("ecd7a5"), 2.0)
 
 func _draw_basin(canvas: Node2D,area: Rect2) -> void:
 	canvas.draw_rect(area.grow(7),Color("d9ccaa"))
@@ -196,12 +328,14 @@ func _draw_basin(canvas: Node2D,area: Rect2) -> void:
 		for x: int in range(int(area.position.x+8),int(area.end.x-8),40):
 			canvas.draw_rect(Rect2(x,y,14,2),Color("74a8a7"))
 
-func _draw_roads(canvas: Node2D) -> void:
+func _draw_roads(canvas: Node2D, layout: Dictionary = {}) -> void:
 	# Soft, narrow streets preserve the original village scale. Road endpoints
 	# exactly match the simulation's graph, including the outer districts.
+	var desert: bool = str(layout.get("theme","")) == "desert"
 	for layer: int in range(3):
 		var width: float = [54.0,48.0,36.0][layer]
 		var color: Color = [Color("7b967b"),Color("d0cbaa"),Color("7b9190")][layer]
+		if desert: color = [Color("b39661"),Color("e6d3a3"),Color("a08c6c")][layer]
 		for x: float in ROAD_X:
 			canvas.draw_line(Vector2(x,0),Vector2(x,1475),color,width,false)
 		for y: float in ROAD_Y:
@@ -224,12 +358,15 @@ func _draw_roads(canvas: Node2D) -> void:
 				canvas.draw_rect(Rect2(x-13+stripe*7,y-29,3,7),Color("e7dfbf"))
 				canvas.draw_rect(Rect2(x-13+stripe*7,y+22,3,7),Color("e7dfbf"))
 	# Harbor bridge railings.
+	if not str(layout.get("theme","")) in ["", "river"]: return
 	for y: int in [907,949]:
 		canvas.draw_rect(Rect2(948,y,428,3),Color("d7cfac"))
 		for x: int in range(950,1376,14): canvas.draw_rect(Rect2(x,y-1,3,5),Color("8a9680"))
 
 func _draw() -> void:
 	_draw_water()
+	if sim != null and not title_mode:
+		_draw_level_hazards()
 	if sim != null:
 		_draw_routes()
 		for incident: Dictionary in sim.incidents:
@@ -238,6 +375,33 @@ func _draw() -> void:
 			_draw_unit(unit)
 	_draw_weather()
 	_draw_celebrations()
+
+# Level 3 river with banks, three bridges and a few boats (drawn in code, like the rest of the town).
+func _draw_river(canvas: Node2D, art, layout: Dictionary) -> void:
+	var river: Rect2 = layout.river
+	canvas.draw_rect(river.grow_individual(0, 10, 0, 10), Color("d9ccaa"))
+	canvas.draw_rect(river.grow_individual(0, 4, 0, 4), Color("76978c"))
+	canvas.draw_rect(river, Color("468997"))
+	canvas.draw_rect(Rect2(river.position + Vector2(0, river.size.y * 0.35), Vector2(river.size.x, river.size.y * 0.3)), Color("3f7f8d"))
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 5150
+	for i: int in range(120):
+		var p := Vector2(rng.randf_range(0, river.size.x), rng.randf_range(river.position.y + 8, river.end.y - 8))
+		canvas.draw_rect(Rect2(p, Vector2(rng.randi_range(10, 22), 2)), Color("74a8a7"))
+	for x: float in [300.0, 900.0, 1500.0, 2050.0]:
+		art._boat(Vector2(x, river.get_center().y + (12.0 if int(x) % 2 == 0 else -14.0)), 1, false)
+	for column: int in layout.bridges:
+		var x: float = ROAD_X[column]
+		var deck := Rect2(x - 30, river.position.y - 12, 60, river.size.y + 24)
+		canvas.draw_rect(deck.grow(4), Color("5d6f69"))
+		canvas.draw_rect(deck, Color("7b9190"))
+		canvas.draw_rect(Rect2(x - 22, deck.position.y, 44, deck.size.y), Color("8a9b98"))
+		for y: int in range(int(deck.position.y) + 6, int(deck.end.y) - 4, 26):
+			canvas.draw_rect(Rect2(x - 1, y, 2, 10), Color("d8d9b5"))
+		for side: float in [-1.0, 1.0]:
+			canvas.draw_rect(Rect2(x + side * 30 - 2, deck.position.y, 4, deck.size.y), Color("d7cfac"))
+			for y: int in range(int(deck.position.y), int(deck.end.y), 14):
+				canvas.draw_rect(Rect2(x + side * 30 - 3, y, 6, 4), Color("8a9680"))
 
 func _draw_water() -> void:
 	for i: int in range(40):
@@ -280,7 +444,18 @@ func _draw_unit(unit: Dictionary) -> void:
 		_draw_vehicle(point,kind,Vector2.RIGHT,true,int(unit.id))
 		Responders.draw_person(self,point+Vector2(22,10),kind,int(unit.get("appearance",0)),"act",elapsed,1,1.8)
 	else:
+		if state == "travel" and not reduced_motion:
+			# Dust trail behind a crew on its way.
+			for i in range(4):
+				var back: Vector2 = point - heading * (16.0 + i * 9.0) + Vector2(0, 6)
+				var puff: float = fposmod(elapsed * 3.0 + i * 0.25 + int(unit.id) * 0.13, 1.0)
+				draw_circle(back + Vector2(0, -puff * 4.0), 3.0 + i * 1.2 + puff * 2.0, Color(0.93, 0.88, 0.74, 0.30 * (1.0 - i * 0.22)))
 		_draw_vehicle(point,kind,heading,state == "travel",int(unit.id))
+		if state == "travel" and not reduced_motion:
+			# Flashing siren: red / blue.
+			var blink: bool = fposmod(elapsed * 6.0 + int(unit.id) * 0.37, 1.0) < 0.5
+			draw_circle(point + Vector2(0, -15), 7.0, Color(1.0, 0.25, 0.2, 0.35) if blink else Color(0.3, 0.45, 1.0, 0.35))
+			draw_circle(point + Vector2(0, -15), 3.2, Color(1.0, 0.35, 0.3) if blink else Color(0.45, 0.6, 1.0))
 
 func _draw_hazard(incident: Dictionary) -> void:
 	if incident.get("status","active") not in ["active","working"] or not bool(incident.get("discovered",true)):
@@ -309,13 +484,84 @@ func _draw_hazard(incident: Dictionary) -> void:
 		draw_circle(point+Vector2(0,-40),13,INK,true,-1,true)
 		draw_circle(point+Vector2(0,-40),10,color,true,-1,true)
 
+# Blackouts darken a district, storms sweep sand or rain over a third of the
+# town, and both are previewed a few seconds before they arrive.
+func _draw_level_hazards() -> void:
+	if not sim.has_method("upcoming_hazards"): return
+	for item: Dictionary in sim.upcoming_hazards():
+		var area := Rect2(Vector2(item.position) * MAP_SIZE, Vector2(item.size) * MAP_SIZE)
+		var near: float = 1.0 - clampf(float(item["in"]) / BeaconCampaign.HAZARD_WARNING_SECONDS, 0.0, 1.0)
+		match str(item.type):
+			"blackout":
+				# The lights start to flicker.
+				var flicker: float = 0.0 if reduced_motion else float(int(elapsed * 9.0 + area.position.x) % 5 == 0)
+				draw_rect(area, Color(0.03, 0.05, 0.14, 0.10 + 0.25 * near * flicker))
+			"sandstorm", "squall":
+				# A wall of sand / rain closes in on the district.
+				var color: Color = Color(0.86, 0.68, 0.40) if item.type == "sandstorm" else Color(0.45, 0.55, 0.65)
+				# Eastward storms come in over the west edge of the district.
+				var from_left: bool = bool(item.get("eastward", true))
+				var depth: float = 40.0 + 160.0 * near
+				var wall := Rect2(area.position.x, 0, depth, MAP_SIZE.y)
+				if not from_left: wall.position.x = area.end.x - depth
+				for i: int in range(8):
+					var strip := Rect2(wall.position.x + (wall.size.x * i / 8.0 if from_left else wall.size.x * (7 - i) / 8.0), 0, wall.size.x / 8.0, MAP_SIZE.y)
+					draw_rect(strip, Color(color, 0.05 + 0.05 * near * (8 - i) / 8.0 * 4.0))
+			"flood":
+				var pulse: float = 0.5 if reduced_motion else (sin(elapsed * 5.0) + 1.0) * 0.5
+				draw_rect(area, Color(0.3, 0.6, 0.95, 0.15 + 0.3 * near * pulse))
+	for event: Dictionary in sim.active_road_events():
+		if not bool(event.get("hazard", false)): continue
+		var area := Rect2(Vector2(event.position) * MAP_SIZE, Vector2(event.size) * MAP_SIZE)
+		var fade: float = clampf((float(event.expires_at) - sim.elapsed) / 3.0, 0.0, 1.0) * clampf((sim.elapsed - float(event.started_at)) / 2.0, 0.0, 1.0)
+		match str(event.type):
+			"blackout":
+				draw_rect(area, Color(0.01, 0.02, 0.07, 0.62 * fade))
+				# Only a few torches and car lights in the dark.
+				var rng := RandomNumberGenerator.new()
+				rng.seed = int(event.id) * 31
+				for i: int in range(24):
+					var p := area.position + Vector2(rng.randf() * area.size.x, rng.randf() * area.size.y)
+					var on: bool = reduced_motion or fposmod(elapsed * 0.7 + i * 0.37, 1.0) < 0.6
+					if on: draw_circle(p, 3.0, Color(1.0, 0.85, 0.5, 0.45 * fade))
+				var station: Vector2 = Vector2(event.get("target", area.get_center() / MAP_SIZE)) * MAP_SIZE
+				draw_circle(station, 46.0, Color(1.0, 0.85, 0.35, 0.10 * fade))
+			"sandstorm", "squall":
+				var sand: bool = event.type == "sandstorm"
+				draw_rect(area, Color(0.86, 0.66, 0.38, 0.46 * fade) if sand else Color(0.26, 0.36, 0.48, 0.40 * fade))
+				# Darker leading and trailing edges make the storm's front easy to spot.
+				for edge_x: float in [area.position.x, area.end.x - 36.0]:
+					draw_rect(Rect2(edge_x, 0, 36.0, MAP_SIZE.y), Color(0.70, 0.50, 0.26, 0.30 * fade) if sand else Color(0.18, 0.26, 0.38, 0.30 * fade))
+				if reduced_motion: continue
+				var drift: float = elapsed * (260.0 if sand else 120.0) * (1.0 if bool(event.get("eastward", true)) else -1.0)
+				for i: int in range(170):
+					var x: float = area.position.x + fposmod(i * 97.0 + drift, area.size.x)
+					var y: float = fposmod(i * 61.0 + (elapsed * 340.0 if not sand else i * 13.0), MAP_SIZE.y)
+					if sand:
+						draw_line(Vector2(x, y), Vector2(x + 34.0, y + 4.0), Color(0.98, 0.88, 0.66, 0.60 * fade), 3.0)
+					else:
+						draw_line(Vector2(x, y), Vector2(x - 7.0, y + 22.0), Color(0.82, 0.92, 0.98, 0.55 * fade), 2.0)
+				if sand:
+					for i: int in range(14):
+						var c := Vector2(area.position.x + fposmod(i * 173.0 + drift * 0.5, area.size.x), fposmod(i * 211.0, MAP_SIZE.y))
+						draw_circle(c, 46.0 + (i % 3) * 16.0, Color(0.93, 0.76, 0.50, 0.20 * fade))
+
 func _draw_weather() -> void:
 	if theme_index == 3 and not reduced_motion:
 		for i: int in range(85):
 			var point := Vector2(fposmod(i*173+elapsed*56,MAP_SIZE.x),fposmod(i*89+elapsed*175,MAP_SIZE.y))
 			draw_line(point,point+Vector2(-4,12),Color(0.77,0.88,0.92,0.3),1.0,true)
 	if theme_index == 1:
+		var dark: Array[Rect2] = []
+		if sim != null:
+			for event: Dictionary in sim.active_road_events():
+				if str(event.type) == "blackout": dark.append(Rect2(event.position, event.size))
 		for place: Dictionary in BeaconCampaign.locations():
+			if not BeaconCampaign.site_open(shift_theme, place.pos): continue
+			var lit: bool = true
+			for area: Rect2 in dark:
+				if area.has_point(place.pos): lit = false
+			if not lit: continue
 			var point: Vector2 = place.pos * MAP_SIZE + Vector2(15,-28)
 			draw_circle(point,4,Color("efc573aa"),true,-1,true)
 

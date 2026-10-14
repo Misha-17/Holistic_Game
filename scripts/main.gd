@@ -21,6 +21,10 @@ const KIND_SHORT := {"fire":"FIRE","medic":"MED","engineer":"ENG","police":"POL"
 
 var cv: CanvasItem
 var hud: Node2D
+var fx = null # JuiceFx (scripts/juice_fx.gd)
+var rescued_anchor := Vector2(560, 42)
+var results_since := -1.0
+var results_stars_played := 0
 var sim: RescueSimulation
 var town: TownView
 var map_clip: Control
@@ -325,8 +329,34 @@ func _draw_minimap() -> void:
 		cv.draw_line(MINIMAP_RECT.position + Vector2(0, y * MINIMAP_RECT.size.y), MINIMAP_RECT.position + Vector2(MINIMAP_RECT.size.x, y * MINIMAP_RECT.size.y), Color("7a9290"), 1)
 	for site: Dictionary in BeaconCampaign.locations():
 		cv.draw_rect(Rect2(MINIMAP_RECT.position + site.pos * MINIMAP_RECT.size - Vector2(1, 1), Vector2(3, 3)), Color("a5b29a"))
+	var level_layout: Dictionary = BeaconCampaign.layout(sim.shift_index)
+	for water: Rect2 in level_layout.get("water", []):
+		cv.draw_rect(Rect2(MINIMAP_RECT.position + water.position / BeaconCampaign.MAP_SIZE * MINIMAP_RECT.size, water.size / BeaconCampaign.MAP_SIZE * MINIMAP_RECT.size), Color("4f8f98"))
+	for piece: Array in level_layout.get("blocked", []):
+		var a := Vector2(RescueSimulation.ROAD_X[int(piece[1])], RescueSimulation.ROAD_Y[int(piece[2])])
+		var b: Vector2 = Vector2(RescueSimulation.ROAD_X[int(piece[1]) + 1], a.y) if bool(piece[0]) else Vector2(a.x, RescueSimulation.ROAD_Y[int(piece[2]) + 1])
+		cv.draw_line(MINIMAP_RECT.position + a.lerp(b, 0.15) * MINIMAP_RECT.size, MINIMAP_RECT.position + a.lerp(b, 0.85) * MINIMAP_RECT.size, Color("d9b878"), 4)
+	# Blackouts and storms: tinted districts; upcoming ones blink.
+	for event: Dictionary in sim.active_road_events():
+		if not bool(event.get("hazard", false)): continue
+		var zone := Rect2(MINIMAP_RECT.position + Vector2(event.position) * MINIMAP_RECT.size, Vector2(event.size) * MINIMAP_RECT.size)
+		cv.draw_rect(zone, Color(0.02, 0.03, 0.12, 0.55) if str(event.type) == "blackout" else Color(HAZARD_TINT.get(str(event.type), GOLD), 0.35))
+		if str(event.type) == "blackout" and event.has("target"):
+			cv.draw_rect(Rect2(MINIMAP_RECT.position + Vector2(event.target) * MINIMAP_RECT.size - Vector2(3, 3), Vector2(6, 6)), GOLD)
+	if int(elapsed_ui * 4.0) % 2 == 0 or reduced_motion:
+		for item: Dictionary in sim.upcoming_hazards():
+			var zone := Rect2(MINIMAP_RECT.position + Vector2(item.position) * MINIMAP_RECT.size, Vector2(item.size) * MINIMAP_RECT.size)
+			cv.draw_rect(zone.grow(1), HAZARD_TINT.get(str(item.type), GOLD), false, 2)
+	if level_layout.has("river"):
+		var river: Rect2 = level_layout.river
+		for column: int in level_layout.bridges:
+			var bx: float = MINIMAP_RECT.position.x + RescueSimulation.ROAD_X[column] * MINIMAP_RECT.size.x
+			cv.draw_rect(Rect2(bx - 1.5, MINIMAP_RECT.position.y + river.position.y / BeaconCampaign.MAP_SIZE.y * MINIMAP_RECT.size.y, 3, river.size.y / BeaconCampaign.MAP_SIZE.y * MINIMAP_RECT.size.y), Color("c9d2c8"))
+		for flood: Dictionary in sim.flooded_bridges():
+			cv.draw_rect(Rect2(MINIMAP_RECT.position + Vector2(flood.position) * MINIMAP_RECT.size, Vector2(flood.size) * MINIMAP_RECT.size).grow(1.5), Color("9fd3ff"))
 	# Closed roads show as red bars so they're findable when off screen.
 	for road: Dictionary in sim.active_road_events():
+		if bool(road.get("hazard", false)): continue
 		var area := Rect2(MINIMAP_RECT.position + Vector2(road.position) * MINIMAP_RECT.size, Vector2(road.size) * MINIMAP_RECT.size)
 		cv.draw_rect(area.grow(1.5), Color("ff6b57"))
 		cv.draw_rect(Rect2(area.get_center() - Vector2(2, 2), Vector2(4, 4)), KIND_COLOR.get(road.clear_kind, CREAM))
@@ -447,6 +477,10 @@ func _ready() -> void:
 	hud.game = self
 	hud.z_index = 10
 	add_child(hud)
+	fx = preload("res://scripts/juice_fx.gd").new()
+	fx.game = self
+	fx.view_rect = VIEW
+	add_child(fx)
 	tutorial_overlay = TutorialOverlay.new()
 	add_child(tutorial_overlay)
 	tutorial_overlay.position = Vector2(-64, CREW_BAR.position.y - tutorial_overlay.panel_size.y - 10)
@@ -544,6 +578,14 @@ func _start_dedicated_server() -> void:
 
 func _process(delta: float) -> void:
 	elapsed_ui += delta
+	if fx != null:
+		fx.reduced_motion = reduced_motion
+		position = Vector2(UI_OFFSET_X, 0) + fx.shake_offset()
+		if screen == "results" and results_since < 0.0:
+			results_since = elapsed_ui
+			results_stars_played = 0
+		elif screen != "results":
+			results_since = -1.0
 	toast_left = maxf(0, toast_left - delta)
 	action_feedback_left = maxf(0, action_feedback_left - delta)
 	focused_unit_left = maxf(0, focused_unit_left - delta)
@@ -751,7 +793,11 @@ func _draw_game() -> void:
 		if mine.size() >= DEPARTMENTS.size(): _text("ALL", Vector2(x, 48), 16, CREAM)
 		x += 130
 	_text("RESCUED", Vector2(x, 26), 10, MUTED)
-	_text("%d / %d" % [sim.rescued, sim.target] if not tutorial_active else str(sim.rescued), Vector2(x, 50), 22, CREAM if sim.rescued < sim.target else TEAL)
+	# The counter counts up and jumps when rescue icons land on it.
+	var shown_rescued: int = roundi(fx.displayed_rescued) if fx != null else sim.rescued
+	var punch: float = fx.counter_punch if fx != null and not reduced_motion else 0.0
+	rescued_anchor = Vector2(x + 28, 42)
+	_text("%d / %d" % [shown_rescued, sim.target] if not tutorial_active else str(shown_rescued), Vector2(x, 50 + punch * 3), 22 + int(punch * 8), GOLD.lerp(CREAM if sim.rescued < sim.target else TEAL, 1.0 - punch))
 	x += 120
 	_text("COMMUNITY", Vector2(x, 26), 10, MUTED)
 	_bar(Rect2(x, 36, 140, 10), sim.reputation / 100.0, TEAL if sim.reputation > sim.minimum_confidence + 10 else CORAL)
@@ -772,9 +818,47 @@ func _draw_game() -> void:
 	_text(sub, boost.position + Vector2((boost.size.x - sw) / 2, 34), 10, MUTED)
 	_button("help", "?", Rect2(bar.end.x - 102, 16, 40, 36), Color(PANEL_LIGHT, 0.85), CREAM, 18)
 	_button("pause", "II", Rect2(bar.end.x - 54, 16, 40, 36), Color(PANEL_LIGHT, 0.85), CREAM, 16)
+	_draw_hazard_strip(bar)
 	_draw_map_tools()
 	_draw_capture_status()
 	_draw_crew_cards()
+
+const HAZARD_TINT := {"blackout": Color("bda6ff"), "sandstorm": Color("f0b36b"), "squall": Color("9fc4e0"), "flood": Color("9fd3ff")}
+
+# Level hazards at a glance, right under the top bar: what is happening now and
+# what is coming next (playtest 14.10: the bridge floods were easy to miss).
+func _draw_hazard_strip(bar: Rect2) -> void:
+	if tutorial_active or not sim.has_method("current_hazards"): return
+	var lines: Array[Dictionary] = []
+	for item: Dictionary in sim.upcoming_hazards():
+		lines.append({"text": "⚠ %s IN %ds" % [str(item.title).to_upper(), ceili(float(item["in"]))], "type": item.type, "soon": true})
+	for item: Dictionary in sim.current_hazards():
+		lines.append({"text": "%s · %ds" % [str(item.title).to_upper(), ceili(float(item.remaining))], "type": item.type, "soon": false})
+	if lines.is_empty(): return
+	# One line under the bar (a second row would hide behind the toast): the
+	# most urgent item first, then up to two more in smaller type.
+	var parts: Array[Dictionary] = []
+	var total: float = 30.0
+	for index: int in range(mini(3, lines.size())):
+		var line: Dictionary = lines[index]
+		var size: int = 15 if index == 0 else 12
+		var text: String = str(line.text)
+		var w: float = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+		parts.append({"text": text, "size": size, "w": w, "type": line.type, "soon": line.soon})
+		total += w + (24.0 if index > 0 else 0.0)
+	var rect := Rect2(bar.get_center().x - total * 0.5, bar.end.y + 6, total, 26)
+	var first: Dictionary = parts[0]
+	var pulse: float = 0.0 if reduced_motion or not bool(first.soon) else (sin(elapsed_ui * 8.0) + 1.0) * 0.5
+	_panel(rect, Color(INK, 0.9), Color(HAZARD_TINT.get(str(first.type), GOLD), 0.55 + 0.45 * pulse))
+	var x: float = rect.position.x + 15.0
+	for index: int in range(parts.size()):
+		var part: Dictionary = parts[index]
+		if index > 0:
+			cv.draw_rect(Rect2(x + 9, rect.position.y + 7, 2, 12), Color(CREAM, 0.3))
+			x += 24.0
+		var tint: Color = HAZARD_TINT.get(str(part.type), GOLD)
+		_text(str(part.text), Vector2(x, rect.position.y + (18 if index == 0 else 17)), int(part.size), tint if bool(part.soon) or index == 0 else CREAM)
+		x += float(part.w)
 
 func _pill(rect: Rect2, text: String, color: Color) -> void:
 	var pulse: float = 0.0 if reduced_motion else (sin(elapsed_ui * 6.0) + 1.0) * 0.5
@@ -888,6 +972,9 @@ func _select_road_event(road_id: int) -> void:
 	var road: Dictionary = sim.get_road_event(road_id)
 	if road.is_empty() or str(road.status) not in ["active","clearing"]: return
 	var kind: String = str(road.clear_kind)
+	if kind.is_empty():
+		_toast("Nobody can clear a %s. Send crews around it, or wait until it passes." % str(road.type))
+		return
 	var who: String = str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind))
 	if int(road.assigned_unit)>=0:
 		var crew_on_it: Dictionary = sim.get_unit(int(road.assigned_unit))
@@ -907,7 +994,7 @@ func _select_road_event(road_id: int) -> void:
 
 func _clear_road_with(road_id: int, kind: String) -> void:
 	var road: Dictionary = sim.get_road_event(road_id)
-	if road.is_empty(): return
+	if road.is_empty() or str(road.clear_kind).is_empty(): return
 	if kind!=str(road.clear_kind):
 		_toast("Only %s can clear %s." % [str(NetworkSession.DEPARTMENT_NAMES.get(road.clear_kind,road.clear_kind)), road.street])
 		return
@@ -1033,6 +1120,11 @@ func _draw_crew_cards() -> void:
 			if int(unit.id)==selected_unit:
 				cv.draw_rect(card_area, Color(GOLD, 0.18))
 				cv.draw_rect(card_area, GOLD, false, 2)
+			if fx != null and fx.card_pulse.has(int(unit.id)):
+				# Just dispatched: the card flashes in the department colour.
+				var pulse: float = clampf(float(fx.card_pulse[int(unit.id)]) / 0.7, 0.0, 1.0)
+				cv.draw_rect(card_area.grow(3.0 * pulse), Color(KIND_COLOR[kind], 0.35 * pulse))
+				cv.draw_rect(card_area.grow(3.0 * pulse), Color(KIND_COLOR[kind], pulse), false, 2)
 			ResponderArt.draw_portrait_rect(cv, Rect2(rect.position + Vector2(x, 23), Vector2(28, 32)), kind)
 			_text(_short(str(unit.get("crew_name",unit.name)),8), rect.position + Vector2(x + 34, 38), 13, CREAM)
 			var status: String = {"idle":"READY","travel":"EN ROUTE","working":"ON SCENE","return":"RETURNING","rest":"RESTING","clearing":"CLEARING"}.get(unit.state,str(unit.state).to_upper())
@@ -1171,9 +1263,22 @@ func _draw_results() -> void:
 	_panel(Rect2(337,160,766,590),INK,Color("355966"))
 	_text("SHIFT COMPLETE" if sim.won else "A DIFFICULT SHIFT",Vector2(388,211),13,TEAL if sim.won else CORAL)
 	_text(("A town worth saving." if sim.shift_index==5 else "The light stays on.") if sim.won else "Regroup. You can do this.",Vector2(386,267),38,CREAM)
+	# Stars pop in one at a time with a rising chime; the numbers count up.
+	var shown_for: float = elapsed_ui - results_since if results_since >= 0.0 else 99.0
+	if reduced_motion: shown_for = 99.0
 	for i in range(3):
-		_star(Vector2(947+i*35,205),12,GOLD if i<sim.stars else PANEL_LIGHT)
-	var stats := [[str(sim.rescued),"NEIGHBORS RESCUED"],[str(sim.resolved_count),"CALLS RESOLVED"],["%d%%"%sim.reputation,"COMMUNITY CONFIDENCE"]]
+		var appear: float = 0.5 + i * 0.45
+		var earned: bool = i < sim.stars
+		var grow: float = clampf((shown_for - appear) / 0.25, 0.0, 1.0)
+		if earned and grow > 0.0 and results_stars_played <= i:
+			results_stars_played = i + 1
+			audio.play_cue("combo", 1.0 + i * 0.18)
+		var radius: float = 12.0 if not earned else 12.0 * (grow + sin(grow * PI) * 0.5)
+		_star(Vector2(947+i*35,205),12,PANEL_LIGHT)
+		if earned and grow > 0.0: _star(Vector2(947+i*35,205),radius,GOLD)
+	var count_k: float = clampf((shown_for - 0.2) / 1.1, 0.0, 1.0)
+	count_k = 1.0 - pow(1.0 - count_k, 3)
+	var stats := [[str(roundi(sim.rescued * count_k)),"NEIGHBORS RESCUED"],[str(roundi(sim.resolved_count * count_k)),"CALLS RESOLVED"],["%d%%"%roundi(sim.reputation * count_k),"COMMUNITY CONFIDENCE"]]
 	for i in range(3):
 		_text(stats[i][0],Vector2(390+i*226,344),37,GOLD)
 		_text(stats[i][1],Vector2(390+i*226,371),10,MUTED)
@@ -1666,6 +1771,9 @@ func _begin_shift(index: int) -> void:
 	_stop_capture()
 	_route_cache_until = 0
 	sim.start_shift(clampi(index,0,5))
+	if fx != null:
+		fx.reset()
+		fx.displayed_rescued = 0.0
 	if dedicated_server:
 		orders.clear()
 		result_saved = false
@@ -1837,9 +1945,16 @@ func _handle_game_event(event: Dictionary) -> void:
 		research.log_event("incident_spawned" if type=="incident" else type,event)
 	if type in ["resolved","rescue","incident_resolved"]:
 		audio.play_cue("rescue")
-		_celebrate(Vector2(760,120))
-		if town.has_method("celebrate") and event.get("pos") is Vector2:
-			town.call("celebrate",event.pos,int(event.get("points",0)),int(event.get("people",1)))
+		if fx != null and event.get("pos") is Vector2:
+			fx.rescue(event.pos, int(event.get("people",1)), rescued_anchor)
+			var time_left: float = float(event.get("time_left", 99.0))
+			var chain: int = int(event.get("combo", 0))
+			if time_left <= 5.0:
+				fx.banner("CLUTCH SAVE!  %ds LEFT" % maxi(1, ceili(time_left)), GOLD)
+				audio.play_cue("combo", 1.25)
+			elif chain >= 2:
+				fx.banner("x%d CHAIN!" % chain, TEAL, chain >= 5)
+				audio.play_cue("combo", minf(1.0 + 0.07 * chain, 1.7))
 		if int(event.get("incident_id",-1))==selected:
 			focus_hold_id=selected
 			focus_hold_left=2.2
@@ -1851,10 +1966,37 @@ func _handle_game_event(event: Dictionary) -> void:
 	elif type=="road_event":
 		_toast(message)
 		audio.play_cue("alarm")
-	elif type=="road_cleared":
+	elif type=="bridge_flooded":
+		_toast(message)
+		audio.play_cue("alarm")
+		if fx != null: fx.banner("%s FLOODED!" % str(event.get("bridge","Bridge")).to_upper(), Color("9fd3ff"), false)
+	elif type=="bridge_open":
 		_toast(message)
 		audio.play_cue("arrival")
-	elif type=="road_clear_dispatched": audio.play_cue("dispatch")
+		if fx != null and event.get("pos") is Vector2: fx.road_open(event.pos, Color("9fd3ff"))
+	elif type=="hazard_warning":
+		var tint: Color = HAZARD_TINT.get(str(event.get("hazard_type","")), GOLD)
+		audio.play_cue("hazard")
+		if fx != null: fx.banner("⚠ %s IN %ds" % [str(event.get("title","Hazard")).to_upper(), int(BeaconCampaign.HAZARD_WARNING_SECONDS)], tint, false)
+	elif type=="hazard_started":
+		_toast(message)
+		var hazard_type: String = str(event.get("hazard_type",""))
+		audio.play_cue("power_down" if hazard_type=="blackout" else "wind")
+		if fx != null:
+			var title: String = {"blackout": "BLACKOUT!", "sandstorm": "SANDSTORM!", "squall": "SQUALL!"}.get(hazard_type, "HAZARD!")
+			fx.banner(title, HAZARD_TINT.get(hazard_type, GOLD), true)
+	elif type=="hazard_ended":
+		_toast(message)
+		audio.play_cue("power_up" if str(event.get("hazard_type",""))=="blackout" else "arrival")
+	elif type=="road_cleared":
+		_toast(message)
+		var blackout: bool = str(sim.get_road_event(int(event.get("road_event_id",-1))).get("type",""))=="blackout"
+		audio.play_cue("power_up" if blackout else "arrival")
+		if blackout and fx != null: fx.banner("LIGHTS BACK ON!", GOLD, false)
+		if fx != null and event.get("pos") is Vector2: fx.road_open(event.pos, KIND_COLOR.get(str(event.get("kind","")), GOLD))
+	elif type=="road_clear_dispatched":
+		audio.play_cue("dispatch")
+		if fx != null: fx.dispatched(sim.get_unit(int(event.get("unit_id",-1))))
 	elif type in ["escalated","critical","urgent"]:
 		if urgency_cooldown<=0:
 			audio.play_cue("urgent")
@@ -1864,10 +2006,14 @@ func _handle_game_event(event: Dictionary) -> void:
 		audio.play_cue("arrival")
 	elif type=="rapid_response":
 		audio.play_cue("combo")
-		_celebrate(Vector2(1040,120))
-	elif type in ["failed","incident_failed"]: audio.play_cue("fail")
+		if fx != null: fx.banner("RAPID RESPONSE!", TEAL, false)
+	elif type in ["failed","incident_failed"]:
+		audio.play_cue("fail")
+		if fx != null and event.get("pos") is Vector2: fx.failed(event.pos)
 	elif type=="combo": audio.play_cue("combo")
-	elif type=="dispatch": audio.play_cue("dispatch")
+	elif type=="dispatch":
+		audio.play_cue("dispatch")
+		if fx != null: fx.dispatched(sim.get_unit(int(event.get("unit_id",-1))))
 	elif type in ["scout","supply"]:
 		audio.play_cue("upgrade")
 		var effect: Dictionary = sim.last_action_effect

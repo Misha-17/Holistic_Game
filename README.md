@@ -39,6 +39,36 @@ The old slow zones (school crossing, harbor deliveries, market queues, bridge wo
 - **Shifts end early** once the last scheduled call has arrived, every road event has happened, no call is open and no crew is still out ("Every call handled • shift complete"). Calls keep arriving until about 4:45, so this saves up to ~40 s.
 - Disruption texts no longer promise slower travel (only road events slow traffic now).
 
+## Levels 3-6: a map and a hazard each (Oct 2026)
+
+Levels 1-2 keep the normal town. Every later level has its own map and one signature hazard. All of it is scripted (same time, same place, every session), so research data stays comparable.
+
+| Level | Map | Hazard |
+|---|---|---|
+| 3 **Two Banks** (rain) | A river splits the town; only West, Town and East Bridge cross it. Every department has a station on each bank. | **Bridge floods**: East Bridge 0:50 for 45 s, Town Bridge 2:26 for 60 s, West Bridge 4:05 for 45 s. Nobody can clear a flood; crews reroute over another bridge. |
+| 4 **Lights Out** (night) | Moon Lake fills the middle of town; no roads cross it. | **Blackouts** in Lantern Hill (0:42), East Docks (1:46), Saltmarsh (2:56) and North End (4:04). In the dark everyone except Engineering drives at 40% and new calls come in unconfirmed. An engineer at the district's substation (yellow ENG badge, 8 s) turns the lights back on; otherwise it lasts 70 s. |
+| 5 **Dune Springs** (desert) | Sand town with the Palm Oasis and five streets buried under dunes. | **Sandstorms** sweep across the town in three steps (west → centre → east at 0:46, back east → west at 2:58). Inside the storm everyone drives at 65% and new calls are unconfirmed. Nobody can clear a storm. |
+| 6 **Beacon Night** (finale) | The river again. | Everything once: a blackout (Orchard Heights 0:38), two bridge floods (Town 1:44, East 3:28) and a squall sweeping west → east from 2:20. |
+
+- **Forecast:** every flood, blackout and storm step is announced 12 s ahead: a strip under the top bar ("BLACKOUT IN NORTH END IN 7s", then what is active and how long it lasts), a dashed outline with a countdown on the map, a blinking outline on the minimap, a banner and a horn sound. When it hits, a big banner and its own sound (wind, power-down); "LIGHTS BACK ON!" when an engineer restores power. Playtest 14.10: the bridge floods were easy to miss when playing alone.
+- **Visuals** are drawn in code like the rest of the town (no image assets): the night town and lake, the dark districts with a few torches, the desert palette with cacti, palms, dunes and the oasis, moving sand / rain over storm districts, and the wall of sand creeping in before it arrives.
+- **Sounds** for the hazards (`hazard`, `power_down`, `power_up`, `wind`) are synthesised by `assets/audio/generate_level_cues.py`; drop your own file with the same name into `assets/audio/custom/` to replace one.
+- **Rules:** call deadlines assume roads that can be cleared are open (road events, blackouts) and that bridges are open, but include storms (nobody can clear them). Road events in Lights Out are Police jams only, because blackouts already keep Engineering busy. Levels 5-6 have a slightly slower call rate (they have more going on) and rescue targets 92 / 108.
+- **Under the hood:** `campaign.gd` `layout()` holds each map (water, bridges, buried streets, floods), `level_hazards()` the blackouts and storms. Blackouts and storms reuse the road-event machinery (saved games, co-op guests, the `clear_road` action and research logging all work unchanged). Routes on these levels are found over the real road network. Research log adds `hazard_forecast` plus the existing `road_event_*` records (type `blackout` / `sandstorm` / `squall`) and `bridge_flood_started` / `bridge_flood_ended`.
+- Tests: `tests/test_levels.gd` (maps connected, every hazard announced, blackouts restorable, storms, guests in sync, a four-player bot wins levels 3-6) and `tests/test_two_banks.gd`.
+
+## Juicier feedback (Oct 2026)
+
+All cosmetic (in `scripts/juice_fx.gd`); the simulation is untouched, and "Reduced motion" tones it down.
+- **Rescue:** confetti burst, a bouncy "+N SAFE" pop-up, little icons flying into the RESCUED counter, which counts up and jumps.
+- **Close calls:** "CLUTCH SAVE! 2s LEFT" banner when a call is saved with 5 s or less left.
+- **Chains:** "x3 CHAIN!" banners with a rising chime for back-to-back rescues.
+- **Sending a crew:** the crew card flashes, the route draws itself on the map, and vehicles on the way have a flashing siren and a dust trail.
+- **Road cleared / bridge reopened:** barrier tape snaps apart, a ring and a "ROAD OPEN" pop-up.
+- **New call:** the marker drops in with a bounce and sends out a shockwave ring.
+- **Missed call:** short screen shake, red edge flash and a "MISSED" pop-up.
+- **End of level:** stars pop in one by one with a rising chime; the numbers count up.
+
 ## Workshop removed, co-op level picker (Oct 2026)
 
 - **No more upgrades.** The Equipment Workshop is gone from the shift list and the results screen, and crews are never upgraded (old saved upgrades are ignored). Every session plays with the same crews. The results screen shows calls resolved and roads cleared instead of credits, and "Choose another level" replaces "Visit the workshop".
@@ -87,6 +117,8 @@ Tests:
 ```
 godot --headless --path . --script tests/test_simulation.gd
 godot --headless --path . --script tests/test_road_events.gd
+godot --headless --path . --script tests/test_levels.gd
+godot --headless --path . --script tests/test_two_banks.gd
 godot --headless --path . --script tests/test_player_capture.gd
 godot --headless --path . --script tests/test_map_navigation.gd
 godot --path . --script tests/test_map_viewport_input.gd

@@ -71,6 +71,10 @@ var road_events: Array[Dictionary] = []
 var _road_event_index: int = 0
 var roads_cleared: int = 0
 var _ignore_road_events := false
+# Level layout (see Campaign.layout): empty = the normal full road grid.
+var _layout: Dictionary = {}
+var _edge_cache: Dictionary = {}
+var _blocked_edges: Dictionary = {}
 
 var _rng := RandomNumberGenerator.new()
 var _shift: Dictionary = {}
@@ -140,6 +144,7 @@ func start_shift(index: int) -> void:
 	road_events = []
 	_road_event_index = 0
 	roads_cleared = 0
+	_set_layout()
 	_next_spawn = 2.8
 	_next_id = 1
 	_disruption_index = 0
@@ -192,7 +197,9 @@ func _tick_step(delta: float) -> void:
 	elif supplies >= max_supplies:
 		supply_regen = 0.0
 	_tick_arrivals()
+	_tick_hazard_warnings(delta)
 	_tick_road_events()
+	_tick_floods(delta)
 	for unit: Dictionary in units:
 		_tick_unit(unit, delta)
 	for incident: Dictionary in incidents:
@@ -497,9 +504,11 @@ func road_conditions() -> Array[Dictionary]:
 	# harbor deliveries, market queues, bridge works, flooded road) are gone:
 	# they cost time without asking anyone to decide anything.
 	var result: Array[Dictionary] = []
-	if _ignore_road_events: return result
 	for event: Dictionary in road_events:
 		if str(event.status) not in ["active", "clearing"]: continue
+		# Deadlines ignore closures the team can clear, but weather nobody can
+		# clear (sandstorms, squalls) is part of every countdown it touches.
+		if _ignore_road_events and not str(event.clear_kind).is_empty(): continue
 		result.append({"name": event.name, "position": event.position, "size": event.size,
 			"speed_factor": float(event.speed_factor), "remaining": float(event.expires_at) - elapsed,
 			"pass_kind": str(event.clear_kind), "road_event_id": int(event.id), "type": str(event.type)})
@@ -529,7 +538,16 @@ func active_road_events() -> Array[Dictionary]:
 	return result
 
 func road_event_center(event: Dictionary) -> Vector2:
+	# Blackouts are fixed at their substation, not the middle of the district.
+	if event.has("target"): return Vector2(event.target)
 	return Vector2(event.position) + Vector2(event.size) * 0.5
+
+func _hazard_text(event: Dictionary) -> String:
+	match str(event.type):
+		"blackout": return "%s • calls there can't be seen and crews crawl. An engineer at the substation brings the lights back" % event.name
+		"sandstorm": return "%s • everyone drives slowly there and new calls are hard to see" % event.name
+		"squall": return "%s • everyone drives slowly there and new calls are hard to see" % event.name
+	return str(event.name)
 
 func _tick_road_events() -> void:
 	var schedule: Array = _shift.get("traffic", [])
@@ -543,6 +561,8 @@ func _tick_road_events() -> void:
 			"started_at": elapsed, "expires_at": elapsed + float(plan.duration), "status": "active",
 			"assigned_unit": -1, "clear_dispatched_at": -1.0, "clear_started_at": -1.0, "clear_progress": 0.0,
 			"ended_at": -1.0, "chaos_phase": chaos_phase, "linked_incident": -1}
+		if plan.has("target"): event["target"] = plan.target
+		if bool(plan.get("hazard", false)): event["hazard"] = true
 		road_events.append(event)
 		# The road event comes with a call on the closed street: the team either
 		# clears the road first or crawls through it.
@@ -560,8 +580,11 @@ func _tick_road_events() -> void:
 			else:
 				_emit_research("road_call_capacity_skipped", {"road_event_id": int(event.id), "shift": shift_index, "at": elapsed, "active_calls": active_count(), "site_busy": site_busy})
 		var who: String = "Police" if event.clear_kind == "police" else "Engineering"
-		_emit("road_event", "%s • only %s gets through. Clear it to open the road" % [event.name, who],
-			{"road_event_id": event.id, "pos": road_event_center(event), "clear_kind": event.clear_kind})
+		if bool(event.get("hazard", false)):
+			_emit("hazard_started", _hazard_text(event), {"road_event_id": event.id, "pos": road_event_center(event), "clear_kind": event.clear_kind, "hazard_type": event.type})
+		else:
+			_emit("road_event", "%s • only %s gets through. Clear it to open the road" % [event.name, who],
+				{"road_event_id": event.id, "pos": road_event_center(event), "clear_kind": event.clear_kind})
 		_emit_research("road_event_started", _road_event_record(event))
 	for event: Dictionary in road_events:
 		if str(event.status) in ["active", "clearing"] and elapsed >= float(event.expires_at):
@@ -571,7 +594,10 @@ func _tick_road_events() -> void:
 			if not crew.is_empty() and int(crew.get("clear_target", -1)) == int(event.id):
 				crew.clear_target = -1
 				_send_home(crew)
-			_emit("road_event_end", "%s has cleared on its own" % event.street, {"road_event_id": event.id})
+			var ended: String = "%s has cleared on its own" % event.street
+			if str(event.type) == "blackout": ended = "Power is back in %s" % event.street
+			elif bool(event.get("hazard", false)): ended = "The %s has passed %s" % [str(event.type), event.street]
+			_emit("hazard_ended" if bool(event.get("hazard", false)) else "road_event_end", ended, {"road_event_id": event.id, "pos": road_event_center(event), "hazard_type": event.type})
 			_emit_research("road_event_expired", _road_event_record(event))
 
 func _road_event_record(event: Dictionary) -> Dictionary:
@@ -591,6 +617,9 @@ func clear_road(event_id: int, unit_id: int) -> bool:
 		return false
 	if int(event.assigned_unit) >= 0:
 		_emit("action_denied", "A crew is already on its way to %s" % event.street)
+		return false
+	if str(event.clear_kind).is_empty():
+		_emit("action_denied", "Nobody can clear a %s • work around it or wait until it passes" % str(event.type))
 		return false
 	var crew: Dictionary = get_unit(unit_id)
 	if crew.is_empty() or str(crew.kind) != str(event.clear_kind):
@@ -631,7 +660,9 @@ func _finish_clearing(crew: Dictionary) -> void:
 		event.ended_at = elapsed
 		event.clear_progress = 1.0
 		roads_cleared += 1
-		_emit("road_cleared", "%s is open again • thanks, %s" % [event.street, crew.get("crew_name", crew.name)],
+		var done_text: String = "%s is open again • thanks, %s" % [event.street, crew.get("crew_name", crew.name)]
+		if str(event.type) == "blackout": done_text = "Lights are back on in %s • thanks, %s" % [event.street, crew.get("crew_name", crew.name)]
+		_emit("road_cleared", done_text,
 			{"road_event_id": event.id, "unit_id": crew.id, "kind": crew.kind, "pos": road_event_center(event)})
 		_emit_research("road_event_cleared", _road_event_record(event))
 		_reroute_around_roads()
@@ -797,6 +828,8 @@ func apply_snapshot(data: Dictionary) -> void:
 		elif key in ["shift_index", "elapsed", "duration", "running", "finished", "won", "score", "reputation", "rescued", "combo", "best_combo", "credits", "upgrades", "weather", "notice", "supplies", "max_supplies", "supply_regen", "special_cooldown", "special_duration", "disruption", "disruption_remaining", "resolved_count", "failed_count", "total_spawned", "stars", "target", "shift_reward", "successful_dispatches", "scout_count", "supply_count", "rush_remaining", "_next_spawn", "_next_id", "_disruption_index", "_reported_final_minute", "_reported_target", "_previous_spawn_location"]:
 			set(key, restored[key])
 	_shift = restored.get("_shift", Campaign.shift_data(shift_index)).duplicate(true)
+	_set_layout()
+	_edge_cache.clear()
 	_rng.seed = int(str(restored.get("_rng_seed", 738291 + shift_index * 1097)))
 	if restored.has("_rng_state"):
 		_rng.state = int(str(restored._rng_state))
@@ -1070,6 +1103,7 @@ func _spawn_incident(forced_location: int = -1, forced_kind: String = "") -> voi
 		var districts: Dictionary = {}
 		for index: int in range(places.size()):
 			if index in used or index == _previous_spawn_location: continue
+			if not Campaign.site_open(shift_index, places[index].pos): continue
 			var cell: Vector2i = Vector2i(clampi(int(places[index].pos.x * 3.0), 0, 2), clampi(int(places[index].pos.y * 3.0), 0, 2))
 			var key: int = cell.y * 3 + cell.x
 			if not districts.has(key): districts[key] = []
@@ -1092,6 +1126,9 @@ func _spawn_incident(forced_location: int = -1, forced_kind: String = "") -> voi
 			severity = 2
 	var report_clear: bool = _rng.randf() < (0.66 if shift_index < 2 else 0.57)
 	if disruption in ["blackout", "comms"]: report_clear = false
+	# Calls inside a blackout or a storm come in unconfirmed: scout them or send a crew to see.
+	for zone: Dictionary in active_road_events():
+		if bool(zone.get("hazard", false)) and Rect2(zone.position, zone.size).has_point(place.pos): report_clear = false
 	if shift_index == 0 and total_spawned == 0: report_clear = true
 	if shift_index == 0 and total_spawned == 1:
 		report_clear = false
@@ -1369,7 +1406,7 @@ func _resolve(incident: Dictionary) -> void:
 	reputation = minf(100.0, reputation + 2.0)
 	for id: int in incident.assigned:
 		_send_home(get_unit(id))
-	_emit("resolved", "%d neighbors safe • crews returning to standby" % incident.people, {"incident_id": incident.id, "pos": incident.pos, "people": incident.people, "points": earned, "combo": combo})
+	_emit("resolved", "%d neighbors safe • crews returning to standby" % incident.people, {"incident_id": incident.id, "pos": incident.pos, "people": incident.people, "points": earned, "combo": combo, "time_left": float(incident.deadline)})
 	if combo in [3, 5, 8, 12, 16, 20]:
 		_emit("combo", "%d calls. One unbroken chain of care." % combo, {"combo": combo})
 	if combo > 0 and combo % 5 == 0:
@@ -1408,6 +1445,8 @@ func _travel_speed(unit: Dictionary, offset: float = 0.0) -> float:
 	return speed
 
 func _best_route(unit: Dictionary, start: Vector2, destination: Vector2) -> Dictionary:
+	if not _layout.is_empty():
+		return _graph_route(unit, start, destination)
 	var start_y: float = _nearest(start.y, ROAD_Y)
 	var end_y: float = _nearest(destination.y, ROAD_Y)
 	var candidates: Array = []
@@ -1565,3 +1604,294 @@ func _emit(type: String, message: String, payload: Dictionary = {}) -> void:
 	
 	if events.size() > 160:
 		events.pop_front()
+
+
+# ---------------------------------------------------------------- level layouts
+# Bridges and floods (level 3, "Two Banks"). Which bridge is flooded depends
+# only on the clock, so the script is identical every session.
+
+func flooded_bridges() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	if not _layout.has("floods"): return result
+	for flood: Array in _layout.floods:
+		var begins: float = float(flood[1])
+		var ends: float = begins + float(flood[2])
+		if elapsed >= begins and elapsed < ends:
+			var column: int = int(flood[0])
+			var x: float = ROAD_X[column] * Campaign.MAP_SIZE.x
+			var area := Rect2(x - 30.0, Campaign.RIVER_TOP - 6.0, 60.0, Campaign.RIVER_BOTTOM - Campaign.RIVER_TOP + 12.0)
+			result.append({"column": column, "name": str(_layout.bridges.get(column, "Bridge")), "remaining": ends - elapsed,
+				"position": area.position / Campaign.MAP_SIZE, "size": area.size / Campaign.MAP_SIZE})
+	return result
+
+func _bridge_open(column: int) -> bool:
+	if not _layout.has("bridges"): return true
+	if not _layout.bridges.has(column): return false
+	if _ignore_road_events: return true
+	for flood: Array in _layout.floods:
+		if int(flood[0]) == column and elapsed >= float(flood[1]) and elapsed < float(flood[1]) + float(flood[2]):
+			return false
+	return true
+
+func _tick_floods(delta: float) -> void:
+	if not _layout.has("floods"): return
+	var before: float = elapsed - delta
+	for flood: Array in _layout.floods:
+		var begins: float = float(flood[1])
+		var ends: float = begins + float(flood[2])
+		var name: String = str(_layout.bridges.get(int(flood[0]), "Bridge"))
+		var x: float = ROAD_X[int(flood[0])]
+		var pos := Vector2(x, (Campaign.RIVER_TOP + Campaign.RIVER_BOTTOM) * 0.5 / Campaign.MAP_SIZE.y)
+		if before < begins and elapsed >= begins:
+			_edge_cache.clear()
+			_emit("bridge_flooded", "%s is flooded • cross the river somewhere else" % name, {"pos": pos, "bridge": name, "seconds": ends - begins})
+			_emit_research("bridge_flood_started", {"shift": shift_index, "bridge": name, "at": elapsed, "until": ends, "chaos_phase": chaos_phase})
+			_reroute_all()
+		elif before < ends and elapsed >= ends:
+			_edge_cache.clear()
+			_emit("bridge_open", "%s is open again" % name, {"pos": pos, "bridge": name})
+			_emit_research("bridge_flood_ended", {"shift": shift_index, "bridge": name, "at": elapsed})
+			_reroute_all()
+
+# Every moving crew takes the best route again (e.g. its bridge just flooded).
+func _reroute_all() -> void:
+	for unit: Dictionary in units:
+		if str(unit.state) not in ["travel", "return"]: continue
+		var path: Array = unit.path
+		if path.is_empty(): continue
+		var route: Dictionary = _best_route(unit, unit.pos, path.back())
+		if not route.path.is_empty() and is_finite(float(route.eta)):
+			unit.path = route.path
+			unit.path_index = 0
+			unit.remaining = float(route.eta)
+
+func _edge_open(horizontal: bool, ix: int, iy: int) -> bool:
+	if _layout.is_empty(): return true
+	# Bridges exist but flood at scripted times.
+	if not horizontal and _layout.has("bridges") and iy == int(_layout.get("river_row", -1)) and _layout.bridges.has(ix):
+		return _bridge_open(ix)
+	return not _blocked_edges.has("%s%d_%d" % ["h" if horizontal else "v", ix, iy])
+
+func _set_layout() -> void:
+	_layout = Campaign.layout(shift_index)
+	_edge_cache.clear()
+	_blocked_edges.clear()
+	if _layout.is_empty(): return
+	for iy: int in range(ROAD_Y.size()):
+		for ix: int in range(ROAD_X.size()):
+			if ix + 1 < ROAD_X.size() and Campaign.edge_blocked(_layout, true, ix, iy): _blocked_edges["h%d_%d" % [ix, iy]] = true
+			if iy + 1 < ROAD_Y.size() and Campaign.edge_blocked(_layout, false, ix, iy): _blocked_edges["v%d_%d" % [ix, iy]] = true
+
+# ---------------------------------------------------------------- hazard forecast
+# Every bridge flood, blackout and storm step is announced ahead of time, both
+# as an event (banner + sound) and through upcoming_hazards() for the HUD and map.
+# Stateless (depends only on the clock), so guests and saved games agree.
+func _tick_hazard_warnings(delta: float) -> void:
+	var before: float = elapsed - delta
+	for item: Dictionary in _hazard_plan():
+		var warn_at: float = float(item.at) - Campaign.HAZARD_WARNING_SECONDS
+		if before < warn_at and elapsed >= warn_at:
+			_emit("hazard_warning", "%s in %ds" % [str(item.title), int(Campaign.HAZARD_WARNING_SECONDS)],
+				{"pos": Vector2(item.position) + Vector2(item.size) * 0.5, "hazard_type": item.type, "title": item.title, "at": item.at})
+			_emit_research("hazard_forecast", {"shift": shift_index, "type": item.type, "title": item.title, "starts_at": item.at, "at": elapsed})
+
+# All scripted level hazards of this shift: {type, title, at, until, position, size}.
+func _hazard_plan() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for flood: Array in _layout.get("floods", []):
+		var x: float = ROAD_X[int(flood[0])] * Campaign.MAP_SIZE.x
+		var area := Rect2(x - 30.0, Campaign.RIVER_TOP - 6.0, 60.0, Campaign.RIVER_BOTTOM - Campaign.RIVER_TOP + 12.0)
+		var name: String = str(_layout.bridges.get(int(flood[0]), "Bridge"))
+		result.append({"type": "flood", "title": "%s floods" % name, "name": name, "at": float(flood[1]), "until": float(flood[1]) + float(flood[2]),
+			"position": area.position / Campaign.MAP_SIZE, "size": area.size / Campaign.MAP_SIZE})
+	for plan: Dictionary in _shift.get("traffic", []):
+		if not bool(plan.get("hazard", false)): continue
+		var title: String = str(plan.name)
+		if str(plan.type) == "blackout": title = "Blackout in %s" % plan.street
+		elif str(plan.type) in ["sandstorm", "squall"]: title = "%s reaches %s" % ["Sandstorm" if plan.type == "sandstorm" else "Squall", plan.street]
+		result.append({"type": str(plan.type), "title": title, "name": str(plan.name), "at": float(plan.at), "until": float(plan.at) + float(plan.duration),
+			"position": plan.position, "size": plan.size, "eastward": bool(plan.get("eastward", true))})
+	return result
+
+# Hazards that start within the next `window` seconds, soonest first.
+func upcoming_hazards(window: float = Campaign.HAZARD_WARNING_SECONDS) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for item: Dictionary in _hazard_plan():
+		var wait: float = float(item.at) - elapsed
+		if wait > 0.0 and wait <= window:
+			var entry: Dictionary = item.duplicate()
+			entry["in"] = wait
+			result.append(entry)
+	result.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["in"]) < float(b["in"]))
+	return result
+
+# Hazards in effect right now (floods and uncleared blackouts / storms), for the HUD.
+func current_hazards() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for flood: Dictionary in flooded_bridges():
+		result.append({"type": "flood", "title": "%s flooded" % flood.name, "remaining": float(flood.remaining), "position": flood.position, "size": flood.size})
+	for event: Dictionary in active_road_events():
+		if not bool(event.get("hazard", false)): continue
+		var title: String = str(event.name)
+		if str(event.type) == "blackout" and str(event.status) == "clearing": title = "Restoring power in %s" % event.street
+		result.append({"type": str(event.type), "title": title, "remaining": float(event.expires_at) - elapsed, "position": event.position, "size": event.size, "road_event_id": int(event.id)})
+	return result
+
+# Road-graph routing for levels with a layout. Nodes are the junctions of the
+# road grid; a start or destination off a junction is attached to the
+# junctions at both ends of the road it is on (or, for a building, of the
+# road in front of it).
+func _graph_route(unit: Dictionary, start: Vector2, destination: Vector2) -> Dictionary:
+	var nx: int = ROAD_X.size()
+	var ny: int = ROAD_Y.size()
+	var zones: Array[Dictionary] = road_conditions()
+	var probe: Dictionary = {"kind": str(unit.get("kind", "")), "fatigue": 0.0}
+	var key: String = "%s|%s|%s" % [probe.kind, str(_ignore_road_events), _zone_signature(zones)]
+	if not _edge_cache.has(key):
+		_edge_cache[key] = {}
+	var cache: Dictionary = _edge_cache[key]
+	var starts: Array = _attach(start, false)
+	var ends: Array = _attach(destination, true)
+	var dist: Array = []
+	var prev: Array = []
+	var done: Array = []
+	var entry: Array = []
+	for i in range(nx * ny):
+		dist.append(INF)
+		prev.append(-1)
+		done.append(false)
+		entry.append([])
+	for option: Dictionary in starts:
+		var cost: float = _points_time(probe, start, option.points, zones)
+		if cost < dist[option.node]:
+			dist[option.node] = cost
+			entry[option.node] = option.points
+	while true:
+		var current: int = -1
+		var best: float = INF
+		for i in range(nx * ny):
+			if not done[i] and dist[i] < best:
+				best = dist[i]
+				current = i
+		if current < 0: break
+		done[current] = true
+		var cx: int = current % nx
+		var cy: int = current / nx
+		for step: Vector3i in [Vector3i(1, 0, 1), Vector3i(-1, 0, 1), Vector3i(0, 1, 0), Vector3i(0, -1, 0)]:
+			var ox: int = cx + step.x
+			var oy: int = cy + step.y
+			if ox < 0 or oy < 0 or ox >= nx or oy >= ny: continue
+			var horizontal: bool = step.z == 1
+			if not _edge_open(horizontal, mini(cx, ox), mini(cy, oy)): continue
+			var other: int = ox + oy * nx
+			var edge_key: int = mini(current, other) * 1000 + maxi(current, other)
+			if not cache.has(edge_key):
+				cache[edge_key] = float(_travel_segment(probe, _node_point(current), _node_point(other), 0.0, INF, zones).time)
+			var through: float = best + float(cache[edge_key])
+			if through < dist[other]:
+				dist[other] = through
+				prev[other] = current
+	var best_points: Array[Vector2] = []
+	var best_eta: float = INF
+	for option: Dictionary in ends:
+		if not is_finite(float(dist[option.node])): continue
+		var chain: Array[Vector2] = []
+		var node: int = option.node
+		while node >= 0:
+			chain.push_front(_node_point(node))
+			if prev[node] < 0:
+				for i in range(entry[node].size() - 1, -1, -1):
+					chain.push_front(entry[node][i])
+			node = prev[node]
+		for point: Vector2 in option.points:
+			chain.append(point)
+		chain.append(destination)
+		var eta: float = _route_eta(unit, start, _clean_path(start, chain), zones)
+		if eta < best_eta:
+			best_eta = eta
+			best_points = _clean_path(start, chain)
+	# Start and destination on the same stretch of road: drive straight there.
+	var direct: Array[Vector2] = _direct_path(start, destination)
+	if not direct.is_empty():
+		var eta: float = _route_eta(unit, start, direct, zones)
+		if eta < best_eta:
+			best_eta = eta
+			best_points = direct
+	return {"path": best_points, "eta": best_eta}
+
+func _zone_signature(zones: Array[Dictionary]) -> String:
+	var parts: Array[String] = []
+	for zone: Dictionary in zones:
+		parts.append("%d:%s" % [int(zone.get("road_event_id", -1)), str(zone.get("pass_kind", ""))])
+	for flood: Dictionary in flooded_bridges():
+		parts.append("f%d" % int(flood.column))
+	return ",".join(parts)
+
+func _node_point(node: int) -> Vector2:
+	return Vector2(ROAD_X[node % ROAD_X.size()], ROAD_Y[node / ROAD_X.size()])
+
+func _index_of(value: float, options: Array[float]) -> int:
+	var best: int = 0
+	for i in range(options.size()):
+		if absf(options[i] - value) < absf(options[best] - value): best = i
+	return best
+
+# Junctions a point connects to, with the points driven in between.
+# reverse = true for a destination (points run from the junction to it).
+func _attach(point: Vector2, reverse: bool) -> Array:
+	var nx: int = ROAD_X.size()
+	var eps: float = 0.0005
+	var ix: int = _index_of(point.x, ROAD_X)
+	var iy: int = _index_of(point.y, ROAD_Y)
+	var on_column: bool = absf(point.x - ROAD_X[ix]) < eps
+	var on_row: bool = absf(point.y - ROAD_Y[iy]) < eps
+	var result: Array = []
+	if on_column and on_row:
+		result.append({"node": ix + iy * nx, "points": []})
+		return result
+	if on_column:
+		var upper: int = iy if ROAD_Y[iy] <= point.y else iy - 1
+		for row: int in [upper, upper + 1]:
+			if row >= 0 and row < ROAD_Y.size():
+				result.append({"node": ix + row * nx, "points": []})
+		return result
+	# On a horizontal road, or a building reached from the road in front of it.
+	var entry := Vector2(point.x, ROAD_Y[iy])
+	var left: int = ix if ROAD_X[ix] <= point.x else ix - 1
+	for column: int in [left, left + 1]:
+		if column >= 0 and column < nx:
+			var pts: Array = [] if on_row else [entry]
+			if reverse:
+				pts.reverse()
+			result.append({"node": column + iy * nx, "points": pts})
+	return result
+
+func _direct_path(start: Vector2, destination: Vector2) -> Array[Vector2]:
+	var result: Array[Vector2] = []
+	var sy: int = _index_of(start.y, ROAD_Y)
+	var dy: int = _index_of(destination.y, ROAD_Y)
+	if sy != dy: return result
+	var sx: float = start.x
+	var dx: float = destination.x
+	# Must not pass a junction in between (then the graph route covers it).
+	for x: float in ROAD_X:
+		if x > minf(sx, dx) + 0.0005 and x < maxf(sx, dx) - 0.0005: return result
+	var points: Array = [Vector2(sx, ROAD_Y[sy]), Vector2(dx, ROAD_Y[sy]), destination]
+	return _clean_path(start, points)
+
+func _clean_path(start: Vector2, points: Array) -> Array[Vector2]:
+	var clean: Array[Vector2] = []
+	var previous: Vector2 = start
+	for point: Vector2 in points:
+		if previous.distance_to(point) > 0.00001:
+			clean.append(point)
+			previous = point
+	return clean
+
+func _points_time(probe: Dictionary, start: Vector2, points: Array, zones: Array[Dictionary]) -> float:
+	var total: float = 0.0
+	var previous: Vector2 = start
+	for point: Vector2 in points:
+		total += float(_travel_segment(probe, previous, point, 0.0, INF, zones).time)
+		previous = point
+	return total

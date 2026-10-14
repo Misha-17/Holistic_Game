@@ -340,6 +340,13 @@ func _bot_action(sim: RescueSimulation) -> void:
 	if sim.active_count() >= 3 and sim.special_cooldown <= 0.0:
 		sim.use_special()
 		return
+	# Like a team that talks: once a road is closed or a district is dark for a
+	# few seconds, the department that can fix it sends a crew.
+	for event: Dictionary in sim.active_road_events():
+		if int(event.assigned_unit) < 0 and str(event.clear_kind) != "" and sim.elapsed - float(event.started_at) > 4.0:
+			for unit: Dictionary in sim.units:
+				if unit.kind == event.clear_kind and unit.state == "idle":
+					if sim.clear_road(int(event.id), int(unit.id)): return
 	var calls: Array[Dictionary] = []
 	for incident: Dictionary in sim.incidents:
 		if incident.status in ["active", "working"]: calls.append(incident)

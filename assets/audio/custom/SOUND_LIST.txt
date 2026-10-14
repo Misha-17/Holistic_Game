@@ -4,13 +4,22 @@ Put a file with one of these names in this folder or in assets/audio/ (.ogg pref
 The game uses it instead of the built-in sound. Missing files fall back to the old sounds.
 Open the project in Godot once after adding files so it imports them.
 
-MUSIC (one gentle loop, unchanged by emergency pressure)
+MUSIC (two loops, switched by current gameplay pressure)
   music_soft      warm pads / soft keys, gentle attack, no drums or alarm layers
-The built-in 0.8.0 score is original 72 BPM ambient music, played at -20 dB
-with a four-second fade-in and two-second fade-out. The older music_calm,
-music_tense and music_panic assets are retained but no longer played.
+  music_intense   selected busy soundtrack; do not name this urgent.mp3
+The original 72 BPM calm score retains its level and four-second fade-in.
+Pressure >=0.45 for two active seconds selects intense; <=0.30 for six seconds
+returns to calm, with two-second crossfades. Music bus remains -20 dB.
+The supplied intense file uses +26.29 dB player compensation: source peak -24.44
+dBFS / RMS -44.56 dBFS. Recheck this gain if replacing that recording.
+This matches the calm track's full-track RMS. One Game sound slider controls
+music and effects; default 50. Dispatch sirens use half their original amplitude.
+Each connected teammate has a separate local voice slider.
+Old alternative music files are not used. Hidden waves do not cue music.
 
 SOUND EFFECTS (short, punchy, no long tails; under 1 s unless noted)
+  critical_incident  new critical incident warning; do not name this alarm.ogg
+  incident_failed    actual incident failure; fail remains wrong-dispatch feedback
   new_call   a new emergency appears           - radio dispatch beep / pager tone, 0.5-1 s
   urgent     a call has under ~15 s left       - short alarm or klaxon burst
   tick       while a call needs crews and has <10 s - a single tick (played every second) or a ticking-clock loop (looped)

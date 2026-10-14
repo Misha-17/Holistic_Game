@@ -46,6 +46,8 @@ var hero: Texture2D
 var title_art: Sprite2D
 var screen := "title"
 var previous_screen := "game"
+var settings_tab := "settings"
+var sound_settings: Control
 var selected := -1
 var selected_unit := -1
 var role_filter := ""
@@ -450,6 +452,13 @@ func _ready() -> void:
 	voice = preload("res://scripts/team_voice.gd").new()
 	add_child(voice)
 	voice.configure(network, false)
+	audio.sound_level_changed.connect(func(_key: String, _value: int): _refresh_voice_mix())
+	network.roster_changed.connect(_refresh_voice_mix)
+	_refresh_voice_mix()
+	sound_settings = preload("res://scripts/sound_settings.gd").new()
+	add_child(sound_settings)
+	sound_settings.build(audio, network)
+	sound_settings.visible = false
 	voice.voice_error.connect(_toast)
 	voice.recording_changed.connect(_voice_recording_changed)
 	research.log_error.connect(func(message: String): research_enabled=false; _toast(message))
@@ -564,7 +573,6 @@ func _process(delta: float) -> void:
 	_sync_capture()
 	if screen == "game":
 		pressure_display = lerpf(pressure_display, _pressure(), 1.0-exp(-delta*3.0))
-		audio.set_intensity(pressure_display)
 		refresh += delta
 		if refresh >= 1.0 and not tutorial_active:
 			refresh = 0.0
@@ -590,8 +598,12 @@ func _process(delta: float) -> void:
 				selected_unit = -1
 				role_filter = ""
 	else:
-		audio.set_intensity(0.0)
 		audio.set_ticking(false)
+	# Personal multiplayer menus keep the shared gameplay pressure. Solo menus
+	# hold qualification timers rather than feeding an artificial zero pressure.
+	var music_shift_active := sim.running and _session_screen()
+	audio.set_intensity(pressure_display if screen == "game" else _pressure())
+	audio.update_music_context(delta, music_shift_active, _simulation_active() and not tutorial_active)
 	for p in particles:
 		p.life -= delta
 		p.pos += p.velocity * delta
@@ -668,6 +680,7 @@ func _update_visibility() -> void:
 	tactical_map.visible = screen=="game"
 	tutorial_overlay.visible = tutorial_active and screen=="game"
 	ip_input.visible = screen == "lobby" and not network.active
+	sound_settings.visible = screen == "settings" and settings_tab == "sounds"
 
 func _draw_all(canvas: CanvasItem) -> void:
 	cv = canvas
@@ -1063,8 +1076,24 @@ func _draw_lobby() -> void:
 	_text("Departments are shared automatically as players join.",Vector2(400,741),16,MUTED)
 	_button("lobby_settings", "VOICE & RECORDINGS", Rect2(400, 780, 300, 45), PANEL_LIGHT, TEAL, 14)
 
+func _refresh_voice_mix() -> void:
+	if not is_instance_valid(voice): return
+	voice.peer_playback_gains.clear()
+	for peer in network.roster:
+		if int(peer) == multiplayer.get_unique_id(): continue
+		var key := "voice_player_%d" % (int(network.roster[peer]) + 1)
+		voice.peer_playback_gains[int(peer)] = float(audio.sound_level(key)) / 50.0
+
 func _draw_settings() -> void:
-	_draw_page_header("Settings", "SOUND, DISPLAY & LOCAL RECORDINGS")
+	_draw_page_header("", "SOUND, DISPLAY & LOCAL RECORDINGS")
+	_button("settings_back","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
+	_button("settings_tab:settings", "Settings", Rect2(80,143,200,54), TEAL if settings_tab == "settings" else PANEL, INK if settings_tab == "settings" else CREAM, 27)
+	_button("settings_tab:sounds", "Sounds", Rect2(296,143,200,54), TEAL if settings_tab == "sounds" else PANEL, INK if settings_tab == "sounds" else CREAM, 27)
+	if settings_tab == "sounds":
+		_text("Your mix · saved on this computer", Vector2(80,228), 17, CREAM)
+		_text("0 = mute     50 = default     100 = maximum", Vector2(80,826), 17, TEAL)
+		_text("Music and Sound effects switches in Settings still apply.", Vector2(80,855), 15, MUTED)
+		return
 	var rows := [
 		["music", "Music", "Background soundtrack", music_enabled],
 		["sfx", "Sound effects", "Calls, crews and rescue cues", sfx_enabled],
@@ -1337,6 +1366,10 @@ func _input(event: InputEvent) -> void:
 
 func _action(id: String) -> void:
 	audio.play_cue("click")
+	if id.begins_with("settings_tab:"):
+		settings_tab = id.trim_prefix("settings_tab:")
+		_update_visibility()
+		return
 	if id=="tutorial_skip":
 		_end_tutorial(false)
 		return
@@ -1459,6 +1492,7 @@ func _begin_tutorial(auto_start: bool = false) -> void:
 		_toast("Meet the crew from the solo title screen, outside your shared room.")
 		return
 	_stop_capture()
+	audio.reset_session()
 	_tutorial_campaign_sim=sim
 	_tutorial_saved_ui={"screen":screen,"selected":selected,"selected_unit":selected_unit,"role_filter":role_filter,"focused_unit":focused_unit,"focused_unit_left":focused_unit_left,"action_feedback":action_feedback,"action_feedback_left":action_feedback_left,"focus_open":focus_open,"focus_hold_id":focus_hold_id,"focus_hold_left":focus_hold_left,"save_timer":save_timer,"refresh":refresh,"pressure":pressure_display,"ticker":ticker,"result_saved":result_saved,"result_rating_sent":result_rating_sent,"orders":orders.duplicate(true),"has_resume":has_resume,"toast_text":toast_text,"toast_left":toast_left}
 	_tutorial_auto_start=auto_start
@@ -1527,6 +1561,7 @@ func _end_tutorial(completed: bool = false, launch_after: bool = true) -> void:
 	tutorial_completed=tutorial_completed or completed
 	tutorial_seen=true
 	sim=_tutorial_campaign_sim
+	audio.reset_session(sim.incidents)
 	_tutorial_campaign_sim=null
 	town.sim=sim
 	field_focus.sim=sim
@@ -1618,6 +1653,7 @@ func _begin_shift(index: int) -> void:
 		screen = "game"
 		print("Dedicated server: Shift 1 started.")
 		return
+	audio.reset_session()
 	town.set_theme(index)
 	selected=-1
 	selected_unit=-1
@@ -1750,6 +1786,13 @@ func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
 func _process_events() -> void:
 	for event in sim.drain_events():
 		event["actor_peer"] = event_actor
+		if str(event.get("type", "")) == "shift_complete":
+			# Presentation metadata only: simulation already converted these calls.
+			var failed_ids: Array[int] = []
+			for incident: Dictionary in sim.incidents:
+				if incident.status == "failed" and is_equal_approx(float(incident.resolved_at), sim.elapsed):
+					failed_ids.append(int(incident.id))
+			event["failed_incident_ids"] = failed_ids
 		_handle_game_event(event)
 		if network.has_method("broadcast_event"):
 			network.call("broadcast_event",event)
@@ -1786,7 +1829,14 @@ func _handle_game_event(event: Dictionary) -> void:
 	elif type in ["disruption","warning"]:
 		_toast(message)
 		audio.play_cue("alarm")
-	elif type in ["escalated","critical","urgent"]:
+	elif type == "critical":
+		audio.queue_incident_cue("critical_incident", int(event.get("incident_id", -1)))
+		town.alert()
+	elif type in ["escalated","urgent"]:
+		# A stage-3 escalation and its critical event can share the same tick.
+		var call := _incident(int(event.get("incident_id", -1)))
+		if int(event.get("hazard_stage", 0)) >= 3 or (not call.is_empty() and bool(call.get("critical_sent", false))):
+			return
 		if urgency_cooldown<=0:
 			audio.play_cue("urgent")
 			town.alert()
@@ -1796,7 +1846,12 @@ func _handle_game_event(event: Dictionary) -> void:
 	elif type=="rapid_response":
 		audio.play_cue("combo")
 		_celebrate(Vector2(1040,120))
-	elif type in ["failed","incident_failed"]: audio.play_cue("fail")
+	elif type in ["failed","incident_failed"]:
+		audio.queue_incident_cue("incident_failed", int(event.get("incident_id", -1)))
+	elif type == "shift_complete":
+		var failed_ids: Array[int] = []
+		failed_ids.assign(event.get("failed_incident_ids", []))
+		audio.finish_incident_cues(failed_ids)
 	elif type=="combo": audio.play_cue("combo")
 	elif type=="dispatch": audio.play_cue("dispatch")
 	elif type in ["scout","supply"]:
@@ -1824,6 +1879,7 @@ func _receive_snapshot(data: Dictionary) -> void:
 	sim.apply_snapshot(data.get("simulation",{}))
 	var restarting := sim.shift_index != previous_shift or sim.elapsed + 1.0 < previous_elapsed
 	if restarting: _stop_capture()
+	if next_screen == "game" and (entering_session or restarting): audio.reset_session(sim.incidents)
 	if next_screen == "game" and sim.running and (entering_session or restarting): _reset_exploration_camera()
 	host_speed = float(data.get("speed", 1.0))
 	var now: int = Time.get_ticks_msec()
@@ -1871,6 +1927,7 @@ func _restore_guest_progress() -> void:
 	if not guest_progress.is_empty():
 		sim.apply_snapshot(guest_progress)
 		guest_progress.clear()
+	if is_instance_valid(audio): audio.reset_session(sim.incidents)
 
 func _toggle(id: String) -> void:
 	match id:
@@ -1927,6 +1984,7 @@ func _resume_shift() -> void:
 		var data=JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))
 		if data is Dictionary and data.has("session"):
 			sim.apply_snapshot(data.session)
+			audio.reset_session(sim.incidents)
 			screen="game"
 			_reset_exploration_camera()
 			result_saved=false

@@ -417,7 +417,9 @@ func _valid_roster(data: Dictionary, server_only: bool = false) -> bool:
 	return true
 
 func _valid_payload(action: String, payload: Dictionary) -> bool:
-	if action == "start_shift": return payload.is_empty()
+	if action == "start_shift":
+		# Optionally the level picked in the co-op lobby.
+		return payload.is_empty() or (payload.size() == 1 and payload.get("shift") is int and int(payload.shift) >= 0 and int(payload.shift) <= 5)
 	if payload.size() > 6:
 		return false
 	
@@ -442,6 +444,8 @@ func _valid_payload(action: String, payload: Dictionary) -> bool:
 
 func _clean_payload(action: String, payload: Dictionary) -> Dictionary:
 	match action:
+		"start_shift":
+			return {"shift": int(payload.shift)} if payload.has("shift") else {}
 		"dispatch":
 			return {"incident_id": int(payload.incident_id), "kind": str(payload.kind), "unit_id":int(payload.get("unit_id",-1))}
 		"clear_road":

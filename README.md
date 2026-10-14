@@ -12,7 +12,7 @@ A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engi
 - Enable **Microphone** in Settings; hold **V** to talk. Use headphones.
 - **Esc:** menu. Solo pauses; a shared shift continues while personal menus are open.
 
-Departments split automatically between connected players. The campaign has six 5:30 shifts. The world is **2304 by 1536**, with **48 playable locations**. Sixteen new locations and streets extend beyond the previous eastern and southern boundaries; the existing 32 sites remain in their original positions. The game starts in a close, movable view. A click selects or dispatches on release; dragging across a crew or call never dispatches it. Travel is calibrated to keep the more distant districts practical to reach. Original crew rules, joint calls, upgrades and campaign remain.
+Departments split automatically between connected players. The campaign has six 5:30 shifts. The world is **2304 by 1536**, with **48 playable locations**. Sixteen new locations and streets extend beyond the previous eastern and southern boundaries; the existing 32 sites remain in their original positions. The game starts in a close, movable view. A click selects or dispatches on release; dragging across a crew or call never dispatches it. Travel is calibrated to keep the more distant districts practical to reach. Original crew rules, joint calls and campaign remain; the upgrade workshop was removed (Oct 2026).
 
 ## Road events (traffic rework, `andrei-traffic-events`)
 
@@ -38,6 +38,11 @@ The old slow zones (school crossing, harbor deliveries, market queues, bridge wo
 - **Calls spread over the whole town:** 11 new sites in the south and east (59 in total), and calls pick one of nine districts evenly before picking a site. Over all six shifts with a bot: 40 calls in the north third, 70 in the middle, 52 in the south.
 - **Shifts end early** once the last scheduled call has arrived, every road event has happened, no call is open and no crew is still out ("Every call handled • shift complete"). Calls keep arriving until about 4:45, so this saves up to ~40 s.
 - Disruption texts no longer promise slower travel (only road events slow traffic now).
+
+## Workshop removed, co-op level picker (Oct 2026)
+
+- **No more upgrades.** The Equipment Workshop is gone from the shift list and the results screen, and crews are never upgraded (old saved upgrades are ignored). Every session plays with the same crews. The results screen shows calls resolved and roads cleared instead of credits, and "Choose another level" replaces "Visit the workshop".
+- **Co-op level picker.** In the co-op lobby the host (or, on the Azure server, the first player) picks any of the six levels; all are open in co-op. On the results screen, "Choose another level" takes a LAN host back to the lobby; on the Azure server the first player gets a row of level buttons next to Next shift / Play again.
 
 ## Every role equally busy (`andrei-traffic-events`)
 

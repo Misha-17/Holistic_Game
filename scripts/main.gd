@@ -100,6 +100,8 @@ var host_speed := 1.0
 var dedicated_server := false
 var _dedicated_shift_started := false
 var show_perf := false
+# Co-op: the level the host (or the first player on a dedicated server) picked in the lobby.
+var lobby_level := 0
 var _snapshot_gap_ms := 0.0
 var _last_snapshot_ms := -1
 var pressure_display := 0.0
@@ -686,7 +688,6 @@ func _draw_all(canvas: CanvasItem) -> void:
 		"campaign": _draw_campaign()
 		"lobby": _draw_lobby()
 		"settings": _draw_settings()
-		"upgrades": _draw_upgrades()
 		"game", "pause", "results", "help":
 			_draw_game()
 			if screen != "game": buttons.clear()
@@ -1054,33 +1055,16 @@ func _draw_campaign() -> void:
 		_text(_short(str(data.get("subtitle","")),42),rect.position+Vector2(23,112),14,MUTED)
 		_text("05:30   ·   %d neighbors" % int(data.get("target",12)),rect.position+Vector2(23,141),12,MUTED)
 		_button("shift:%d"%i if is_open else "locked", "START SHIFT  >" if is_open else "COMPLETE PREVIOUS SHIFT", Rect2(rect.position+Vector2(20,153),Vector2(362,29)),PANEL_LIGHT if is_open else PANEL,TEAL if is_open else MUTED,12)
-	_button("upgrades","EQUIPMENT WORKSHOP   ·   %d credits" % sim.credits,Rect2(80,705,610,60),PANEL_LIGHT,GOLD,18)
 	if has_resume:
-		_button("resume","RESUME SAVED SHIFT",Rect2(720,705,632,60),TEAL,INK,18)
+		_button("resume","RESUME SAVED SHIFT",Rect2(80,705,610,60),TEAL,INK,18)
 	else:
-		_text("Select an unlocked shift to go on duty.",Vector2(743,743),18,MUTED)
+		_text("Select an unlocked shift to go on duty.",Vector2(80,743),18,MUTED)
 	_text("Progress is saved automatically. A complete campaign contains 33 minutes of active shifts.",Vector2(80,818),15,MUTED)
 	_button("title","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
 
-func _draw_upgrades() -> void:
-	_draw_page_header("Better tools. Brighter outcomes.", "THE WORKSHOP    /    %d CREDITS" % sim.credits)
-	var catalog: Array = BeaconCampaign.upgrades()
-	for i in range(catalog.size()):
-		var item: Dictionary = catalog[i]
-		var rect := Rect2(80+(i%3)*430,217+(i/3)*159,402,146)
-		_panel(rect,PANEL)
-		var level := int(sim.upgrades.get(item.id,0))
-		_text(str(item.get("name",item.id)),rect.position+Vector2(22,35),21,CREAM)
-		_wrap(str(item.get("description","")),rect.position+Vector2(22,66),355,14,MUTED,20)
-		var max_level := int(item.get("max_level",3))
-		var cost := BeaconCampaign.upgrade_cost(str(item.id),level)
-		_text("LEVEL %d / %d"%[level,max_level],rect.position+Vector2(22,125),12,TEAL)
-		_button("buy:"+str(item.id),"%d CREDITS"%cost if level<max_level else "COMPLETE",Rect2(rect.position+Vector2(222,99),Vector2(158,36)),PANEL_LIGHT,GOLD,12)
-	_button("campaign","<  YOUR SHIFTS",Rect2(80,91,190,38),PANEL,CREAM,14)
-
 func _draw_lobby() -> void:
 	_draw_page_header("Play together", "UP TO FOUR PLAYERS")
-	_panel(Rect2(400,240,640,452),PANEL)
+	_panel(Rect2(400,240,640,486) if network.active else Rect2(400,240,640,452),PANEL)
 	if not network.active:
 		_text("Meet at the station",Vector2(451,293),28,CREAM)
 		_text("Join a shared server, or host on your network.",Vector2(452,331),16,MUTED)
@@ -1102,18 +1086,29 @@ func _draw_lobby() -> void:
 				dx += 74
 			row += 1
 		if network.hosting:
-			_button("host_start","START SHIFT TOGETHER",Rect2(452,540,536,54),TEAL,INK)
-			_text("Same network: " + "   ".join(_local_addresses()),Vector2(452,624),16,CREAM)
-			_text(_short(network.internet_status,78),Vector2(452,652),13,TEAL if network.internet_address!="" else MUTED)
-			_text("Port %d (UDP). Allow Beacon Bay through the firewall when Windows asks." % NetworkSession.PORT,Vector2(452,676),12,MUTED)
+			_draw_level_picker(Vector2(452,514))
+			_button("host_start","START LEVEL %02d TOGETHER" % (lobby_level+1),Rect2(452,586,536,54),TEAL,INK)
+			_text("Same network: " + "   ".join(_local_addresses()),Vector2(452,664),16,CREAM)
+			_text(_short(network.internet_status,78),Vector2(452,690),13,TEAL if network.internet_address!="" else MUTED)
+			_text("Port %d (UDP). Allow Beacon Bay through the firewall when Windows asks." % NetworkSession.PORT,Vector2(452,712),12,MUTED)
 		else:
 			if network.can_start_session():
-				_button("host_start","START SHIFT TOGETHER",Rect2(452,540,536,54),TEAL,INK)
+				_draw_level_picker(Vector2(452,514))
+				_button("host_start","START LEVEL %02d TOGETHER" % (lobby_level+1),Rect2(452,586,536,54),TEAL,INK)
 			else:
 				_text("Waiting for the first player to start…" if network.dedicated else "Waiting for the host to begin…",Vector2(452,600),19,GOLD)
 	_button("leave_lobby","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
-	_text("Departments are shared automatically as players join.",Vector2(400,741),16,MUTED)
+	_text("Departments are shared automatically as players join.",Vector2(400,754),16,MUTED)
 	_button("lobby_settings", "VOICE & RECORDINGS", Rect2(400, 780, 300, 45), PANEL_LIGHT, TEAL, 14)
+
+# Co-op level picker: every level is open in co-op, so a team can play any scenario.
+func _draw_level_picker(origin: Vector2) -> void:
+	lobby_level = clampi(lobby_level, 0, 5)
+	var data: Dictionary = BeaconCampaign.shift_data(lobby_level)
+	_text("LEVEL %02d  ·  %s" % [lobby_level+1, str(data.get("title","")).to_upper()], origin, 13, TEAL)
+	for i in range(6):
+		var picked: bool = i == lobby_level
+		_button("lobby_level:%d" % i, "%02d" % (i+1), Rect2(origin + Vector2(i * 91, 12), Vector2(84, 40)), TEAL if picked else PANEL_LIGHT, INK if picked else CREAM, 15)
 
 func _draw_settings() -> void:
 	_draw_page_header("Settings", "SOUND, DISPLAY & LOCAL RECORDINGS")
@@ -1178,23 +1173,26 @@ func _draw_results() -> void:
 	_text(("A town worth saving." if sim.shift_index==5 else "The light stays on.") if sim.won else "Regroup. You can do this.",Vector2(386,267),38,CREAM)
 	for i in range(3):
 		_star(Vector2(947+i*35,205),12,GOLD if i<sim.stars else PANEL_LIGHT)
-	var stats := [[str(sim.rescued),"NEIGHBORS RESCUED"],["+%d" % sim.shift_reward,"WORKSHOP CREDITS"],["%d%%"%sim.reputation,"COMMUNITY CONFIDENCE"]]
+	var stats := [[str(sim.rescued),"NEIGHBORS RESCUED"],[str(sim.resolved_count),"CALLS RESOLVED"],["%d%%"%sim.reputation,"COMMUNITY CONFIDENCE"]]
 	for i in range(3):
 		_text(stats[i][0],Vector2(390+i*226,344),37,GOLD)
 		_text(stats[i][1],Vector2(390+i*226,371),10,MUTED)
-	_text("+%d WORKSHOP CREDITS    ·    BEST CHAIN %d    ·    %d CALLS RESOLVED" % [sim.shift_reward,sim.best_combo,sim.resolved_count],Vector2(390,397),12,TEAL)
+	_text("BEST CHAIN %d    ·    %d ROADS CLEARED" % [sim.best_combo,int(sim.get("roads_cleared"))],Vector2(390,397),12,TEAL)
 	_text("%d calls resolved · %d missed" % [sim.resolved_count, sim.failed_count], Vector2(390,453),20,MUTED)
 	if research_enabled or voice.recording_enabled:
 		_button("open_data", "OPEN RECORDINGS", Rect2(390,480,260,40), PANEL_LIGHT, TEAL, 14)
 	if network.active and not network.hosting:
 		if network.can_start_session():
 			_button("host_start", "NEXT SHIFT" if sim.won and sim.shift_index < 5 else "PLAY AGAIN", Rect2(390,558,656,56), TEAL, INK, 17)
+			_text("OR PICK A LEVEL", Vector2(390,512), 12, TEAL)
+			for i in range(6):
+				_button("lobby_start:%d" % i, "%02d" % (i+1), Rect2(Vector2(520 + i * 88, 494), Vector2(80, 34)), PANEL_LIGHT, CREAM, 14)
 		else:
 			_text("Waiting for the session leader.",Vector2(390,585),19,GOLD)
 		_button("leave_lobby","LEAVE THE ROOM",Rect2(390,631,656,46),PANEL_LIGHT,CREAM,15)
 	else:
 		_button("results_continue","NEXT SHIFT  >" if sim.won and sim.shift_index<5 else ("BACK TO YOUR TOWN" if sim.won else "TRY THIS SHIFT AGAIN"),Rect2(390,558,656,56),TEAL,INK,17)
-		_button("results_workshop","VISIT THE WORKSHOP",Rect2(390,631,656,46),PANEL_LIGHT,GOLD,15)
+		_button("results_levels","CHOOSE ANOTHER LEVEL",Rect2(390,631,656,46),PANEL_LIGHT,GOLD,15)
 	_text("Progress saved locally",Vector2(628,716),13,MUTED)
 
 func _draw_page_header(title: String, eyebrow: String) -> void:
@@ -1417,18 +1415,18 @@ func _action(id: String) -> void:
 	if id.begins_with("dispatch:"):
 		_plan_kind(id.trim_prefix("dispatch:"))
 		return
+	if id.begins_with("lobby_level:"):
+		lobby_level = clampi(id.trim_prefix("lobby_level:").to_int(), 0, 5)
+		return
+	if id.begins_with("lobby_start:"):
+		lobby_level = clampi(id.trim_prefix("lobby_start:").to_int(), 0, 5)
+		_submit_rating()
+		if network.dedicated: network.send_command("start_shift", {"shift": lobby_level})
+		else: _begin_shift(lobby_level)
+		return
 	if id.begins_with("shift:"):
 		_begin_shift(id.trim_prefix("shift:").to_int())
 		return
-	if id.begins_with("buy:"):
-		if has_resume:
-			_toast("Finish your suspended shift before changing its equipment.")
-			return
-		if sim.buy_upgrade(id.trim_prefix("buy:")):
-			audio.play_cue("upgrade")
-			_save_progress()
-			_toast("Equipment upgraded. Your crews thank you.")
-		else: _toast("More credits needed, or this upgrade is complete.")
 		return
 	if id.begins_with("toggle:"):
 		_toggle(id.trim_prefix("toggle:"))
@@ -1456,9 +1454,6 @@ func _action(id: String) -> void:
 		"settings": previous_screen=screen; screen="settings"
 		"settings_back": screen=previous_screen; _save_progress(screen=="pause")
 		"pause_settings": previous_screen="pause"; screen="settings"
-		"upgrades":
-			if has_resume: _toast("Resume and finish your saved shift before visiting the workshop.")
-			else: screen="upgrades"
 		"quit":
 			if tutorial_active: _end_tutorial(false,false)
 			_save_progress(screen in ["game","pause"])
@@ -1474,9 +1469,10 @@ func _action(id: String) -> void:
 			_toast(network.status)
 		"host_start":
 			if network.dedicated:
-				network.send_command("start_shift")
+				# From the lobby the chosen level starts; from results: next shift / play again.
+				network.send_command("start_shift", {"shift": lobby_level} if screen == "lobby" else {})
 			else:
-				_begin_shift(unlocked)
+				_begin_shift(lobby_level if screen == "lobby" else unlocked)
 		"leave_lobby":
 			if screen=="results": _submit_rating()
 			_leave_network()
@@ -1503,7 +1499,10 @@ func _action(id: String) -> void:
 			if sim.won and sim.shift_index<5: _begin_shift(sim.shift_index+1)
 			elif sim.won: screen="campaign"
 			else: _begin_shift(sim.shift_index)
-		"results_workshop": _submit_rating(); screen="upgrades"; _leave_network()
+		"results_levels":
+			_submit_rating()
+			# In co-op the host picks the next level in the lobby; solo goes to the shift list.
+			screen = "lobby" if network.active and network.hosting else "campaign"
 		"open_data": OS.shell_open(ProjectSettings.globalize_path("user://"))
 		"locked": _toast("Finish the previous shift to unlock this part of the story.")
 
@@ -1765,6 +1764,7 @@ func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
 		if dedicated_server and screen in ["lobby", "results"] and network.can_start_session(_peer_id) and multiplayer.get_peers().has(_peer_id):
 			_dedicated_shift_started = true
 			var next_shift := sim.shift_index + 1 if screen == "results" and sim.won and sim.shift_index < 5 else (sim.shift_index if screen == "results" and not sim.won else 0)
+			if payload.has("shift"): next_shift = clampi(int(payload.shift), 0, 5)
 			_begin_shift(next_shift)
 		return
 	_route_cache_until = 0

@@ -393,23 +393,14 @@ func use_special() -> bool:
 	_emit("rally", "Coffee boost! • every crew moves and works faster for 20 seconds")
 	return true
 
-func buy_upgrade(id: String) -> bool:
-	if running:
-		return false
-	var entry: Dictionary = Campaign.upgrade_data(id)
-	if entry.is_empty():
-		return false
-	var level: int = upgrade_level(id)
-	var cost: int = Campaign.upgrade_cost(id, level)
-	if level >= int(entry.max_level) or credits < cost:
-		return false
-	credits -= cost
-	upgrades[id] = level + 1
-	_emit("upgrade", "%s • level %d" % [entry.name, level + 1], {"upgrade_id": id, "cost": cost})
-	return true
+func buy_upgrade(_id: String) -> bool:
+	return false # the workshop was removed
 
-func upgrade_level(id: String) -> int:
-	return int(upgrades.get(id, 0))
+# The workshop was removed (Oct 2026): crews are never upgraded, so every
+# session plays with the same crews. Old saves may still hold upgrades; they
+# are ignored.
+func upgrade_level(_id: String) -> int:
+	return 0
 
 func supply_interval() -> float:
 	return 45.0 - 5.0 * upgrade_level("supplies")

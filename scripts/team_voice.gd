@@ -19,6 +19,12 @@ var recording_active := false
 var recording_path := ""
 var status := "Mic off"
 var push_to_talk := false
+var playback_level := 50
+var peer_playback_gains: Dictionary = {}
+
+func set_playback_level(value: int) -> void:
+	playback_level = clampi(value, 0, 100)
+	if is_instance_valid(_speaker): _speaker.volume_linear = float(playback_level) / 50.0
 var session_id := ""
 
 var _network: NetworkSession
@@ -235,7 +241,7 @@ func _render_audio(until_frame: int = -1) -> void:
 				if int(peer_id) != _local_peer:
 					permissions[peer_id] = bool(_network.voice_participants[peer_id].consent)
 	while _cursor + FRAMES <= now:
-		var mixed: Dictionary = _mixer.render(_cursor, _local_peer, permissions)
+		var mixed: Dictionary = _mixer.render(_cursor, _local_peer, permissions, peer_playback_gains)
 		_cursor += FRAMES
 		if _playback != null and _playback.can_push_buffer(FRAMES):
 			_playback.push_buffer(mixed.playback)
@@ -320,6 +326,7 @@ func _ensure_speaker() -> void:
 	generator.mix_rate = RATE
 	generator.buffer_length = 0.2
 	_speaker.stream = generator
+	_speaker.volume_linear = float(playback_level) / 50.0
 	add_child(_speaker)
 	_speaker.play()
 	_playback = _speaker.get_stream_playback() as AudioStreamGeneratorPlayback

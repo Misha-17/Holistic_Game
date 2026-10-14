@@ -275,6 +275,10 @@ func _draw_unit(unit: Dictionary) -> void:
 		var offset := Vector2(-48.0 + department * 31.0,29.0 + int(unit.id) % 3 * 9.0)
 		_draw_vehicle((point+offset).clamp(Vector2(30,30),MAP_SIZE-Vector2(30,30)),kind,Vector2.RIGHT,true,int(unit.id))
 		Responders.draw_person(self,point+Vector2(-32+department*23,8),kind,int(unit.get("appearance",0)),str(unit.get("work_phase","act")),elapsed,1,1.8)
+	elif state == "clearing":
+		# A crew clearing a road event: vehicle on the road, one responder at work beside it.
+		_draw_vehicle(point,kind,Vector2.RIGHT,true,int(unit.id))
+		Responders.draw_person(self,point+Vector2(22,10),kind,int(unit.get("appearance",0)),"act",elapsed,1,1.8)
 	else:
 		_draw_vehicle(point,kind,heading,state == "travel",int(unit.id))
 

@@ -23,7 +23,7 @@ const SPLITS := {
 	3: [["fire", "police"], ["medic"], ["engineer"]],
 	4: [["fire"], ["medic"], ["engineer"], ["police"]],
 }
-const ACTIONS := ["dispatch", "scout", "supply", "special", "ping", "start_shift"]
+const ACTIONS := ["dispatch", "clear_road", "scout", "supply", "special", "ping", "start_shift"]
 var active := false
 var port := PORT
 var hosting := false
@@ -205,7 +205,7 @@ func can_do(action: String, peer_id: int = -1, payload: Dictionary = {}) -> bool
 	var actor := multiplayer.get_unique_id() if peer_id < 0 else peer_id
 	if not roster.has(actor):
 		return false
-	if action == "dispatch":
+	if action in ["dispatch", "clear_road"]:
 		return owns(str(payload.get("kind", "")), actor)
 	# Scouting, supplies, the team boost and pings are shared by everyone.
 	return true
@@ -430,6 +430,12 @@ func _valid_payload(action: String, payload: Dictionary) -> bool:
 		if payload.has("unit_id") and (not payload.unit_id is int or int(payload.unit_id)<-1 or int(payload.unit_id)>1000):
 			return false
 		return payload.get("kind") is String and payload.kind in DEPARTMENTS
+	if action == "clear_road":
+		if not payload.get("road_event_id") is int or int(payload.road_event_id) <= 0 or int(payload.road_event_id) > 1000:
+			return false
+		if not payload.get("unit_id") is int or int(payload.unit_id) < 0 or int(payload.unit_id) > 1000:
+			return false
+		return payload.get("kind") is String and payload.kind in DEPARTMENTS
 	if action == "ping":
 		return payload.get("text", "Help needed") is String and str(payload.get("text", "Help needed")).length() <= 96
 	return ACTIONS.has(action)
@@ -438,6 +444,8 @@ func _clean_payload(action: String, payload: Dictionary) -> Dictionary:
 	match action:
 		"dispatch":
 			return {"incident_id": int(payload.incident_id), "kind": str(payload.kind), "unit_id":int(payload.get("unit_id",-1))}
+		"clear_road":
+			return {"road_event_id": int(payload.road_event_id), "kind": str(payload.kind), "unit_id": int(payload.unit_id)}
 		"scout", "supply":
 			return {"incident_id": int(payload.incident_id)}
 		"ping":

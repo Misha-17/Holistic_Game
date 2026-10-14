@@ -4,17 +4,11 @@ extends RefCounted
 const Campaign = preload("res://scripts/campaign.gd")
 const UNIT_KINDS: Array[String] = ["fire", "medic", "engineer", "police"]
 const INCIDENT_KINDS: Array[String] = ["fire", "medical", "flood", "power", "police"]
-# Which departments join a call, in order, as its severity grows.
-const TEAM_ORDER := {
-	"fire": ["fire", "medic", "police", "engineer"],
-	"medical": ["medic", "police", "fire", "engineer"],
-	"flood": ["engineer", "medic", "fire", "police"],
-	"power": ["engineer", "police", "fire", "medic"],
-	"police": ["police", "medic", "fire", "engineer"],
-}
 # Countdowns tick in real seconds, so each call's deadline includes the time the crews need to work on scene.
 const WORK_TIME_ALLOWANCE := 1.35
 const CREWS_PER_DEPARTMENT := 3
+# Police and Engineering also clear road events, so they get one extra crew each (14 crews in total).
+const CREWS_BY_DEPARTMENT := {"fire": 3, "medic": 3, "engineer": 4, "police": 4}
 const ROAD_X: Array[float] = [128.0 / 2304, 384.0 / 2304, 640.0 / 2304, 896.0 / 2304, 1152.0 / 2304, 1408.0 / 2304, 1664.0 / 2304, 1920.0 / 2304, 2176.0 / 2304]
 const ROAD_Y: Array[float] = [192.0 / 1536, 448.0 / 1536, 704.0 / 1536, 928.0 / 1536, 1184.0 / 1536, 1440.0 / 1536]
 # The new navigable world has larger buildings and streets. Use one uniform
@@ -72,6 +66,11 @@ var last_action_effect: Dictionary = {}
 var chaos_phase: String = "normal"
 var chaos_phase_index: int = -1
 var arrival_index: int = 0
+# Road events (traffic rework): the active and finished blockages of this shift.
+var road_events: Array[Dictionary] = []
+var _road_event_index: int = 0
+var roads_cleared: int = 0
+var _ignore_road_events := false
 
 var _rng := RandomNumberGenerator.new()
 var _shift: Dictionary = {}
@@ -138,6 +137,9 @@ func start_shift(index: int) -> void:
 	chaos_phase = "normal"
 	chaos_phase_index = -1
 	arrival_index = 0
+	road_events = []
+	_road_event_index = 0
+	roads_cleared = 0
 	_next_spawn = 2.8
 	_next_id = 1
 	_disruption_index = 0
@@ -190,6 +192,7 @@ func _tick_step(delta: float) -> void:
 	elif supplies >= max_supplies:
 		supply_regen = 0.0
 	_tick_arrivals()
+	_tick_road_events()
 	for unit: Dictionary in units:
 		_tick_unit(unit, delta)
 	for incident: Dictionary in incidents:
@@ -202,6 +205,12 @@ func _tick_step(delta: float) -> void:
 		_reported_final_minute = true
 		_emit("final_minute", "One minute until relief • finish strong")
 	if reputation <= 0.0 or elapsed >= duration:
+		_finish_shift()
+	elif _all_work_done():
+		# Every scheduled call and road event has happened and nothing is left
+		# open: end now instead of waiting out the clock.
+		_emit("all_clear", "Every call handled • shift complete")
+		_emit_research("shift_ended_early", {"shift": shift_index, "at": elapsed, "seconds_saved": duration - elapsed})
 		_finish_shift()
 
 func _tick_chaos_schedule() -> void:
@@ -493,20 +502,162 @@ func unit_eta(unit: Dictionary) -> float:
 	return 0.0
 
 func road_conditions() -> Array[Dictionary]:
+	# Only road events slow traffic now. The old passive zones (school crossing,
+	# harbor deliveries, market queues, bridge works, flooded road) are gone:
+	# they cost time without asking anyone to decide anything.
 	var result: Array[Dictionary] = []
-	for entry: Dictionary in _shift.get("traffic", []):
-		var begins: float = float(entry.at)
-		var ends: float = begins + float(entry.duration)
-		if elapsed >= begins and elapsed < ends:
-			result.append({"name": entry.name, "position": entry.position, "size": entry.size, "speed_factor": float(entry.speed_factor), "remaining": ends - elapsed})
-	if disruption_remaining > 0.0:
-		if disruption in ["market", "festival"]:
-			result.append({"name": "Market queues", "position": Vector2(240, 428) / Campaign.MAP_SIZE, "size": Vector2(380, 40) / Campaign.MAP_SIZE, "speed_factor": 0.42, "remaining": disruption_remaining})
-		elif disruption == "roadworks":
-			result.append({"name": "Bridge works", "position": Vector2(876, 178) / Campaign.MAP_SIZE, "size": Vector2(40, 270) / Campaign.MAP_SIZE, "speed_factor": 0.38, "remaining": disruption_remaining})
-		elif disruption in ["rain", "storm"]:
-			result.append({"name": "Flooded harbor road", "position": Vector2(876, 684) / Campaign.MAP_SIZE, "size": Vector2(400, 40) / Campaign.MAP_SIZE, "speed_factor": 0.48, "remaining": disruption_remaining})
+	if _ignore_road_events: return result
+	for event: Dictionary in road_events:
+		if str(event.status) not in ["active", "clearing"]: continue
+		result.append({"name": event.name, "position": event.position, "size": event.size,
+			"speed_factor": float(event.speed_factor), "remaining": float(event.expires_at) - elapsed,
+			"pass_kind": str(event.clear_kind), "road_event_id": int(event.id), "type": str(event.type)})
 	return result
+
+func _all_work_done() -> bool:
+	# Only shifts that run on the arrival schedule can end early (not the tutorial
+	# or tests that clear the schedule).
+	var schedule: Array = _shift.get("arrival_schedule", [])
+	if schedule.is_empty() or elapsed < 60.0: return false
+	if arrival_index < schedule.size(): return false
+	if _road_event_index < (_shift.get("traffic", []) as Array).size(): return false
+	if active_count() > 0: return false
+	for unit: Dictionary in units:
+		if str(unit.state) in ["travel", "working", "clearing"]: return false
+	return true
+
+func get_road_event(event_id: int) -> Dictionary:
+	for event: Dictionary in road_events:
+		if int(event.id) == event_id: return event
+	return {}
+
+func active_road_events() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for event: Dictionary in road_events:
+		if str(event.status) in ["active", "clearing"]: result.append(event)
+	return result
+
+func road_event_center(event: Dictionary) -> Vector2:
+	return Vector2(event.position) + Vector2(event.size) * 0.5
+
+func _tick_road_events() -> void:
+	var schedule: Array = _shift.get("traffic", [])
+	while _road_event_index < schedule.size() and elapsed + 0.000001 >= float(schedule[_road_event_index].at):
+		var plan: Dictionary = schedule[_road_event_index]
+		_road_event_index += 1
+		if not plan.has("clear_kind"): continue # an old-style slow zone from a saved game
+		var event: Dictionary = {"id": int(plan.id), "type": str(plan.type), "clear_kind": str(plan.clear_kind),
+			"name": str(plan.name), "street": str(plan.get("street", "")), "position": plan.position, "size": plan.size,
+			"speed_factor": float(plan.speed_factor), "clear_time": float(plan.clear_time),
+			"started_at": elapsed, "expires_at": elapsed + float(plan.duration), "status": "active",
+			"assigned_unit": -1, "clear_dispatched_at": -1.0, "clear_started_at": -1.0, "clear_progress": 0.0,
+			"ended_at": -1.0, "chaos_phase": chaos_phase, "linked_incident": -1}
+		road_events.append(event)
+		# The road event comes with a call on the closed street: the team either
+		# clears the road first or crawls through it.
+		var site: int = Campaign.location_index(str(plan.get("call_site", "")))
+		if site >= 0 and str(plan.get("call_kind", "")) != "":
+			# Same capacity rule as every other arrival: a saturated group doesn't
+			# get an extra call, and the skip is kept for research.
+			var capacity: int = int(_shift.max_active) + (1 if chaos_phase == "high" else 0)
+			var site_busy: bool = false
+			for open_call: Dictionary in incidents:
+				if _is_active(open_call) and int(open_call.location_index) == site: site_busy = true
+			if active_count() < capacity and not site_busy:
+				_spawn_incident(site, str(plan.call_kind))
+				event.linked_incident = int(incidents.back().id)
+			else:
+				_emit_research("road_call_capacity_skipped", {"road_event_id": int(event.id), "shift": shift_index, "at": elapsed, "active_calls": active_count(), "site_busy": site_busy})
+		var who: String = "Police" if event.clear_kind == "police" else "Engineering"
+		_emit("road_event", "%s • only %s gets through. Clear it to open the road" % [event.name, who],
+			{"road_event_id": event.id, "pos": road_event_center(event), "clear_kind": event.clear_kind})
+		_emit_research("road_event_started", _road_event_record(event))
+	for event: Dictionary in road_events:
+		if str(event.status) in ["active", "clearing"] and elapsed >= float(event.expires_at):
+			event.status = "expired"
+			event.ended_at = elapsed
+			var crew: Dictionary = get_unit(int(event.assigned_unit))
+			if not crew.is_empty() and int(crew.get("clear_target", -1)) == int(event.id):
+				crew.clear_target = -1
+				_send_home(crew)
+			_emit("road_event_end", "%s has cleared on its own" % event.street, {"road_event_id": event.id})
+			_emit_research("road_event_expired", _road_event_record(event))
+
+func _road_event_record(event: Dictionary) -> Dictionary:
+	return {"road_event_id": int(event.id), "type": str(event.type), "clear_kind": str(event.clear_kind),
+		"name": str(event.name), "shift": shift_index, "started_at": float(event.started_at),
+		"chaos_phase_at_start": str(event.get("chaos_phase", "")), "status": str(event.status),
+		"assigned_unit": int(event.assigned_unit), "linked_incident": int(event.get("linked_incident", -1)), "clear_dispatched_at": float(event.clear_dispatched_at),
+		"clear_started_at": float(event.clear_started_at), "ended_at": float(event.ended_at),
+		"seconds_open": (float(event.ended_at) if float(event.ended_at) >= 0.0 else elapsed) - float(event.started_at)}
+
+# Send a Police crew to a jam or an Engineering crew to debris.
+func clear_road(event_id: int, unit_id: int) -> bool:
+	if not running:
+		return false
+	var event: Dictionary = get_road_event(event_id)
+	if event.is_empty() or str(event.status) not in ["active", "clearing"]:
+		return false
+	if int(event.assigned_unit) >= 0:
+		_emit("action_denied", "A crew is already on its way to %s" % event.street)
+		return false
+	var crew: Dictionary = get_unit(unit_id)
+	if crew.is_empty() or str(crew.kind) != str(event.clear_kind):
+		_emit("action_denied", "Only %s can clear %s" % ["Police" if event.clear_kind == "police" else "Engineering", event.street])
+		return false
+	if not _unit_available(crew):
+		_emit("action_denied", "%s is busy" % crew.get("crew_name", crew.name))
+		return false
+	if float(department_cooldowns.get(str(crew.kind), 0.0)) > 0.0:
+		_emit("action_denied", "%s radio is transmitting • one order at a time" % kind_name(str(crew.kind)))
+		return false
+	var route: Dictionary = _best_route(crew, crew.pos, road_event_center(event))
+	crew.target = -1
+	crew.clear_target = int(event.id)
+	crew.state = "travel"
+	crew.arrival_at = -1.0
+	crew.work_elapsed = 0.0
+	crew.work_phase = "travel"
+	crew.assignment_suitable = true
+	crew.inspection_remaining = 0.0
+	crew.dispatch_guard_until = elapsed + 1.0
+	crew.path = route.path
+	crew.path_index = 0
+	crew.remaining = float(route.eta)
+	department_cooldowns[str(crew.kind)] = 0.65
+	event.assigned_unit = int(crew.id)
+	event.clear_dispatched_at = elapsed
+	_emit("road_clear_dispatched", "%s heading to %s • %ds" % [crew.get("crew_name", crew.name), event.street, ceili(float(route.eta))],
+		{"road_event_id": event.id, "unit_id": crew.id, "kind": crew.kind, "pos": road_event_center(event), "eta": float(route.eta)})
+	_emit_research("road_event_clear_dispatched", _road_event_record(event))
+	return true
+
+func _finish_clearing(crew: Dictionary) -> void:
+	var event: Dictionary = get_road_event(int(crew.get("clear_target", -1)))
+	crew.clear_target = -1
+	if not event.is_empty() and str(event.status) in ["active", "clearing"]:
+		event.status = "cleared"
+		event.ended_at = elapsed
+		event.clear_progress = 1.0
+		roads_cleared += 1
+		_emit("road_cleared", "%s is open again • thanks, %s" % [event.street, crew.get("crew_name", crew.name)],
+			{"road_event_id": event.id, "unit_id": crew.id, "kind": crew.kind, "pos": road_event_center(event)})
+		_emit_research("road_event_cleared", _road_event_record(event))
+		_reroute_around_roads()
+	_send_home(crew)
+
+# When a road opens, crews already on the move take the faster way.
+func _reroute_around_roads() -> void:
+	for unit: Dictionary in units:
+		if str(unit.state) not in ["travel", "return"]: continue
+		var path: Array = unit.path
+		if path.is_empty(): continue
+		var destination: Vector2 = path.back()
+		var route: Dictionary = _best_route(unit, unit.pos, destination)
+		if float(route.eta) + 0.5 < float(unit.remaining):
+			unit.path = route.path
+			unit.path_index = 0
+			unit.remaining = float(route.eta)
 
 func _unit_available(unit: Dictionary) -> bool:
 	return unit.state in ["idle", "return"] and elapsed >= float(unit.get("divert_after", 0.0)) and elapsed >= float(unit.get("dispatch_guard_until", 0.0))
@@ -608,6 +759,7 @@ func _raw_state() -> Dictionary:
 		"snapshot_version": 5, "map_version": Campaign.MAP_VERSION,
 		"chaos_schedule_version": Campaign.CHAOS_SCHEDULE_VERSION,
 		"chaos_phase": chaos_phase, "chaos_phase_index": chaos_phase_index, "arrival_index": arrival_index,
+		"road_events": road_events.duplicate(true), "_road_event_index": _road_event_index, "roads_cleared": roads_cleared,
 		"shift_index": shift_index, "elapsed": elapsed, "duration": duration,
 		"running": running, "finished": finished, "won": won, "score": score,
 		"reputation": reputation, "rescued": rescued, "combo": combo, "best_combo": best_combo,
@@ -640,14 +792,14 @@ func apply_snapshot(data: Dictionary) -> void:
 		return
 	var restored: Dictionary = data if bool(data.get("_net", false)) else _snapshot_decode(data)
 	for key: String in restored:
-		if key in ["incidents", "units", "events"]:
+		if key in ["incidents", "units", "events", "road_events"]:
 			var typed: Array[Dictionary] = []
 			for entry: Dictionary in restored[key]:
 				typed.append(entry.duplicate(true))
 			set(key, typed)
 		elif key in ["breather_remaining", "surge_warning_remaining", "surge_count", "escalation_count", "rapid_response_count", "peak_active", "_surge_index", "_surge_warned_index", "_surge_pending", "_surge_spawn_timer", "_surge_breather_length"]:
 			set(key, restored[key])
-		elif key in ["chaos_phase", "chaos_phase_index", "arrival_index"]:
+		elif key in ["chaos_phase", "chaos_phase_index", "arrival_index", "_road_event_index", "roads_cleared"]:
 			set(key, restored[key])
 		elif key in ["scout_cooldown", "dispatch_cooldown", "department_cooldowns", "wrong_dispatches", "last_action_effect", "minimum_confidence"]:
 			set(key, restored[key])
@@ -675,6 +827,13 @@ func apply_snapshot(data: Dictionary) -> void:
 	_migrate_world_and_schedule(restored)
 
 func _migrate_revision_state(restored: Dictionary) -> void:
+	if not restored.has("road_events"):
+		# Saved before the traffic rework: skip road events that would already have started.
+		road_events = []
+		roads_cleared = 0
+		_road_event_index = 0
+		for plan: Dictionary in _shift.get("traffic", []):
+			if float(plan.get("at", 0.0)) <= elapsed: _road_event_index += 1
 	for key: String in ["scout_cooldown", "dispatch_cooldown", "wrong_dispatches"]:
 		if not restored.has(key): set(key, 0)
 	if not restored.has("last_action_effect"): last_action_effect = {}
@@ -878,47 +1037,66 @@ func _read_legacy_vector(value: Variant) -> Vector2:
 	return Vector2.ZERO
 
 func shift_summary() -> Dictionary:
-	return {"shift": shift_index, "title": _shift.get("title", ""), "won": won, "stars": stars, "score": score, "rescued": rescued, "target": target, "resolved": resolved_count, "missed": failed_count, "reputation": snappedf(reputation, 0.1), "best_combo": best_combo, "credits_earned": shift_reward, "duration": elapsed, "dispatches": successful_dispatches, "scouts": scout_count, "supplies_used": supply_count, "escalations": escalation_count, "rapid_responses": rapid_response_count, "peak_calls": peak_active, "wrong_dispatches": wrong_dispatches, "minimum_confidence": minimum_confidence}
+	return {"shift": shift_index, "title": _shift.get("title", ""), "won": won, "stars": stars, "score": score, "rescued": rescued, "target": target, "resolved": resolved_count, "missed": failed_count, "reputation": snappedf(reputation, 0.1), "best_combo": best_combo, "credits_earned": shift_reward, "duration": elapsed, "dispatches": successful_dispatches, "scouts": scout_count, "supplies_used": supply_count, "escalations": escalation_count, "rapid_responses": rapid_response_count, "peak_calls": peak_active, "roads_cleared": roads_cleared, "wrong_dispatches": wrong_dispatches, "minimum_confidence": minimum_confidence}
 
 func kind_name(kind: String) -> String:
 	return str({"fire": "Fire", "medic": "Medical", "medical": "Medical", "engineer": "Engineer", "flood": "Flood", "power": "Power", "police": "Police"}.get(kind, kind.capitalize()))
 
 func _fleet_home(kind: String, crew_index: int) -> Vector2:
-	var homes: Dictionary = {"fire": Vector2(384, 448), "medic": Vector2(896, 448), "engineer": Vector2(1152, 448), "police": Vector2(384, 704)}
-	var standby: Dictionary = {"fire": Vector2(1664, 448), "medic": Vector2(1152, 1440), "engineer": Vector2(1920, 928), "police": Vector2(2176, 704)}
-	return (standby[kind] if crew_index == 1 else homes[kind] + Vector2(8.0 * crew_index, 0.0)) / Campaign.MAP_SIZE
+	# Stations are spread over the whole town (Oct 2026): every department has a
+	# main station and a second station in a different district, so which crew is
+	# closest changes from call to call. Even crew numbers use the main station,
+	# odd ones the second station. Stations sit on junctions that no road event closes.
+	var homes: Dictionary = {"fire": Vector2(640, 448), "medic": Vector2(1408, 448), "engineer": Vector2(1664, 704), "police": Vector2(1152, 928)}
+	var standby: Dictionary = {"fire": Vector2(1664, 1184), "medic": Vector2(640, 1184), "engineer": Vector2(384, 928), "police": Vector2(1920, 192)}
+	var base: Vector2 = standby[kind] if crew_index % 2 == 1 else homes[kind]
+	return (base + Vector2(8.0 * (crew_index / 2), 0.0)) / Campaign.MAP_SIZE
 
 func _build_fleet() -> void:
-	var crew_names: Dictionary = {"fire": ["Ember", "Cinder", "Spark"], "medic": ["Clover", "Willow", "Fern"], "engineer": ["Bolt", "Copper", "Wren"], "police": ["Badge", "Patrol", "Siren"]}
+	var crew_names: Dictionary = {"fire": ["Ember", "Cinder", "Spark"], "medic": ["Clover", "Willow", "Fern"], "engineer": ["Bolt", "Copper", "Wren", "Rivet"], "police": ["Badge", "Patrol", "Siren", "Beacon"]}
 	var id: int = 0
 	for kind: String in UNIT_KINDS:
-		var count: int = CREWS_PER_DEPARTMENT
+		var count: int = int(CREWS_BY_DEPARTMENT.get(kind, CREWS_PER_DEPARTMENT))
 		for crew_index: int in range(count):
 			var home: Vector2 = _fleet_home(kind, crew_index)
-			var unit: Dictionary = {"id": id, "name": crew_names[kind][crew_index], "kind": kind, "pos": home, "home": home, "target": -1, "state": "idle", "remaining": 0.0, "fatigue": 0.0, "path": [], "path_index": 0, "heading": Vector2.RIGHT, "jobs": 0, "arrival_at": -1.0, "work_elapsed": 0.0, "work_phase": "idle", "assignment_suitable": true, "inspection_remaining": 0.0, "dispatch_guard_until": 0.0, "divert_after": 0.0}
+			var unit: Dictionary = {"id": id, "name": crew_names[kind][crew_index], "kind": kind, "pos": home, "home": home, "target": -1, "state": "idle", "remaining": 0.0, "fatigue": 0.0, "path": [], "path_index": 0, "heading": Vector2.RIGHT, "jobs": 0, "arrival_at": -1.0, "work_elapsed": 0.0, "work_phase": "idle", "assignment_suitable": true, "inspection_remaining": 0.0, "dispatch_guard_until": 0.0, "divert_after": 0.0, "clear_target": -1}
 			unit.merge(Campaign.responder_profile(kind, crew_index))
 			units.append(unit)
 			id += 1
 
-func _spawn_incident() -> void:
+# forced_location / forced_kind: used by road events, whose call is part of the script.
+func _spawn_incident(forced_location: int = -1, forced_kind: String = "") -> void:
 	var places: Array[Dictionary] = Campaign.locations()
 	var used: Array[int] = []
 	for active: Dictionary in incidents:
 		if _is_active(active):
 			used.append(int(active.location_index))
-	var location_index: int = _rng.randi_range(0, places.size() - 1)
-	for attempt: int in range(40):
-		if location_index not in used and location_index != _previous_spawn_location:
-			break
-		location_index = _rng.randi_range(0, places.size() - 1)
+	var location_index: int = forced_location
+	if location_index < 0:
+		# Spread calls over the whole town: first pick one of nine districts
+		# (a 3 x 3 grid) evenly, then a free site inside it. Picking sites directly
+		# put most calls in the dense north-west.
+		var districts: Dictionary = {}
+		for index: int in range(places.size()):
+			if index in used or index == _previous_spawn_location: continue
+			var cell: Vector2i = Vector2i(clampi(int(places[index].pos.x * 3.0), 0, 2), clampi(int(places[index].pos.y * 3.0), 0, 2))
+			var key: int = cell.y * 3 + cell.x
+			if not districts.has(key): districts[key] = []
+			districts[key].append(index)
+		var keys: Array = districts.keys()
+		keys.sort()
+		if keys.is_empty():
+			location_index = _rng.randi_range(0, places.size() - 1)
+		else:
+			var sites: Array = districts[keys[_rng.randi_range(0, keys.size() - 1)]]
+			location_index = int(sites[_rng.randi_range(0, sites.size() - 1)])
 	_previous_spawn_location = location_index
 	var place: Dictionary = places[location_index]
-	var kind: String = _choose_kind()
+	var kind: String = _choose_kind() if forced_kind.is_empty() else forced_kind
 	var severity: int = 1
 	if shift_index > 0 and _rng.randf() < 0.28 + 0.04 * shift_index:
 		severity = 2
 	if shift_index == 0:
-		kind = ["medical", "fire", "police", "power", "medical", "fire", "police", "medical", "power", "flood"][total_spawned % 10]
 		if kind == "flood" or (elapsed > 95.0 and _rng.randf() < 0.28):
 			severity = 2
 	var report_clear: bool = _rng.randf() < (0.66 if shift_index < 2 else 0.57)
@@ -927,6 +1105,7 @@ func _spawn_incident() -> void:
 	if shift_index == 0 and total_spawned == 1:
 		report_clear = false
 		severity = 2
+	if forced_location >= 0: report_clear = true
 	# All-four-department calls in every shift, from shift 1, after the opening minute.
 	# Each shift is guaranteed at least one by its 8th call and two by its 16th.
 	if elapsed > 60.0 and total_spawned >= 4:
@@ -938,12 +1117,15 @@ func _spawn_incident() -> void:
 			severity = 3
 	# Every call needs a team: severity 1 = two departments, 2 = three, 3 = all four.
 	var needs: Dictionary = {"fire": 0, "medic": 0, "engineer": 0, "police": 0}
-	var order: Array = TEAM_ORDER.get(kind, UNIT_KINDS)
+	var order: Array = _team_order(kind)
 	var team_size: int = clampi(severity + 1, 2, 4)
 	for index: int in range(team_size):
 		needs[order[index]] = 1
 	var work_duration: float = 10.0 + severity * 4.2
 	var arrival_budget: float = 0.0
+	# Deadlines assume open roads: a closed street is a problem for the team to
+	# solve (clear it or crawl), not something the countdown quietly absorbs.
+	_ignore_road_events = true
 	for needed_kind: String in UNIT_KINDS:
 		if int(needs[needed_kind]) == 0: continue
 		var fastest: float = INF
@@ -955,6 +1137,7 @@ func _spawn_incident() -> void:
 			var handover: float = 0.0 if _unit_available(crew) else 8.0
 			fastest = minf(fastest, float(route.eta) + handover)
 		arrival_budget = maxf(arrival_budget, fastest)
+	_ignore_road_events = false
 	var decision_slack: float = 18.0 - shift_index * 1.2
 	if total_spawned > 2 and _rng.randf() < 0.25: decision_slack *= 0.58
 	var deadline: float = arrival_budget * 1.12 + work_duration * WORK_TIME_ALLOWANCE + decision_slack + _rng.randf_range(-2.0, 4.0) + 7.0 * upgrade_level("radio")
@@ -981,25 +1164,34 @@ func _spawn_incident() -> void:
 	total_spawned += 1
 	_emit("incident", "%s • %s" % [incident.title if report_clear else "Unverified report", incident.name], {"incident_id": incident.id, "kind": kind, "pos": incident.pos, "severity": severity})
 
+const LEAD_KIND := {"fire": "fire", "medic": "medical", "police": "police"}
+
+# Every department is needed equally often (Oct 2026). The department that leads
+# a call comes from a fixed per-shift order in which each department leads once
+# in every block of four calls; the level's theme only decides whether an
+# Engineering call is a flood or a power problem.
 func _choose_kind() -> String:
+	var leads: Array = Campaign.lead_order(shift_index)
+	var lead: String = str(leads[total_spawned % leads.size()])
+	if lead != "engineer":
+		return str(LEAD_KIND[lead])
 	var weights: Array = _shift.get("weights", [4, 4, 2, 2, 3]).duplicate()
-	while weights.size() < INCIDENT_KINDS.size():
-		weights.append(3)
-	if disruption == "rain" or disruption == "storm":
-		weights[2] = int(weights[2]) + 4
-	if disruption == "blackout":
-		weights[3] = int(weights[3]) + 5
-	if disruption in ["market", "festival"]:
-		weights[4] = int(weights[4]) + 4
-	var total: int = 0
-	for weight: int in weights:
-		total += weight
-	var roll: int = _rng.randi_range(1, total)
-	for index: int in range(weights.size()):
-		roll -= int(weights[index])
-		if roll <= 0:
-			return INCIDENT_KINDS[index]
-	return "medical"
+	var flood: float = float(weights[2]) + (4.0 if disruption in ["rain", "storm"] else 0.0)
+	var power: float = float(weights[3]) + (5.0 if disruption == "blackout" else 0.0)
+	return "flood" if _rng.randf() * (flood + power) < flood else "power"
+
+# The lead department first, then partners in an order that rotates with every
+# call, so each department is a partner equally often as well.
+func _team_order(kind: String) -> Array:
+	var lead: String = {"fire": "fire", "medical": "medic", "flood": "engineer", "power": "engineer", "police": "police"}.get(kind, "fire")
+	var others: Array = []
+	for department: String in UNIT_KINDS:
+		if department != lead: others.append(department)
+	var turn: int = (total_spawned + total_spawned / 4) % others.size()
+	var result: Array = [lead]
+	for index: int in range(others.size()):
+		result.append(others[(index + turn) % others.size()])
+	return result
 
 func _tick_unit(unit: Dictionary, delta: float) -> void:
 	if unit.state == "idle":
@@ -1029,6 +1221,20 @@ func _tick_unit(unit: Dictionary, delta: float) -> void:
 			if unit.state == "return":
 				unit.state = "rest"
 				unit.remaining = maxf(1.0, 3.5 - upgrade_level("rest"))
+			elif int(unit.get("clear_target", -1)) >= 0:
+				var road: Dictionary = get_road_event(int(unit.clear_target))
+				if road.is_empty() or str(road.status) not in ["active", "clearing"]:
+					unit.clear_target = -1
+					_send_home(unit)
+				else:
+					unit.state = "clearing"
+					unit.work_phase = "clearing"
+					unit.arrival_at = elapsed
+					unit.work_elapsed = 0.0
+					unit.remaining = float(road.clear_time)
+					road.status = "clearing"
+					road.clear_started_at = elapsed
+					_emit("road_crew_arrived", "%s is clearing %s" % [unit.get("crew_name", unit.name), road.street], {"road_event_id": road.id, "unit_id": unit.id, "kind": unit.kind, "pos": unit.pos})
 			else:
 				unit.state = "working"
 				unit.remaining = 0.0
@@ -1061,6 +1267,19 @@ func _tick_unit(unit: Dictionary, delta: float) -> void:
 				if not bool(call.discovered):
 					call.discovered = true
 					_emit("field_report", "%s confirms the response teams needed at %s" % [unit.crew_name, call.name], {"incident_id": call.id, "pos": call.pos})
+	elif unit.state == "clearing":
+		# The coffee boost speeds clearing like any other work.
+		var rate: float = 1.5 if special_duration > 0.0 else 1.0
+		unit.remaining = maxf(0.0, float(unit.remaining) - delta * rate)
+		unit.work_elapsed = float(unit.get("work_elapsed", 0.0)) + delta
+		var road: Dictionary = get_road_event(int(unit.get("clear_target", -1)))
+		if not road.is_empty():
+			road.clear_progress = clampf(1.0 - float(unit.remaining) / maxf(0.1, float(road.clear_time)), 0.0, 1.0)
+		if road.is_empty() or str(road.status) not in ["active", "clearing"]:
+			unit.clear_target = -1
+			_send_home(unit)
+		elif float(unit.remaining) <= 0.0:
+			_finish_clearing(unit)
 	elif unit.state == "rest":
 		unit.remaining = maxf(0.0, float(unit.remaining) - delta)
 		unit.fatigue = maxf(0.0, float(unit.fatigue) - delta * 0.08)
@@ -1182,6 +1401,7 @@ func _send_home(unit: Dictionary) -> void:
 	unit.jobs = int(unit.jobs) + 1
 	unit.fatigue = minf(1.0, float(unit.fatigue) + 0.14 * maxf(0.2, 1.0 - upgrade_level("rest") * 0.35))
 	unit.target = -1
+	unit.clear_target = -1
 	unit.state = "return"
 	unit.work_phase = "return"
 	var route: Dictionary = _best_route(unit, unit.pos, unit.home)
@@ -1266,6 +1486,7 @@ func _travel_segment(unit: Dictionary, start: Vector2, destination: Vector2, off
 			var next_change: float = INF
 			if special_duration > at and special_duration > 0.0: next_change = special_duration - at
 			for zone: Dictionary in zones:
+				if str(zone.get("pass_kind", "")) == str(unit.get("kind", "")): continue
 				if float(zone.remaining) > at and Rect2(zone.position, zone.size).has_point(midpoint):
 					factor = minf(factor, float(zone.speed_factor))
 					next_change = minf(next_change, float(zone.remaining) - at)

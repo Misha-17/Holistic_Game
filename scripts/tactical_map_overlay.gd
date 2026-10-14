@@ -6,6 +6,7 @@ extends Node2D
 signal unit_selected(id: int)
 signal incident_selected(id: int)
 signal dispatch_requested()
+signal road_event_selected(id: int)
 
 const INK := Color("142e3b")
 const PANEL := Color("183c46")
@@ -32,6 +33,7 @@ var owner_labels: Dictionary = {}
 var reduced_motion: bool = false
 var hovered_incident_id: int = -1
 var hovered_unit_id: int = -1
+var hovered_road_id: int = -1
 var hovered_base_kind: String = ""
 var role_filter: String = ""
 var focused_unit_id: int = -1
@@ -43,6 +45,7 @@ var _calls: Array[Dictionary] = []
 var _crews: Array[Dictionary] = []
 var _stations: Array[Dictionary] = []
 var _roads: Array[Dictionary] = []
+var _road_areas: Array[Dictionary] = []
 var _hits: Array[Dictionary] = []
 var _occupied: Array[Rect2] = []
 var _options: Array = []
@@ -217,7 +220,9 @@ func _update_hover(point: Vector2) -> void:
 			if int(item.incident.id) == hovered_incident_id and item.card.has_area() and item.rect.merge(item.card).grow(4).has_point(point):
 				next_call = hovered_incident_id
 	var next_unit: int = int(hit.get("id", -1)) if hit.get("type", "") == "unit" else -1
-	var changed: bool = hovered_incident_id != next_call or hovered_unit_id != next_unit or previous_key != next_key
+	var next_road: int = int(hit.get("id", -1)) if hit.get("type", "") == "road" else -1
+	var changed: bool = hovered_incident_id != next_call or hovered_unit_id != next_unit or previous_key != next_key or hovered_road_id != next_road
+	hovered_road_id = next_road
 	hovered_incident_id = next_call
 	hovered_unit_id = next_unit
 	if changed:
@@ -257,6 +262,8 @@ func activate_target(hit: Dictionary) -> void:
 				incident_selected.emit(int(hit.id))
 		"unit":
 			if not _unit(int(hit.id)).is_empty(): unit_selected.emit(int(hit.id))
+		"road":
+			road_event_selected.emit(int(hit.id))
 		"base":
 			var pick: int = _station_pick(str(hit.base_key))
 			if pick >= 0: unit_selected.emit(pick)
@@ -296,6 +303,7 @@ func _refresh_layout() -> void:
 				_selected_option = option
 		_preview = _selected_option
 		if not _preview.is_empty(): _preview_id = int(_preview.unit_id)
+	_reserve_road_areas()
 	var active: Array[Dictionary] = []
 	for incident in sim.incidents:
 		if incident.get("status", "") in ["active", "working"]:
@@ -338,21 +346,50 @@ func _layout_call_cards() -> void:
 		_occupied.append(rect.grow(6))
 		_hits.append({"rect": rect, "type": "call", "id": int(item.incident.id)})
 
-func _layout_roads() -> void:
+# Closed roads are collected before call pins. Pins are NOT pushed off the road:
+# when zoomed out that moved a call's marker a whole block away from its
+# building. The road stays clickable through its badge and label, which are
+# always on top (playtest 13.10: the road was hard to click).
+func _reserve_road_areas() -> void:
+	_road_areas.clear()
 	if not sim.has_method("road_conditions"):
 		return
 	for zone in sim.road_conditions():
-		var area := Rect2(_world(zone.get("position", Vector2.ZERO)), zone.get("size", Vector2.ZERO) * map_rect.size)
-		area = area.intersection(view_rect)
+		var full := Rect2(_world(zone.get("position", Vector2.ZERO)), zone.get("size", Vector2.ZERO) * map_rect.size)
+		var area: Rect2 = full.intersection(view_rect)
 		if area.size.x <= 0 or area.size.y <= 0:
 			continue
+		_road_areas.append({"zone": zone, "area": area})
+
+func _layout_roads() -> void:
+	for reserved in _road_areas:
+		var zone: Dictionary = reserved.zone
+		var area: Rect2 = reserved.area
+		var road_id: int = int(zone.get("road_event_id", -1))
+		var road: Dictionary = sim.get_road_event(road_id) if road_id >= 0 and sim.has_method("get_road_event") else {}
 		var label: String = "%s · %ds" % [zone.get("name", "Slow traffic"), ceili(float(zone.get("remaining", 0)))]
-		var width: float = minf(310, ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 26)
-		var size := Vector2(width, 24)
-		var choices: Array[Vector2] = [Vector2(area.position.x, area.position.y - 30), Vector2(area.position.x, area.end.y + 7), area.get_center() + Vector2(22, -38), Vector2(area.position.x - width - 8, area.get_center().y - 12), Vector2(area.end.x + 8, area.get_center().y - 12)]
+		var kind: String = str(road.get("clear_kind", ""))
+		if not road.is_empty():
+			var who: String = "POLICE" if kind == "police" else "ENGINEERS"
+			var crew: Dictionary = _unit(int(road.assigned_unit))
+			if str(road.status) == "clearing":
+				label = "%s CLEARING %s" % [str(crew.get("crew_name", "CREW")).to_upper(), str(road.street).to_upper()]
+			elif not crew.is_empty():
+				label = "%s ON THE WAY · %s" % [str(crew.get("crew_name", "CREW")).to_upper(), str(road.street).to_upper()]
+			else:
+				label = "%s · ONLY %s CAN CLEAR · %ds" % [str(road.name).to_upper(), who, ceili(float(zone.get("remaining", 0)))]
+		var width: float = minf(480, ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x + 40)
+		var size := Vector2(width, 28)
+		var choices: Array[Vector2] = [Vector2(area.get_center().x - width * .5, area.position.y - 36), Vector2(area.get_center().x - width * .5, area.end.y + 8), Vector2(area.position.x, area.position.y - 36), Vector2(area.position.x - width - 8, area.get_center().y - 14), Vector2(area.end.x + 8, area.get_center().y - 14)]
 		var rect: Rect2 = _place_rect(choices, size)
-		_roads.append({"area": area, "rect": rect, "text": label})
+		_roads.append({"area": area, "rect": rect, "text": label, "road": road, "kind": kind})
 		_occupied.append(rect.grow(5))
+		if not road.is_empty():
+			# The striped road sits below calls and crews so it never steals their
+			# clicks; its badge and label are always on top, so it can always be clicked.
+			_hits.insert(0, {"rect": area.grow(10), "type": "road", "id": road_id})
+			_hits.append({"rect": Rect2(area.get_center() - Vector2(34, 18), Vector2(68, 36)), "type": "road", "id": road_id})
+			_hits.append({"rect": rect, "type": "road", "id": road_id})
 
 func _layout_bases() -> void:
 	var groups: Array[Dictionary] = []
@@ -526,21 +563,65 @@ func _draw() -> void:
 func _draw_roads() -> void:
 	for item in _roads:
 		var rect: Rect2 = item.area
-		draw_rect(rect, Color(1.0, .66, .29, .15))
-		draw_rect(rect, Color("daa763"), false, 1)
-		for x in range(int(rect.position.x), int(rect.end.x), 18):
-			draw_line(Vector2(x, rect.position.y), Vector2(minf(x + 6, rect.end.x), minf(rect.position.y + 6, rect.end.y)), Color("e6bf7990"), 2, false)
+		var road: Dictionary = item.get("road", {})
+		if road.is_empty():
+			draw_rect(rect, Color(1.0, .66, .29, .15))
+			draw_rect(rect, Color("daa763"), false, 1)
+			continue
+		var kind: String = str(item.kind)
+		var tint: Color = ROLE_COLOR.get(kind, GOLD)
+		var hovered: bool = int(road.id) == hovered_road_id
+		var invites: bool = int(road.assigned_unit) < 0 and _unit(selected_unit_id).get("kind", "") == kind
+		draw_rect(rect, Color(.55, .12, .10, .55))
+		# Hazard stripes in the colour of the department that can clear it.
+		var stripe: Color = Color(tint, .85)
+		var step: int = 22
+		var horizontal: bool = rect.size.x >= rect.size.y
+		if horizontal:
+			for x in range(int(rect.position.x) - int(rect.size.y), int(rect.end.x), step):
+				var a := Vector2(x, rect.end.y)
+				var b := Vector2(x + rect.size.y, rect.position.y)
+				var from: Vector2 = a
+				var to: Vector2 = b
+				if from.x < rect.position.x:
+					from = from.lerp(to, (rect.position.x - from.x) / (to.x - from.x))
+				if to.x > rect.end.x:
+					to = to.lerp(from, (to.x - rect.end.x) / (to.x - from.x))
+				if to.x > from.x: draw_line(from, to, stripe, 6, false)
+		else:
+			for y in range(int(rect.position.y) - int(rect.size.x), int(rect.end.y), step):
+				var from := Vector2(rect.position.x, y + rect.size.x)
+				var to := Vector2(rect.end.x, y)
+				if to.y < rect.position.y:
+					to = from.lerp(to, (from.y - rect.position.y) / (from.y - to.y))
+				if from.y > rect.end.y:
+					from = to.lerp(from, (rect.end.y - to.y) / (from.y - to.y))
+				if from.y > to.y: draw_line(from, to, stripe, 6, false)
+		var pulse: float = 0.0 if reduced_motion else (sin(_elapsed * 6.0) + 1.0) * .5
+		var border: Color = GOLD if invites else Color("ff6b57")
+		draw_rect(rect, Color(border, .75 + .25 * pulse) if invites or hovered else Color(border, .9), false, 4 if invites or hovered else 3)
+		# Barrier badge in the middle: department tag + clearing progress.
+		var center: Vector2 = rect.get_center()
+		var badge := Rect2(center - Vector2(30, 15), Vector2(60, 30))
+		_panel(badge, Color(INK, .95), tint, 2)
+		_btext(ROLE_SHORT.get(kind, "?"), badge.position + Vector2(30, 21), 15, tint, true)
+		if str(road.status) == "clearing":
+			var bar := Rect2(badge.position + Vector2(4, 24), Vector2(52, 4))
+			draw_rect(bar, Color(CREAM, .25))
+			draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(float(road.get("clear_progress", 0.0)), 0.0, 1.0), bar.size.y)), GREEN)
 
 func _draw_road_labels() -> void:
 	for item in _roads:
 		var rect: Rect2 = item.rect
 		var area: Rect2 = item.area
+		var road: Dictionary = item.get("road", {})
+		var tint: Color = ROLE_COLOR.get(str(item.get("kind", "")), GOLD) if not road.is_empty() else GOLD
 		var anchor: Vector2 = rect.get_center().clamp(area.position, area.end)
-		draw_line(anchor, rect.get_center(), Color("e6bf79aa"), 1, false)
-		_panel(rect, Color("493e2df5"), Color("b88f5d"))
-		draw_rect(Rect2(rect.position + Vector2(6, 7), Vector2(8, 10)), GOLD)
-		draw_line(rect.position + Vector2(6, 14), rect.position + Vector2(13, 8), INK, 2, false)
-		_text(_fit(item.text, rect.size.x - 24, 11), rect.position + Vector2(20, 17), 11, GOLD)
+		draw_line(anchor, rect.get_center(), Color(tint, .7), 2, false)
+		var hovered: bool = not road.is_empty() and int(road.id) == hovered_road_id
+		_panel(rect, Color("3a1f1cf2") if not road.is_empty() else Color("493e2df5"), tint if not hovered else GOLD, 2 if hovered else 1)
+		draw_rect(Rect2(rect.position + Vector2(8, 9), Vector2(10, 10)), Color("ff6b57") if not road.is_empty() else GOLD)
+		_text(_fit(item.text, rect.size.x - 30, 12), rect.position + Vector2(24, 19), 12, CREAM if not road.is_empty() else GOLD)
 
 func _remaining_route(unit: Dictionary) -> Array[Vector2]:
 	var result: Array[Vector2] = [_world(unit.get("pos", Vector2.ZERO))]

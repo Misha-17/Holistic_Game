@@ -28,7 +28,8 @@ func _test_map_and_routes() -> void:
 	_check(Campaign.MAP_SIZE == Vector2(2304, 1536), "Navigable world must cover 2304x1536 logical pixels")
 	_check(Campaign.MAP_SIZE.x * Campaign.MAP_SIZE.y > 5.0 * 664 * 396, "World must be substantially larger than the earlier expansion")
 	var sites: Array[Dictionary] = Campaign.locations()
-	_check(sites.size() == 48, "Expanded town needs 48 playable sites")
+	# 48 sites from the map expansion + 11 southern/eastern sites added with the station spread (Oct 2026).
+	_check(sites.size() == 59, "Expanded town needs 59 playable sites")
 	var sim := Sim.new()
 	sim.start_shift(0)
 	var outer_sites: int = 0
@@ -45,7 +46,7 @@ func _test_map_and_routes() -> void:
 			var route: Dictionary = sim._best_route(crew, crew.home, site.pos)
 			_check(is_finite(float(route.eta)) and float(route.eta) > 0.0, "Unreachable site: " + str(site.name))
 			_check(not route.path.is_empty() and route.path.back().is_equal_approx(site.pos), "Route misses destination")
-	_check(outer_sites == 16, "Sixteen added sites must occupy geography outside v3")
+	_check(outer_sites == 27, "The 27 added sites must occupy geography outside v3")
 	var original_positions: Array[Vector2] = [Vector2(256,84),Vector2(512,84),Vector2(512,540),Vector2(1024,836),Vector2(256,276),Vector2(768,84),Vector2(1024,84),Vector2(1024,276),Vector2(256,540),Vector2(512,276),Vector2(768,276),Vector2(1470,836),Vector2(1280,276),Vector2(1024,540),Vector2(256,406),Vector2(512,406),Vector2(1280,84),Vector2(1280,406),Vector2(1024,670),Vector2(1280,836),Vector2(66,836),Vector2(512,836),Vector2(768,836),Vector2(1280,670),Vector2(768,406),Vector2(1024,406),Vector2(768,540),Vector2(1280,540),Vector2(256,670),Vector2(512,670),Vector2(768,670),Vector2(256,836)]
 	for index: int in range(32):
 		_check((sites[index].pos * Campaign.MAP_SIZE).is_equal_approx(original_positions[index]), "Original city was stretched instead of expanded")
@@ -72,7 +73,9 @@ func _test_outer_district_dispatches() -> void:
 		call.work_duration = 5.0
 		for kind: String in Sim.UNIT_KINDS:
 			# Exercise every department from its primary station.
-			var crew: Dictionary = sim.units[Sim.UNIT_KINDS.find(kind) * 3]
+			var crew: Dictionary = {}
+			for candidate: Dictionary in sim.units:
+				if candidate.kind == kind: crew = candidate; break
 			_check(sim.dispatch(int(call.id), kind, int(crew.id)), "Dispatch into expanded district rejected")
 			for point: Vector2 in crew.path:
 				_check(Rect2(Vector2.ZERO, Vector2.ONE).has_point(point), "Route leaves playable map")
@@ -267,7 +270,8 @@ func _test_version_3_expansion() -> void:
 	network_state.erase("_shift")
 	var guest := Sim.new()
 	guest.apply_snapshot(network_state)
-	_check((guest._shift.traffic[0].position * Campaign.MAP_SIZE).is_equal_approx(Vector2(364,178)), "Rebuilt network plan was scaled twice")
+	# The guest rebuilds the plan from the campaign (road events since the traffic rework).
+	_check(guest._shift.traffic[0].position.is_equal_approx(Campaign.shift_data(guest.shift_index).traffic[0].position), "Rebuilt network plan was scaled twice")
 
 func _tutorial_dispatch(tutorial: TutorialDirector, kind: String, incident_id: int) -> void:
 	var sim: RescueSimulation = tutorial.sim

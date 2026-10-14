@@ -54,11 +54,11 @@ static func arrival_schedule(index: int, base_interval: float) -> Array[Dictiona
 
 static func shifts() -> Array[Dictionary]:
 	var scenarios: Array[Dictionary] = [
-		{"title": "FIRST LIGHT", "subtitle": "A small town. A very big heart.", "weather": "clear", "target": 30, "introduction": "Select a call. Send the matching crew. Bring everyone home.", "accent": "66dbc0", "interval": 23.0, "max_active": 4, "weights": [4, 5, 1, 2, 3], "disruptions": [{"at": 112.0, "type": "market", "duration": 35.0, "text": "Morning market • busy streets slow travel"}, {"at": 224.0, "type": "clear", "duration": 25.0, "text": "Neighbors lend a hand • crews work faster"}]},
-		{"title": "MARKET DAY", "subtitle": "The festival is counting on you.", "weather": "golden", "target": 42, "introduction": "Some calls need two teams. Scout a call for extra breathing room.", "accent": "ffd17b", "interval": 20.5, "max_active": 4, "weights": [4, 5, 2, 3, 5], "disruptions": [{"at": 95.0, "type": "roadworks", "duration": 48.0, "text": "Bridge works • crews are taking a detour"}, {"at": 205.0, "type": "festival", "duration": 48.0, "text": "Festival rush • extra calls from the square"}]},
+		{"title": "FIRST LIGHT", "subtitle": "A small town. A very big heart.", "weather": "clear", "target": 30, "introduction": "Select a call. Send the matching crew. Bring everyone home.", "accent": "66dbc0", "interval": 23.0, "max_active": 4, "weights": [4, 5, 1, 2, 3], "disruptions": [{"at": 112.0, "type": "market", "duration": 35.0, "text": "Morning market • the whole town is out"}, {"at": 224.0, "type": "clear", "duration": 25.0, "text": "Neighbors lend a hand • crews work faster"}]},
+		{"title": "MARKET DAY", "subtitle": "The festival is counting on you.", "weather": "golden", "target": 42, "introduction": "Some calls need two teams. Scout a call for extra breathing room.", "accent": "ffd17b", "interval": 20.5, "max_active": 4, "weights": [4, 5, 2, 3, 5], "disruptions": [{"at": 205.0, "type": "festival", "duration": 48.0, "text": "Festival rush • the whole town is out"}]},
 		{"title": "RISING WATER", "subtitle": "Keep the harbor's lights alive.", "weather": "rain", "target": 44, "introduction": "Flood calls need engineers and medics. Supplies buy precious time.", "accent": "7bc8f0", "interval": 19.0, "max_active": 4, "weights": [2, 3, 7, 3, 2], "disruptions": [{"at": 85.0, "type": "rain", "duration": 58.0, "text": "Cloudburst • flood calls intensify"}, {"at": 211.0, "type": "shortage", "duration": 45.0, "text": "Supply delay • supply replenishment paused"}]},
 		{"title": "AFTER DARK", "subtitle": "Be the calm in the blackout.", "weather": "night", "target": 60, "introduction": "Unconfirmed calls reward scouting. Keep an engineer in reserve.", "accent": "bda6ff", "interval": 17.5, "max_active": 5, "weights": [3, 4, 2, 7, 3], "disruptions": [{"at": 93.0, "type": "blackout", "duration": 56.0, "text": "Grid failure • scout unconfirmed calls for a clear picture"}, {"at": 213.0, "type": "comms", "duration": 44.0, "text": "Radio interference • incoming reports need a closer look"}]},
-		{"title": "STORMFRONT", "subtitle": "Different teams. One heartbeat.", "weather": "storm", "target": 64, "introduction": "Use the coffee boost when calls pile up. It speeds every crew for twenty seconds.", "accent": "8cceef", "interval": 16.0, "max_active": 5, "weights": [4, 4, 6, 5, 3], "disruptions": [{"at": 82.0, "type": "storm", "duration": 62.0, "text": "Storm surge • travel slows; every second matters"}, {"at": 202.0, "type": "shortage", "duration": 40.0, "text": "Warehouse flooded • make the supplies you have count"}]},
+		{"title": "STORMFRONT", "subtitle": "Different teams. One heartbeat.", "weather": "storm", "target": 64, "introduction": "Use the coffee boost when calls pile up. It speeds every crew for twenty seconds.", "accent": "8cceef", "interval": 16.0, "max_active": 5, "weights": [4, 4, 6, 5, 3], "disruptions": [{"at": 82.0, "type": "storm", "duration": 62.0, "text": "Storm surge • flood calls rise; every second matters"}, {"at": 202.0, "type": "shortage", "duration": 40.0, "text": "Warehouse flooded • make the supplies you have count"}]},
 		{"title": "BEACON NIGHT", "subtitle": "A whole town, looking out for each other.", "weather": "sunset", "target": 72, "introduction": "Your final watch. Use every lesson, every upgrade, every teammate.", "accent": "ffa784", "interval": 14.5, "max_active": 5, "weights": [5, 5, 5, 5, 5], "disruptions": [{"at": 75.0, "type": "comms", "duration": 44.0, "text": "Radio interference • trust your field reports"}, {"at": 167.0, "type": "storm", "duration": 51.0, "text": "One last squall • the bay needs all of us"}, {"at": 254.0, "type": "clear", "duration": 60.0, "text": "The beacon shines • neighbors help finish the watch"}]}
 	]
 	var intervals: Array[float] = [18.5, 16.7, 15.5, 14.3, 13.2, 12.2]
@@ -72,11 +72,106 @@ static func shifts() -> Array[Dictionary]:
 		scenarios[index].surges = []
 		scenarios[index].chaos_phases = chaos_schedule(index)
 		scenarios[index].arrival_schedule = arrival_schedule(index, intervals[index])
-		scenarios[index].traffic = [
-			{"at": 12.0, "duration": 55.0, "name": "School crossing", "position": Vector2(364, 178) / MAP_SIZE, "size": Vector2(40, 240) / MAP_SIZE, "speed_factor": 0.45},
-			{"at": 154.0, "duration": 46.0, "name": "Harbor deliveries", "position": Vector2(876, 684) / MAP_SIZE, "size": Vector2(390, 40) / MAP_SIZE, "speed_factor": 0.50}
-		]
+		# Road events replace the old passive slow zones (kept under the "traffic"
+		# key so saved games and map migrations keep working).
+		scenarios[index].traffic = road_events(index)
 	return scenarios
+
+# ROAD EVENTS (traffic rework, Oct 2026)
+# A road event blocks one stretch of road between two junctions. Other
+# departments crawl through it (or detour); only the department that can deal
+# with it drives through at full speed and can clear it:
+#   jam    -> Police clears it (crash, crowd, stalled traffic)
+#   debris -> Engineering clears it (fallen tree, burst main, flooding)
+# Clearing takes a crew off calls for a while, so the team has to decide
+# together whether to open the road or take the next call. Events are part of
+# the fixed per-shift script: same time, same place, every session. Most land
+# a few seconds into a high-chaos phase; none starts in a low phase.
+const ROAD_EVENT_SPEED := 0.06
+const ROAD_EVENT_MAX_SECONDS := 95.0
+const ROAD_CLEAR_SECONDS := {"jam": 7.0, "debris": 9.0}
+const ROAD_X_PX: Array[float] = [128.0, 384.0, 640.0, 896.0, 1152.0, 1408.0, 1664.0, 1920.0, 2176.0]
+const ROAD_Y_PX: Array[float] = [192.0, 448.0, 704.0, 928.0, 1184.0, 1440.0]
+
+# Named stretches of road: [street name, road row, from column, to column, buildings on it].
+# Each runs along ROAD_Y[row] from ROAD_X[from] to ROAD_X[to] and is two blocks
+# long, so it also closes the crossing in the middle. Buildings are always
+# reached from the horizontal road in front of them, so a closure cuts off the
+# buildings on that street for every department except the one that clears it.
+# Spread over the whole map: north, centre, east, south and the far south.
+const ROAD_STRETCHES := {
+	"corner_road": ["Corner Road", 0, 0, 2, ["Willow Cottage", "The Corner Store", "Moonrise Bakery", "Pelican Cafe"]],
+	"north_avenue": ["North Avenue", 0, 3, 5, ["Sunflower Apartments", "Harbor Workshop", "Eastwood Homes", "Harbor Warehouse"]],
+	"harbor_road": ["Harbor Road", 1, 2, 4, ["Community Hall", "Bay Stadium", "Power Substation", "Seabreeze Cottages"]],
+	"orchard_road": ["Orchard Road", 1, 5, 7, ["Orchard Hall", "East Library", "Orchard Market"]],
+	"market_street": ["Market Street", 2, 1, 3, ["Civic Apartments", "Harbor Hotel"]],
+	"ferry_road": ["Ferry Road", 2, 4, 6, ["Ferry Terminal", "Cargo Terminal"]],
+	"east_hill_road": ["East Hill Road", 2, 6, 8, ["Hillside Bakery", "Eastside Pump House"]],
+	"marina_road": ["Marina Road", 3, 1, 3, ["Lifeboat Station", "Marina Apartments", "Dune Cottages", "Botanical Gardens"]],
+	"quay_road": ["Quay Road", 3, 4, 6, ["East Quay", "Old Lighthouse", "Maritime Academy", "Southgate School"]],
+	"dock_road": ["Dock Road", 3, 6, 8, ["Dockside Warehouse", "Fisherman's Pier", "East Rescue Station", "Cliffside Homes"]],
+	"seawall_road": ["Seawall Road", 4, 0, 2, ["Kelp Street Store", "South Marina"]],
+	"island_road": ["Island Road", 4, 3, 5, ["Pier Market", "Island Clinic"]]
+}
+
+static func road_stretch(key: String) -> Dictionary:
+	var spec: Array = ROAD_STRETCHES[key]
+	var margin: float = 30.0
+	var half: float = 30.0
+	var y: float = ROAD_Y_PX[int(spec[1])]
+	var x1: float = ROAD_X_PX[int(spec[2])]
+	var x2: float = ROAD_X_PX[int(spec[3])]
+	var area := Rect2(x1 + margin, y - half, x2 - x1 - margin * 2.0, half * 2.0)
+	return {"street": str(spec[0]), "position": area.position / MAP_SIZE, "size": area.size / MAP_SIZE, "sites": spec[4]}
+
+static func location_index(name: String) -> int:
+	if name.is_empty(): return -1
+	var places: Array[Dictionary] = locations()
+	for index: int in range(places.size()):
+		if str(places[index].name) == name: return index
+	return -1
+
+static func road_events(index: int) -> Array[Dictionary]:
+	# [at, type, title, stretch, which building on it, call kind at that building]
+	# Each shift's four closures land in four different parts of town.
+	var plans: Array = [
+		[[46.0, "jam", "Crash", "harbor_road", 0, "medical"], [112.0, "jam", "Market crowd", "marina_road", 1, "fire"], [146.0, "debris", "Fallen tree", "east_hill_road", 1, "medical"], [208.0, "debris", "Burst water main", "island_road", 0, "fire"]],
+		[[41.0, "jam", "Fender-bender", "ferry_road", 0, "medical"], [104.0, "debris", "Bridge works", "quay_road", 0, "fire"], [213.0, "jam", "Festival crowd", "market_street", 1, "medical"], [250.0, "debris", "Fallen tree", "north_avenue", 2, "fire"]],
+		[[49.0, "jam", "Stalled bus", "orchard_road", 1, "medical"], [112.0, "debris", "Flooded underpass", "seawall_road", 1, "fire"], [147.0, "debris", "Burst water main", "harbor_road", 3, "medical"], [246.0, "jam", "Crash", "dock_road", 2, "fire"]],
+		[[43.0, "jam", "Crash", "corner_road", 1, "medical"], [106.0, "debris", "Downed power line", "ferry_road", 1, "fire"], [177.0, "jam", "Dark junction", "marina_road", 2, "medical"], [243.0, "debris", "Fallen tree", "east_hill_road", 0, "fire"]],
+		[[47.0, "jam", "Stalled truck", "quay_road", 3, "medical"], [110.0, "debris", "Storm debris", "island_road", 1, "fire"], [180.0, "jam", "Crash", "orchard_road", 0, "medical"], [249.0, "debris", "Flooded underpass", "seawall_road", 0, "fire"]],
+		[[39.0, "jam", "Crash", "dock_road", 0, "medical"], [105.0, "debris", "Fallen tree", "corner_road", 2, "fire"], [168.0, "debris", "Storm debris", "harbor_road", 1, "medical"], [209.0, "jam", "Crowd at the market", "market_street", 0, "fire"]]
+	]
+	var result: Array[Dictionary] = []
+	var number: int = 1
+	for plan: Array in plans[clampi(index, 0, 5)]:
+		var stretch: Dictionary = road_stretch(str(plan[3]))
+		var type: String = str(plan[1])
+		result.append({"id": number, "at": float(plan[0]), "duration": ROAD_EVENT_MAX_SECONDS,
+			"type": type, "clear_kind": "police" if type == "jam" else "engineer",
+			"clear_time": float(ROAD_CLEAR_SECONDS[type]),
+			"name": "%s on %s" % [str(plan[2]), stretch.street], "street": stretch.street,
+			"position": stretch.position, "size": stretch.size, "speed_factor": ROAD_EVENT_SPEED,
+			"call_site": str(stretch.sites[mini(int(plan[4]), stretch.sites.size() - 1)]), "call_kind": str(plan[5])})
+		number += 1
+	return result
+
+# Which department leads each call, by call number. Every block of four calls
+# has each department lead exactly once (shuffled with a fixed seed), so every
+# role is needed equally in every level and the order is the same every session.
+static func lead_order(index: int) -> Array:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 271829 + clampi(index, 0, 5) * 131
+	var result: Array = []
+	for block: int in range(30):
+		var departments: Array = ["fire", "medic", "engineer", "police"]
+		for i: int in range(departments.size() - 1, 0, -1):
+			var j: int = rng.randi_range(0, i)
+			var swap = departments[i]
+			departments[i] = departments[j]
+			departments[j] = swap
+		result.append_array(departments)
+	return result
 
 static func shift_data(index: int) -> Dictionary:
 	return shifts()[clampi(index, 0, 5)].duplicate(true)
@@ -106,12 +201,13 @@ static func responder_profile(kind: String, crew_index: int) -> Dictionary:
 	var profiles: Dictionary = {
 		"fire": [["Bram", "Finn"], ["Kai", "Rosa"], ["Idris", "Piper"]],
 		"medic": [["Elio", "Theo"], ["Noor", "Bea"], ["Ada", "Elias"]],
-		"engineer": [["Tess", "Niko"], ["Olavi", "Zara"], ["Esme", "Otto"]],
-		"police": [["Nova", "Juno"], ["Mika", "Remy"], ["Sol", "Ines"]]
+		"engineer": [["Tess", "Niko"], ["Olavi", "Zara"], ["Esme", "Otto"], ["Rune", "Lila"]],
+		"police": [["Nova", "Juno"], ["Mika", "Remy"], ["Sol", "Ines"], ["Arlo", "Vera"]]
 	}
 	var kind_index: int = ["fire", "medic", "engineer", "police"].find(kind)
-	var pair: Array = profiles.get(kind, profiles.fire)[clampi(crew_index, 0, 2)]
-	return {"crew_name": str(pair[0]), "partner_name": str(pair[1]), "appearance": maxi(0, kind_index) * 3 + clampi(crew_index, 0, 2)}
+	var crews: Array = profiles.get(kind, profiles.fire)
+	var pair: Array = crews[clampi(crew_index, 0, crews.size() - 1)]
+	return {"crew_name": str(pair[0]), "partner_name": str(pair[1]), "appearance": (maxi(0, kind_index) * 3 + clampi(crew_index, 0, 3)) % 12}
 
 static func locations() -> Array[Dictionary]:
 	# Stable indices preserve existing incident identities across map revisions.
@@ -163,7 +259,19 @@ static func locations() -> Array[Dictionary]:
 		{"name": "East Rescue Station", "pos": Vector2(1792, 1050) / MAP_SIZE},
 		{"name": "South Marina", "pos": Vector2(512, 1310) / MAP_SIZE},
 		{"name": "Island Clinic", "pos": Vector2(1280, 1310) / MAP_SIZE},
-		{"name": "Outer Ferry Terminal", "pos": Vector2(2048, 1310) / MAP_SIZE}
+		{"name": "Outer Ferry Terminal", "pos": Vector2(2048, 1310) / MAP_SIZE},
+		# Added Oct 2026 so calls also happen in the south and east, not mostly up north.
+		{"name": "Dune Cottages", "pos": Vector2(512, 1050) / MAP_SIZE},
+		{"name": "Saltmarsh Cafe", "pos": Vector2(1024, 1050) / MAP_SIZE},
+		{"name": "Southgate School", "pos": Vector2(1536, 1050) / MAP_SIZE},
+		{"name": "Cliffside Homes", "pos": Vector2(2048, 1050) / MAP_SIZE},
+		{"name": "Kelp Street Store", "pos": Vector2(256, 1310) / MAP_SIZE},
+		{"name": "Pier Market", "pos": Vector2(1024, 1310) / MAP_SIZE},
+		{"name": "Tidewater Clinic", "pos": Vector2(1792, 1310) / MAP_SIZE},
+		{"name": "Hillside Bakery", "pos": Vector2(1792, 670) / MAP_SIZE},
+		{"name": "Eastside Pump House", "pos": Vector2(2048, 670) / MAP_SIZE},
+		{"name": "Orchard Hall", "pos": Vector2(1536, 406) / MAP_SIZE},
+		{"name": "Ridge Cottages", "pos": Vector2(2048, 406) / MAP_SIZE}
 	]
 
 static func incident_title(kind: String, severity: int, variant: int) -> String:

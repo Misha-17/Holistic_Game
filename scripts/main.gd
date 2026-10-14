@@ -307,6 +307,8 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 
 func _draw_map_tools() -> void:
 	_button("map_overview", "EXPLORE" if _is_map_overview() else "OVERVIEW", Rect2(-62, 18, 106, 34), TEAL if _is_map_overview() else PANEL, INK if _is_map_overview() else CREAM, 12)
+	cv.draw_rect(Rect2(46, 26, 18, 18), Color(INK, 0.8))
+	_text("F", Vector2(51, 40), 10, CREAM)
 	_button("map_out", "-", Rect2(-62, 61, 49, 30), PANEL, CREAM, 17)
 	_button("map_in", "+", Rect2(-5, 61, 49, 30), PANEL, CREAM, 17)
 	_draw_minimap()
@@ -321,6 +323,11 @@ func _draw_minimap() -> void:
 		cv.draw_line(MINIMAP_RECT.position + Vector2(0, y * MINIMAP_RECT.size.y), MINIMAP_RECT.position + Vector2(MINIMAP_RECT.size.x, y * MINIMAP_RECT.size.y), Color("7a9290"), 1)
 	for site: Dictionary in BeaconCampaign.locations():
 		cv.draw_rect(Rect2(MINIMAP_RECT.position + site.pos * MINIMAP_RECT.size - Vector2(1, 1), Vector2(3, 3)), Color("a5b29a"))
+	# Closed roads show as red bars so they're findable when off screen.
+	for road: Dictionary in sim.active_road_events():
+		var area := Rect2(MINIMAP_RECT.position + Vector2(road.position) * MINIMAP_RECT.size, Vector2(road.size) * MINIMAP_RECT.size)
+		cv.draw_rect(area.grow(1.5), Color("ff6b57"))
+		cv.draw_rect(Rect2(area.get_center() - Vector2(2, 2), Vector2(4, 4)), KIND_COLOR.get(road.clear_kind, CREAM))
 	for unit: Dictionary in sim.units:
 		cv.draw_rect(Rect2(MINIMAP_RECT.position + unit.pos * MINIMAP_RECT.size - Vector2(2, 2), Vector2(4, 4)), KIND_COLOR.get(unit.kind, CREAM))
 	for call: Dictionary in sim.incidents:
@@ -423,6 +430,7 @@ func _ready() -> void:
 	tactical_map.incident_selected.connect(_select_incident)
 	tactical_map.unit_selected.connect(_select_unit)
 	tactical_map.dispatch_requested.connect(_dispatch_selected)
+	tactical_map.road_event_selected.connect(_select_road_event)
 	_center_map(Vector2(.5, .5))
 	field_focus = preload("res://scripts/incident_focus.gd").new()
 	field_focus.position = FOCUS_RECT.position
@@ -848,6 +856,9 @@ func _pick_department(kind: String) -> void:
 		var owner: int = network.owner_of(kind)
 		_toast("%s crews belong to %s." % [str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind)), network.player_label(owner) if owner>0 else "a teammate"])
 		return
+	if int(tactical_map.hovered_road_id)>=0:
+		_clear_road_with(int(tactical_map.hovered_road_id), kind)
+		return
 	var target: int = int(tactical_map.hovered_incident_id) if int(tactical_map.hovered_incident_id)>=0 else selected
 	var call: Dictionary = _incident(target)
 	var best: int = -1
@@ -869,6 +880,47 @@ func _pick_department(kind: String) -> void:
 		_toast("No %s crew is free right now." % str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind)).to_lower())
 		return
 	_select_unit(best)
+
+# Road events: pick a Police crew (jam) or an Engineering crew (debris), then click the road.
+func _select_road_event(road_id: int) -> void:
+	if screen != "game": return
+	var road: Dictionary = sim.get_road_event(road_id)
+	if road.is_empty() or str(road.status) not in ["active","clearing"]: return
+	var kind: String = str(road.clear_kind)
+	var who: String = str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind))
+	if int(road.assigned_unit)>=0:
+		var crew_on_it: Dictionary = sim.get_unit(int(road.assigned_unit))
+		_toast("%s is already on %s." % [crew_on_it.get("crew_name","A crew"), road.street])
+		return
+	if selected_unit>=0:
+		var crew: Dictionary = sim.get_unit(selected_unit)
+		if str(crew.get("kind",""))!=kind:
+			_toast("Only %s can clear %s. %s" % [who, road.street, ("Ask %s." % network.player_label(network.owner_of(kind))) if network.active and not network.owns(kind) else "Pick one of their crews."])
+			return
+		_command("clear_road",{"road_event_id":road_id,"kind":kind,"unit_id":selected_unit})
+		return
+	if network.owns(kind):
+		_toast("Pick a %s crew, then click %s to clear it." % [who.to_lower(), road.street])
+	else:
+		_toast("%s can clear %s — ask %s over voice." % [who, road.street, network.player_label(network.owner_of(kind)) if network.owner_of(kind)>0 else "your team"])
+
+func _clear_road_with(road_id: int, kind: String) -> void:
+	var road: Dictionary = sim.get_road_event(road_id)
+	if road.is_empty(): return
+	if kind!=str(road.clear_kind):
+		_toast("Only %s can clear %s." % [str(NetworkSession.DEPARTMENT_NAMES.get(road.clear_kind,road.clear_kind)), road.street])
+		return
+	var best: int = -1
+	var best_eta: float = INF
+	var center: Vector2 = sim.road_event_center(road)
+	for unit in sim.units:
+		if unit.kind==kind and unit.state in ["idle","return"] and sim.elapsed>=float(unit.get("dispatch_guard_until",0.0)) and sim.elapsed>=float(unit.get("divert_after",0.0)):
+			var eta: float = float(sim._best_route(unit, unit.pos, center).eta)
+			if eta<best_eta: best_eta=eta; best=int(unit.id)
+	if best<0:
+		_toast("No %s crew is free right now." % str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind)).to_lower())
+		return
+	_command("clear_road",{"road_event_id":road_id,"kind":kind,"unit_id":best})
 
 func _cached_dispatch_options(target: int) -> Array:
 	var now := Time.get_ticks_msec()
@@ -982,11 +1034,11 @@ func _draw_crew_cards() -> void:
 				cv.draw_rect(card_area, GOLD, false, 2)
 			ResponderArt.draw_portrait_rect(cv, Rect2(rect.position + Vector2(x, 23), Vector2(28, 32)), kind)
 			_text(_short(str(unit.get("crew_name",unit.name)),8), rect.position + Vector2(x + 34, 38), 13, CREAM)
-			var status: String = {"idle":"READY","travel":"EN ROUTE","working":"ON SCENE","return":"RETURNING","rest":"RESTING"}.get(unit.state,str(unit.state).to_upper())
+			var status: String = {"idle":"READY","travel":"EN ROUTE","working":"ON SCENE","return":"RETURNING","rest":"RESTING","clearing":"CLEARING"}.get(unit.state,str(unit.state).to_upper())
 			if unit.state=="travel": status="ARRIVE %ds" % ceili(sim.unit_eta(unit))
 			var ready_in: float = maxf(float(unit.get("divert_after",0.0)),float(unit.get("dispatch_guard_until",0.0))) - sim.elapsed
 			if unit.state in ["idle","return"] and ready_in>0: status="READY IN %ds" % ceili(ready_in)
-			_text(status, rect.position + Vector2(x + 34, 52), 10, KIND_COLOR[kind] if unit.state in ["travel","working"] else MUTED)
+			_text(status, rect.position + Vector2(x + 34, 52), 10, KIND_COLOR[kind] if unit.state in ["travel","working","clearing"] else MUTED)
 			idx += 1
 
 func _draw_campaign() -> void:
@@ -1108,7 +1160,7 @@ func _draw_help() -> void:
 	_text("On duty",Vector2(365,202),30,CREAM)
 	var tips := [
 		["01", "Send your crews", "Pick a crew, then a call. Or hover a call and press 1–4. Its icons show which departments are still needed."],
-		["02", "Help on scene", "Q scouts a ? call. E supplies an arrived crew. SPACE gives the team a coffee boost."],
+		["02", "Help on scene", "Q scouts a ? call. E supplies an arrived crew. SPACE gives the team a coffee boost. F shows the whole town."],
 		["03", "Explore the town", "Drag: pan. Wheel: zoom. Minimap: jump. MAP: overview. Right-click: clear. F: close-up."],
 		["04", "Coordinate", "Enable your microphone in Settings, then hold V to talk. Recordings are optional and saved on your computer."]
 	]
@@ -1326,6 +1378,9 @@ func _input(event: InputEvent) -> void:
 			KEY_R:
 				if screen=="game": _action("ping")
 			KEY_F:
+				# F toggles the whole-town overview; the rescue close-up moved to C.
+				if screen=="game": _action("map_overview")
+			KEY_C:
 				if screen=="game": _action("focus")
 			KEY_SPACE:
 				if screen=="game": _action("special")
@@ -1725,11 +1780,18 @@ func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
 	match action:
 		"dispatch":
 			success=sim.dispatch(id,str(payload.get("kind","")),int(payload.get("unit_id",-1)))
+		"clear_road":
+			# The crew must really belong to the department the sender commands.
+			var crew: Dictionary = sim.get_unit(int(payload.get("unit_id",-1)))
+			success=not crew.is_empty() and str(crew.kind)==str(payload.get("kind","")) and sim.clear_road(int(payload.get("road_event_id",-1)),int(crew.id))
 		"scout": success=sim.scout(id)
 		"supply": success=sim.supply(id)
 		"special": success=sim.use_special()
 		"ping": network.announce("%s: %s" % [network.player_label(_peer_id) if network.active else "Radio", str(payload.get("text","Help needed"))]); success=true
 	if success:
+		if action=="clear_road" and local_command:
+			selected_unit=-1
+			role_filter=""
 		if action=="dispatch" and local_command:
 			selected_unit=-1
 			selected=id
@@ -1741,7 +1803,7 @@ func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
 			_sync_tutorial()
 		elif action=="ping": research.log_event(action,payload)
 	else:
-		var reason: String = "Crew unavailable or already assigned. Check the call's remaining needs." if action=="dispatch" else "Not available yet. Select an active call or let supplies recharge."
+		var reason: String = "Crew unavailable or already assigned. Check the call's remaining needs." if action=="dispatch" else ("That crew can't clear this road right now." if action=="clear_road" else "Not available yet. Select an active call or let supplies recharge.")
 		if local_command: _toast(reason)
 		elif network.has_method("broadcast_event"): network.call("broadcast_event",{"type":"action_denied","text":reason,"actor_peer":_peer_id})
 	_process_events()
@@ -1786,6 +1848,13 @@ func _handle_game_event(event: Dictionary) -> void:
 	elif type in ["disruption","warning"]:
 		_toast(message)
 		audio.play_cue("alarm")
+	elif type=="road_event":
+		_toast(message)
+		audio.play_cue("alarm")
+	elif type=="road_cleared":
+		_toast(message)
+		audio.play_cue("arrival")
+	elif type=="road_clear_dispatched": audio.play_cue("dispatch")
 	elif type in ["escalated","critical","urgent"]:
 		if urgency_cooldown<=0:
 			audio.play_cue("urgent")

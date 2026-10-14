@@ -1082,7 +1082,7 @@ func _refresh_voice_mix() -> void:
 	for peer in network.roster:
 		if int(peer) == multiplayer.get_unique_id(): continue
 		var key := "voice_player_%d" % (int(network.roster[peer]) + 1)
-		voice.peer_playback_gains[int(peer)] = float(audio.sound_level(key)) / 50.0
+		voice.peer_playback_gains[int(peer)] = AudioDirector.slider_gain(audio.sound_level(key))
 
 func _draw_settings() -> void:
 	_draw_page_header("", "SOUND, DISPLAY & LOCAL RECORDINGS")
@@ -1853,7 +1853,7 @@ func _handle_game_event(event: Dictionary) -> void:
 		failed_ids.assign(event.get("failed_incident_ids", []))
 		audio.finish_incident_cues(failed_ids)
 	elif type=="combo": audio.play_cue("combo")
-	elif type=="dispatch": audio.play_cue("dispatch")
+	elif type=="dispatch": audio.play_dispatch(str(event.get("kind", "")))
 	elif type in ["scout","supply"]:
 		audio.play_cue("upgrade")
 		var effect: Dictionary = sim.last_action_effect

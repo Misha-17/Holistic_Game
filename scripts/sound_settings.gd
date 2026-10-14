@@ -63,6 +63,7 @@ func _add_slider(key: String, caption: String, index: int) -> void:
 	slider.min_value = 0
 	slider.max_value = 100
 	slider.step = 1
+	slider.tooltip_text = "0: mute | 25: quiet | 50: default | 75: loud | 100: maximum"
 	slider.value = _director.sound_level(key)
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	slider.custom_minimum_size.y = 28

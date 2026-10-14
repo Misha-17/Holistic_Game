@@ -61,7 +61,7 @@ func _run() -> void:
 	director._process(0.25)
 	check(director._music.volume_db < -35.0, "score begins gently")
 	director._process(1.75)
-	check(is_equal_approx(director._music.volume_db, linear_to_db(0.5)), "fade reaches halfway after two seconds")
+	check(is_equal_approx(director._music.volume_db, linear_to_db(0.25)), "fade reaches halfway at the halved calm level after two seconds")
 	director._process(2.0)
 	await create_timer(0.15).timeout
 	var normal: Dictionary = await measure(4.0)
@@ -85,7 +85,7 @@ func _run() -> void:
 	var busy: Dictionary = await measure(4.0)
 	check(director._music.stream == score, "original calm asset is preserved")
 	check(busy.samples > 10000 and busy.rms > db_to_linear(-48.0), "intense opening is audible, not buried by excessive attenuation")
-	check(busy.peak <= db_to_linear(-19.5), "intense music retains output headroom")
+	check(busy.peak <= db_to_linear(-9.0), "boosted intense music retains default-level output headroom")
 	director.set_intensity(0.38)
 	director.update_music_context(10.0, true, true)
 	check(director._busy, "hysteresis band holds intense selection")

@@ -10,9 +10,14 @@ MUSIC (two loops, switched by current gameplay pressure)
 The original 72 BPM calm score retains its level and four-second fade-in.
 Pressure >=0.45 for two active seconds selects intense; <=0.30 for six seconds
 returns to calm, with two-second crossfades. Music bus remains -20 dB.
-The supplied intense file uses +26.29 dB player compensation: source peak -24.44
+The supplied intense file uses +34.67 dB player compensation: source peak -24.44
 dBFS / RMS -44.56 dBFS. Recheck this gain if replacing that recording.
-This matches the calm track's full-track RMS. One Game sound slider controls
+Intense is 1.5 times the previous mix; calm now plays at half its previous level.
+Default volume retains headroom; the highest slider settings can clip intense peaks.
+Other notifications play
+at 70% of the previous 80% mix (56% of the original); dispatch sirens and music
+are excluded from that reduction. Teammate voice levels are unchanged.
+One Game sound slider controls
 music and effects; default 50. Dispatch sirens use half their original amplitude.
 Each connected teammate has a separate local voice slider.
 Old alternative music files are not used. Hidden waves do not cue music.

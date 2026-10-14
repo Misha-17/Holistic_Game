@@ -29,7 +29,7 @@ func run() -> void:
 			first_busy = game.sim.elapsed
 	check(first_busy > 0.0, "actual busy city reaches the intense state")
 	check(game.audio._intense_music.playing and not game.audio._music.playing, "gameplay routing plays intense alone after crossfade")
-	check(is_equal_approx(game.audio._intense_music.volume_db, 26.28851423), "intense gain matches calm full-track RMS")
+	check(is_equal_approx(game.audio._intense_music.volume_db, 34.67110038), "intense amplitude includes the additional 50 percent boost")
 	# Check all samples, not just the quiet opening, for gain headroom.
 	var stream: AudioStream = game.audio._intense_music.stream
 	var playback := stream.instantiate_playback()
@@ -48,8 +48,8 @@ func run() -> void:
 	playback.stop()
 	var gain := db_to_linear(game.audio.INTENSE_GAIN_DB)
 	var output_rms: float = linear_to_db(sqrt(energy / (frames * 2)) * gain) + float(game.audio.music_volume_db)
-	check(peak * gain * 2.0 * db_to_linear(game.audio.music_volume_db) < 1.0, "full intense recording retains output headroom even at slider 100")
-	check(output_rms > -42.0 and output_rms < -36.0, "full-track intense level stays comparable to calm")
+	check(peak * gain * AudioDirector.slider_gain(50) * db_to_linear(game.audio.music_volume_db) < 1.0, "full intense recording retains output headroom at default volume")
+	check(output_rms > -31.0 and output_rms < -29.0, "full-track intense level reflects the requested boost")
 	print("Gameplay first busy at %.1fs; intense full-track output peak %.2f dBFS, RMS %.2f dBFS" % [first_busy, linear_to_db(peak * gain) + game.audio.music_volume_db, output_rms])
 	print("MUSIC GAMEPLAY TEST: ", "PASS" if failures.is_empty() else "FAIL", " (", failures.size(), " failures)")
 	playback = null

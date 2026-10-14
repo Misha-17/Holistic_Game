@@ -11,6 +11,14 @@ var sound_preferences_path := "user://beacon_bay_sound_settings.cfg"
 func sound_level(key: String) -> int:
 	return int(sound_levels.get(key, 50))
 
+# More useful perceptual travel than the old linear 0..2 multiplier:
+# 0=mute, 25=-12 dB, 50=unchanged, 75=+6 dB, 100=+12 dB.
+static func slider_gain(value: int) -> float:
+	var level := clampi(value, 0, 100)
+	if level == 0: return 0.0
+	var offset := float(level - 50)
+	return db_to_linear(offset * (0.48 if level < 50 else 0.24))
+
 func load_sound_levels() -> void:
 	sound_levels.clear()
 	var config := ConfigFile.new()
@@ -37,7 +45,10 @@ func set_sound_level(key: String, value: int) -> void:
 func _apply_sound_level(player: AudioStreamPlayer, key: String, base_db: float) -> void:
 	player.set_meta("sound_key", key)
 	player.set_meta("base_db", base_db)
-	player.volume_linear = db_to_linear(base_db) * float(sound_level("game_sound")) / 50.0
+	# Remaining effects: 70% of the previous 0.8 mix, not 70% of the original.
+	var cue_gain := 1.0 if key.begins_with("music_") or key == "dispatch" or key.begins_with("dispatch_") else 0.56
+	if key == "music_soft": cue_gain = 0.5
+	player.volume_linear = db_to_linear(base_db) * slider_gain(sound_level("game_sound")) * cue_gain
 
 
 
@@ -52,12 +63,14 @@ const BUSY_HOLD_SECONDS := 2.0
 const CALM_HOLD_SECONDS := 6.0
 const CROSSFADE_SECONDS := 2.0
 # Supplied MP3 measures -44.56 dBFS RMS / -24.44 dBFS peak, versus the
-# calm WAV's -18.27 RMS. Match their measured full-track RMS levels.
+# calm WAV's -18.27 RMS. Matched RMS gain plus 20*log10(1.75*1.5):
+# the previous intense mix is boosted by another 50%; calm is halved separately.
 # Both then pass through the same Music bus and game-sound slider.
-const INTENSE_GAIN_DB := 26.28851423
+const INTENSE_GAIN_DB := 34.67110038
 const INCIDENT_CUE_DELAY := 0.15
 const INCIDENT_CUE_GAP := 1.1
 const CUE_NAMES := ["dispatch", "rescue", "alarm", "click", "upgrade", "fail", "shift", "combo", "surge", "urgent", "arrival", "work"]
+const DISPATCH_CUES := {"fire": "dispatch_fire", "medic": "dispatch_medic", "engineer": "dispatch_engineering", "police": "dispatch_police"}
 # Drop-in sounds: put a file named <name>.ogg / .wav / .mp3 in this folder and it replaces the built-in one.
 const CUSTOM_DIR := "res://assets/audio/custom/"
 # Newer cues; until a custom file exists they borrow a built-in sound.
@@ -115,6 +128,10 @@ func _ready() -> void:
 	for cue_name in EXTRA_CUES:
 		var custom: AudioStream = _load_custom(cue_name, false)
 		_cues[cue_name] = custom if custom != null else _cues.get(EXTRA_CUES[cue_name])
+	for cue_name: String in DISPATCH_CUES.values():
+		_cues[cue_name] = _load_custom(cue_name, false)
+		if _cues[cue_name] == null:
+			push_error("Required dispatch audio missing: " + cue_name + ".ogg")
 	for cue_name in ["critical_incident", "incident_failed"]:
 		_cues[cue_name] = _load_custom(cue_name, false)
 		if _cues[cue_name] == null:
@@ -272,6 +289,9 @@ func _update_incident_cues(delta: float) -> void:
 	_incident_wait = _incident_player.stream.get_length() + INCIDENT_CUE_GAP
 
 
+func play_dispatch(kind: String) -> void:
+	play_cue(str(DISPATCH_CUES.get(kind, "dispatch")))
+
 func play_cue(cue_name: String) -> void:
 	if not sfx_enabled or not _cues.has(cue_name) or _pool.is_empty():
 		return
@@ -286,7 +306,7 @@ func play_cue(cue_name: String) -> void:
 		minimum_interval = 6500
 	elif cue_name == "urgent":
 		minimum_interval = 3500
-	elif cue_name == "dispatch":
+	elif cue_name == "dispatch" or cue_name.begins_with("dispatch_"):
 		minimum_interval = 260
 	elif cue_name == "arrival":
 		minimum_interval = 550
@@ -310,7 +330,7 @@ func play_cue(cue_name: String) -> void:
 	player.stream = _cues[cue_name]
 	player.pitch_scale = randf_range(0.985, 1.015) if cue_name in ["click", "rescue", "combo"] else 1.0
 	var base_db := -3.0 if cue_name in ["alarm", "arrival"] else 0.0
-	if cue_name == "dispatch": base_db = -6.02059991 # Half amplitude.
+	if cue_name == "dispatch" or cue_name.begins_with("dispatch_"): base_db = -6.02059991 # Half amplitude.
 	if cue_name == "work": base_db = -5.0
 	_apply_sound_level(player, cue_name, base_db)
 	player.play()

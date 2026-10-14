@@ -35,7 +35,7 @@ func run() -> void:
 	director._process(4.0)
 	check(director._intense_music.volume_linear == 0.0, "master slider also mutes music")
 	panel.sliders.game_sound.value = 100
-	check(is_equal_approx(director._pool[0].volume_linear, 1.0), "master applies consistently to fixed dispatch mix")
+	check(is_equal_approx(director._pool[0].volume_linear, 0.5 * AudioDirector.slider_gain(100)), "master applies consistently to fixed dispatch mix")
 	panel.sliders.voice_player_2.value = 0
 	panel.sliders.voice_player_3.value = 75
 	director.load_sound_levels()
@@ -73,7 +73,7 @@ func run() -> void:
 		levels.append(linear_to_db(sqrt(energy / (frames * 2))))
 		playback = null
 		stream = null
-	check(absf(levels[0] - levels[1] - AudioDirector.INTENSE_GAIN_DB) < 0.1, "intense and calm full-track RMS match within 0.1 dB")
+	check(absf(levels[0] - levels[1] + linear_to_db(1.75 * 1.5) - AudioDirector.INTENSE_GAIN_DB) < 0.1, "intense gain includes both requested boosts")
 	print("Music RMS difference after compensation: ", absf(levels[0] - levels[1] - AudioDirector.INTENSE_GAIN_DB), " dB")
 	check(load("res://scripts/main.gd") != null, "main scene script loads with simplified settings")
 	DirAccess.remove_absolute(director.sound_preferences_path)

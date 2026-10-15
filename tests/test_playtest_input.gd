@@ -51,6 +51,16 @@ func run() -> void:
 		game.tactical_map.activate_target(scout_hit)
 		check(bool(call.discovered), "The SCOUT button reveals the call")
 		check(game.selected_unit == int(medic.id), "Scouting keeps the crew selected")
+	# The clicked call's card has a CLOSE button.
+	game._process(0)
+	game.tactical_map.refresh()
+	var close_hit: Dictionary = {}
+	for region: Dictionary in game.tactical_map.hit_regions():
+		if region.type == "close": close_hit = region
+	check(not close_hit.is_empty(), "The open call card has a CLOSE button")
+	if not close_hit.is_empty():
+		game.tactical_map.activate_target(close_hit)
+		check(game.selected == -1, "CLOSE closes the card")
 	# Now confirmed: a vehicle driving over the call must not steal the click.
 	var fire: Dictionary = game.sim.units[0]
 	fire.state = "return"

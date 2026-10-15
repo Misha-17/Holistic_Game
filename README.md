@@ -4,13 +4,13 @@ A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engi
 
 ## Play
 - Pick a crew, then click a call. Or hover a call and press **1–4** for the nearest available crew in that department.
-- **Q:** scout. **E:** supply a crew on scene. **Space:** coffee boost. **F:** whole-town overview on/off. **C:** rescue close-up. **R:** ping.
-- **Two views only** (playtest 15.10): every level **starts on the whole town**. Click anywhere, scroll up or press **EXPLORE / F** to open the **drag view** there; scroll down or press **OVERVIEW / F** to return to the whole town. There is no further zooming in (no +/- buttons). Switching to the whole town closes an open call card.
-- In the drag view: **left-drag** pans (middle-drag too), **WASD / arrows** pan, the **minimap** (bottom right, drag view only) jumps; **N** or its HIDE button hides it.
+- **Q:** scout. **E:** supply a crew on scene. **Space:** coffee boost. **C:** rescue close-up. **R:** ping.
+- **Two views only** (playtest 15.10): every level **starts on the whole town**. Click anywhere, scroll up or press **EXPLORE** to open the **drag view** there (5% closer than the old most-zoomed-out level); scroll down or press **OVERVIEW** to return to the whole town. There is no further zooming in (no +/- buttons, no F shortcut). Switching to the whole town closes an open call card.
+- In the drag view: **left-drag** pans (middle-drag too), **WASD / arrows** pan, the **minimap** (bottom right, drag view only) jumps; **M** or its HIDE button hides it (music is switched in Settings).
 - The map fills the whole screen; the top bar and crew cards float over it, see-through. Markers are kept out from under them.
 - Crews and stations are picked the moment you press on them, so a press that turns into a drag still selects the crew. Moving vehicles never steal a click meant for a call or station under them. Station buttons are 20% bigger. A crew's route preview is drawn in its department's colour.
 - With a crew selected, clicking a **?** call does **not** send the crew: it opens the call's card with a **SCOUT** button, and the crew stays selected. 1–4 over a ? call also asks you to scout first.
-- The results screen shows the rescue goal and says exactly why a level gave no (or fewer) stars.
+- The clicked call's card has a **CLOSE** button. The whole-town view shows the countryside around the town instead of empty side bars. The pause menu is compact. The results screen shows the rescue goal and says exactly why a level gave no (or fewer) stars.
 - **Right-click / Esc:** clear selection.
 - Enable **Microphone** in Settings; hold **V** to talk. Use headphones.
 - **Esc:** menu. Solo pauses; a shared shift continues while personal menus are open.

@@ -8,6 +8,7 @@ signal incident_selected(id: int)
 signal dispatch_requested()
 signal road_event_selected(id: int)
 signal scout_requested(id: int)
+signal close_requested()
 
 const INK := Color("142e3b")
 const PANEL := Color("183c46")
@@ -279,6 +280,8 @@ func activate_target(hit: Dictionary) -> void:
 			road_event_selected.emit(int(hit.id))
 		"scout":
 			scout_requested.emit(int(hit.id))
+		"close":
+			close_requested.emit()
 		"base":
 			var pick: int = _station_pick(str(hit.base_key))
 			if pick >= 0: unit_selected.emit(pick)
@@ -360,9 +363,15 @@ func _layout_call_cards() -> void:
 		item.card = rect
 		_occupied.append(rect.grow(6))
 		_hits.append({"rect": rect, "type": "call", "id": int(item.incident.id)})
+		# The clicked (selected) call's card has a CLOSE button (no need to know Esc).
+		if int(item.incident.id) == selected_id:
+			_hits.append({"rect": _close_button_rect(rect).grow(3), "type": "close", "id": int(item.incident.id)})
 		# Unconfirmed call: a real SCOUT button on its card (not only the Q key).
 		if not bool(item.incident.get("discovered", true)):
 			_hits.append({"rect": _scout_button_rect(rect), "type": "scout", "id": int(item.incident.id)})
+
+func _close_button_rect(card: Rect2) -> Rect2:
+	return Rect2(card.end.x - 70, card.position.y + 6, 62, 20)
 
 func _scout_button_rect(card: Rect2) -> Rect2:
 	return Rect2(card.position + Vector2(8, 56), Vector2(118, 22))
@@ -991,7 +1000,12 @@ func _draw_call(item: Dictionary) -> void:
 	draw_line(pin, rect.get_center(), Color(color, .7), 1, false)
 	_panel(rect, Color("173741f5"), GOLD if selected else color, 2 if selected else 1)
 	draw_rect(Rect2(rect.position, Vector2(3, rect.size.y)), color)
-	_btext(_fit(str(incident.get("name", "Incoming report")), rect.size.x - 20, 17), rect.position + Vector2(10, 23), 17, CREAM)
+	_btext(_fit(str(incident.get("name", "Incoming report")), rect.size.x - (92 if selected else 20), 17), rect.position + Vector2(10, 23), 17, CREAM)
+	if selected:
+		var close: Rect2 = _close_button_rect(rect)
+		var over_close: bool = _pointer_valid and close.grow(3).has_point(_pointer)
+		_panel(close, Color(CREAM, .9) if over_close else Color(INK, .9), Color(CREAM, .5), 1)
+		_btext("CLOSE  x", close.position + Vector2(close.size.x * .5, 15), 11, INK if over_close else CREAM, true)
 	# Second line: what a crew would achieve here, or what is still missing.
 	var line: String = ""
 	var line_color: Color = MUTED

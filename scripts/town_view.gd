@@ -125,6 +125,7 @@ func _paint_static(canvas: Node2D) -> void:
 	var desert: bool = str(layout.get("theme","")) == "desert"
 	var grass := Color("9fbd87") if theme_index != 2 else Color("b7bc88")
 	if desert: grass = Color("dcc58f")
+	_paint_outskirts(canvas, art, layout, desert, grass)
 	canvas.draw_rect(Rect2(Vector2.ZERO,MAP_SIZE),grass)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 29401
@@ -209,11 +210,51 @@ func _paint_static(canvas: Node2D) -> void:
 		for point: Vector2 in [Vector2(978,885),Vector2(1320,887),Vector2(1690,1508),Vector2(490,1509)]:
 			if not _in_water(layout, point, 0.0) or layout.has("river"): art._boat(point,1,false)
 	if theme_index == 1:
-		canvas.draw_rect(Rect2(Vector2.ZERO,MAP_SIZE),Color(0.05,0.08,0.22,0.5 if str(layout.get("theme","")) == "night" else 0.20))
+		canvas.draw_rect(OUTSKIRTS,Color(0.05,0.08,0.22,0.5 if str(layout.get("theme","")) == "night" else 0.20))
 	elif theme_index == 3:
-		canvas.draw_rect(Rect2(Vector2.ZERO,MAP_SIZE),Color(0.12,0.22,0.28,0.06))
+		canvas.draw_rect(OUTSKIRTS,Color(0.12,0.22,0.28,0.06))
 	elif theme_index == 4:
-		canvas.draw_rect(Rect2(Vector2.ZERO,MAP_SIZE),Color(1.0,0.78,0.45,0.07))
+		canvas.draw_rect(OUTSKIRTS,Color(1.0,0.78,0.45,0.07))
+	_shade_outskirts(canvas)
+
+# The whole-town view is wider than the town (16:9 screen, 3:2 town), so the
+# countryside around it is painted too: no empty bars at the sides. It is
+# slightly darker so the town's edge stays clear; nothing there is playable.
+const OUTSKIRTS := Rect2(-420, -80, MAP_SIZE.x + 840, MAP_SIZE.y + 160)
+
+func _paint_outskirts(canvas: Node2D, art, layout: Dictionary, desert: bool, ground: Color) -> void:
+	canvas.draw_rect(OUTSKIRTS, ground)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7741
+	for side: float in [-1.0, 1.0]:
+		var x0: float = OUTSKIRTS.position.x if side < 0 else MAP_SIZE.x
+		var width: float = -OUTSKIRTS.position.x
+		for i: int in range(220):
+			var p := Vector2(x0 + rng.randf() * width, rng.randf_range(-60, 1460))
+			canvas.draw_rect(Rect2(p, Vector2(4, 2)), Color("cdb27a") if desert else Color("91af7e"))
+		for i: int in range(26):
+			var foot := Vector2(x0 + 30 + rng.randf() * (width - 60), rng.randf_range(20, 1440))
+			if layout.has("river") and Rect2(0, Rect2(layout.river).position.y - 30, 1, Rect2(layout.river).size.y + 60).has_point(Vector2(0, foot.y)): continue
+			if desert: _cactus(canvas, foot, i % 3)
+			else: art.tree(foot, 16.0 + i % 6, i % 3)
+	# Coast (or dunes) and the river continue past the town's edges.
+	if desert:
+		canvas.draw_rect(Rect2(OUTSKIRTS.position.x, 1470, OUTSKIRTS.size.x, OUTSKIRTS.end.y - 1470), Color("e3c98f"))
+	else:
+		canvas.draw_rect(Rect2(OUTSKIRTS.position.x, 1473, OUTSKIRTS.size.x, OUTSKIRTS.end.y - 1473), Color("4f8f98"))
+		canvas.draw_rect(Rect2(OUTSKIRTS.position.x, 1484, OUTSKIRTS.size.x, OUTSKIRTS.end.y - 1484), Color("367f8e"))
+	if layout.has("river"):
+		var river: Rect2 = layout.river
+		canvas.draw_rect(Rect2(OUTSKIRTS.position.x, river.position.y - 10, OUTSKIRTS.size.x, river.size.y + 20), Color("d9ccaa"))
+		canvas.draw_rect(Rect2(OUTSKIRTS.position.x, river.position.y, OUTSKIRTS.size.x, river.size.y), Color("468997"))
+
+func _shade_outskirts(canvas: Node2D) -> void:
+	var shade := Color(0.03, 0.10, 0.12, 0.38)
+	canvas.draw_rect(Rect2(OUTSKIRTS.position, Vector2(-OUTSKIRTS.position.x, OUTSKIRTS.size.y)), shade)
+	canvas.draw_rect(Rect2(MAP_SIZE.x, OUTSKIRTS.position.y, OUTSKIRTS.end.x - MAP_SIZE.x, OUTSKIRTS.size.y), shade)
+	canvas.draw_rect(Rect2(0, OUTSKIRTS.position.y, MAP_SIZE.x, -OUTSKIRTS.position.y), shade)
+	canvas.draw_rect(Rect2(0, MAP_SIZE.y, MAP_SIZE.x, OUTSKIRTS.end.y - MAP_SIZE.y), shade)
+	canvas.draw_rect(Rect2(Vector2.ZERO, MAP_SIZE), Color(0.95, 0.9, 0.75, 0.35), false, 3.0)
 
 func _in_water(layout: Dictionary, point: Vector2, margin: float) -> bool:
 	for water: Rect2 in layout.get("water", []):

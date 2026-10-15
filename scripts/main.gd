@@ -131,7 +131,7 @@ const MAP_PIXELS := BeaconCampaign.MAP_SIZE * MAP_SCALE
 const MAP_VIEW := Rect2(-80, 0, 1600, 900)
 # Smaller minimap, only in the drag view (the whole-town view needs none).
 const MINIMAP_RECT := Rect2(1340, 684, 168, 112)
-const MINIMAP_PANEL := Rect2(1334, 662, 180, 142)
+const MINIMAP_PANEL := Rect2(1334, 662, 180, 140)
 const MINIMAP_HIDE := Rect2(1452, 665, 58, 18)
 const MINIMAP_SHOW := Rect2(1408, 794, 104, 30)
 const DRAG_THRESHOLD := 6.0
@@ -177,7 +177,8 @@ func _map_world_at(point: Vector2) -> Vector2:
 # this zoom (the old "most zoomed out" level). Zooming in further showed no
 # extra detail and players got lost, so +/- buttons and free zoom are gone.
 func _drag_zoom() -> float:
-	return _explore_min_zoom()
+	# 5% closer than the old most-zoomed-out level (playtest 15.10).
+	return _explore_min_zoom() * 1.05
 
 func _explore_map_at(normalized: Vector2, anchor: Vector2 = MAP_VIEW.get_center()) -> void:
 	map_zoom = _drag_zoom()
@@ -322,8 +323,6 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 
 func _draw_map_tools() -> void:
 	_button("map_overview", "EXPLORE" if _is_map_overview() else "OVERVIEW", Rect2(-62, 18, 106, 34), TEAL if _is_map_overview() else PANEL, INK if _is_map_overview() else CREAM, 12)
-	cv.draw_rect(Rect2(46, 26, 18, 18), Color(INK, 0.8))
-	_text("F", Vector2(51, 40), 10, CREAM)
 	_draw_minimap()
 
 func _minimap_shown() -> bool:
@@ -332,11 +331,11 @@ func _minimap_shown() -> bool:
 func _draw_minimap() -> void:
 	if _is_map_overview(): return
 	if minimap_hidden:
-		_button("minimap_toggle", "MINIMAP  N", MINIMAP_SHOW, Color(INK, .8), CREAM, 11)
+		_button("minimap_toggle", "MINIMAP  M", MINIMAP_SHOW, Color(INK, .8), CREAM, 11)
 		return
 	_panel(MINIMAP_PANEL, Color(INK, .9), Color(CREAM, .24))
 	_text("BEACON BAY", MINIMAP_PANEL.position + Vector2(8, 16), 10, CREAM)
-	_button("minimap_toggle", "HIDE  N", MINIMAP_HIDE, Color(PANEL, .9), MUTED, 9)
+	_button("minimap_toggle", "HIDE  M", MINIMAP_HIDE, Color(PANEL, .9), MUTED, 9)
 	cv.draw_rect(MINIMAP_RECT, Color("315553"))
 	for x: float in RescueSimulation.ROAD_X:
 		cv.draw_line(MINIMAP_RECT.position + Vector2(x * MINIMAP_RECT.size.x, 0), MINIMAP_RECT.position + Vector2(x * MINIMAP_RECT.size.x, MINIMAP_RECT.size.y), Color("7a9290"), 1)
@@ -386,7 +385,6 @@ func _draw_minimap() -> void:
 	var frame := Rect2(MINIMAP_RECT.position + visible_world.position * MINIMAP_RECT.size, visible_world.size * MINIMAP_RECT.size)
 	cv.draw_rect(frame, Color(CREAM, .08))
 	cv.draw_rect(frame, CREAM, false, 2)
-	_text("Click to jump there", MINIMAP_PANEL.position + Vector2(8, 136), 10, MUTED)
 
 func _draw_capture_status() -> void:
 	if voice == null: return
@@ -477,6 +475,10 @@ func _ready() -> void:
 	tactical_map.incident_selected.connect(_select_incident)
 	tactical_map.unit_selected.connect(_select_unit)
 	tactical_map.dispatch_requested.connect(_dispatch_selected)
+	tactical_map.close_requested.connect(func():
+		selected = -1
+		focus_hold_left = 0
+		audio.play_cue("click"))
 	tactical_map.scout_requested.connect(func(id: int):
 		if screen != "game": return
 		selected = id
@@ -1282,7 +1284,8 @@ func _draw_settings() -> void:
 
 func _draw_pause() -> void:
 	_overlay()
-	_panel(Rect2(490,225,460,510),INK,Color("355966"))
+	# Sized to its buttons (no empty space at the bottom).
+	_panel(Rect2(490,225,460,(520 if tutorial_active else 440)),INK,Color("355966"))
 	_text("Team menu" if network.active else "Paused",Vector2(550,286),36,CREAM)
 	_text("The shared shift is still running." if network.active else "Ready when you are.",Vector2(550,322),17,MUTED)
 	_button("unpause","BACK ON DUTY",Rect2(550,359,340,54),TEAL,INK)
@@ -1292,7 +1295,7 @@ func _draw_pause() -> void:
 	if tutorial_active:
 		_button("tutorial_skip","LEAVE PRACTICE",Rect2(550,553,340,48),PANEL_LIGHT,GOLD,14)
 	_button("save_exit","SAVE & RETURN TO TOWN",Rect2(550,615 if tutorial_active else 553,340,48),PANEL_LIGHT,CREAM,14)
-	_text("ESC  resume    ·    F11  fullscreen",Vector2(561,705),13,MUTED)
+	_text("ESC  resume    ·    F11  fullscreen",Vector2(561,(705 if tutorial_active else 643)),13,MUTED)
 
 func _draw_help() -> void:
 	_overlay()
@@ -1300,8 +1303,8 @@ func _draw_help() -> void:
 	_text("On duty",Vector2(365,202),30,CREAM)
 	var tips := [
 		["01", "Send your crews", "Pick a crew, then a call. Or hover a call and press 1–4. Its icons show which departments are still needed."],
-		["02", "Help on scene", "Q scouts a ? call. E supplies an arrived crew. SPACE gives the team a coffee boost. F shows the whole town."],
-		["03", "Explore the town", "Click or scroll up: go there. Scroll down / F: whole town. Drag: pan. Minimap: jump. Right-click: clear."],
+		["02", "Help on scene", "Q scouts a ? call. E supplies an arrived crew. SPACE gives the team a coffee boost."],
+		["03", "Explore the town", "Click or scroll up: go there. Scroll down: whole town. Drag: pan. M: minimap. Right-click: clear."],
 		["04", "Coordinate", "Enable your microphone in Settings, then hold V to talk. Recordings are optional and saved on your computer."]
 	]
 	for i in range(tips.size()):
@@ -1547,20 +1550,15 @@ func _input(event: InputEvent) -> void:
 				if screen=="game": _action("supply")
 			KEY_R:
 				if screen=="game": _action("ping")
-			KEY_F:
-				# F toggles the whole-town overview; the rescue close-up moved to C.
-				if screen=="game": _action("map_overview")
 			KEY_C:
 				if screen=="game": _action("focus")
 			KEY_SPACE:
 				if screen=="game": _action("special")
 			KEY_TAB:
 				if screen=="game": _cycle_incident()
-			KEY_N:
-				if screen=="game": _action("minimap_toggle")
 			KEY_M:
-				music_enabled = not music_enabled
-				audio.set_music_enabled(music_enabled)
+				# M shows / hides the minimap (music is switched in Settings).
+				if screen=="game": _action("minimap_toggle")
 
 func _action(id: String) -> void:
 	audio.play_cue("click")

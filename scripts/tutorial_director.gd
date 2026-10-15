@@ -226,7 +226,7 @@ func current() -> Dictionary:
 			card.allowed = ["select"]
 		Step.COMPLETE:
 			card.title = "Ready to read the town"
-			card.text = "Pick a crew (station or vehicle), then click the call. Q scouts a ? call. E helps a crew on scene. Space is the coffee boost, F shows the whole town. Shortcut: hover a call and press 1-4 to send the nearest crew of that type. Right-click clears your selection."
+			card.text = "Pick a crew (station or vehicle), then click the call. Q scouts a ? call. E helps a crew on scene. Space is the coffee boost; scroll down to see the whole town. Shortcut: hover a call and press 1-4 to send the nearest crew of that type. Right-click clears your selection."
 			card.objective = "Practice complete. Your campaign progress stays untouched."
 			card.next_label = "READY FOR BEACON BAY"
 			card.can_advance = active

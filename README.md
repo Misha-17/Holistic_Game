@@ -5,14 +5,17 @@ A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engi
 ## Play
 - Pick a crew, then click a call. Or hover a call and press **1–4** for the nearest available crew in that department.
 - **Q:** scout. **E:** supply a crew on scene. **Space:** coffee boost. **F:** whole-town overview on/off. **C:** rescue close-up. **R:** ping.
-- **Left-drag:** pan (middle-drag also works). **Wheel:** zoom toward the pointer. **WASD / arrows:** pan.
-- **Minimap:** click or drag to jump to another district. **OVERVIEW:** see the whole town; **EXPLORE:** return to a movable close view. Dragging, arrow keys, wheel input and minimap clicks also leave overview automatically.
-- Zooming out during play stops before the map fills the window, so you can always keep panning.
+- **Two views only** (playtest 15.10): every level **starts on the whole town**. Click anywhere, scroll up or press **EXPLORE / F** to open the **drag view** there; scroll down or press **OVERVIEW / F** to return to the whole town. There is no further zooming in (no +/- buttons). Switching to the whole town closes an open call card.
+- In the drag view: **left-drag** pans (middle-drag too), **WASD / arrows** pan, the **minimap** (bottom right, drag view only) jumps; **N** or its HIDE button hides it.
+- The map fills the whole screen; the top bar and crew cards float over it, see-through. Markers are kept out from under them.
+- Crews and stations are picked the moment you press on them, so a press that turns into a drag still selects the crew. Moving vehicles never steal a click meant for a call or station under them. Station buttons are 20% bigger. A crew's route preview is drawn in its department's colour.
+- With a crew selected, clicking a **?** call does **not** send the crew: it opens the call's card with a **SCOUT** button, and the crew stays selected. 1–4 over a ? call also asks you to scout first.
+- The results screen shows the rescue goal and says exactly why a level gave no (or fewer) stars.
 - **Right-click / Esc:** clear selection.
 - Enable **Microphone** in Settings; hold **V** to talk. Use headphones.
 - **Esc:** menu. Solo pauses; a shared shift continues while personal menus are open.
 
-Departments split automatically between connected players. The campaign has six 5:30 shifts. The world is **2304 by 1536**, with **48 playable locations**. Sixteen new locations and streets extend beyond the previous eastern and southern boundaries; the existing 32 sites remain in their original positions. The game starts in a close, movable view. A click selects or dispatches on release; dragging across a crew or call never dispatches it. Travel is calibrated to keep the more distant districts practical to reach. Original crew rules, joint calls and campaign remain; the upgrade workshop was removed (Oct 2026).
+Departments split automatically between connected players. The campaign has six 5:30 shifts. The world is **2304 by 1536**, with **48 playable locations**. Sixteen new locations and streets extend beyond the previous eastern and southern boundaries; the existing 32 sites remain in their original positions. A click selects or dispatches on release; dragging across a crew or call never dispatches it. Travel is calibrated to keep the more distant districts practical to reach. Original crew rules, joint calls and campaign remain; the upgrade workshop was removed (Oct 2026).
 
 ## Road events (traffic rework, `andrei-traffic-events`)
 

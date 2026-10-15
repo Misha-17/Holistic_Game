@@ -35,6 +35,7 @@ var voice: Node
 var capture_run_id := ""
 var capture_shift := -1
 var map_zoom := 1.5
+var minimap_hidden := false
 var map_pan := Vector2.ZERO
 var map_dragging := false
 var _map_press_pending := false
@@ -125,9 +126,14 @@ const VIEW := Rect2(-80, 0, 1600, 900)
 const MAP_SCALE := 1.5
 const MAP_ORIGIN := Vector2.ZERO
 const MAP_PIXELS := BeaconCampaign.MAP_SIZE * MAP_SCALE
-const MAP_VIEW := Rect2(-80, 0, 1600, 832)
-const MINIMAP_RECT := Rect2(1284, 650, 216, 144)
-const MINIMAP_PANEL := Rect2(1272, 624, 240, 202)
+# The map fills the whole screen; the top bar and crew cards float over it
+# (playtest 15.10). Markers are kept out from under them by the occlusions.
+const MAP_VIEW := Rect2(-80, 0, 1600, 900)
+# Smaller minimap, only in the drag view (the whole-town view needs none).
+const MINIMAP_RECT := Rect2(1340, 684, 168, 112)
+const MINIMAP_PANEL := Rect2(1334, 662, 180, 142)
+const MINIMAP_HIDE := Rect2(1452, 665, 58, 18)
+const MINIMAP_SHOW := Rect2(1408, 794, 104, 30)
 const DRAG_THRESHOLD := 6.0
 const CREW_BAR := Rect2(-72, 836, 1584, 58)
 const FOCUS_RECT := Rect2(-64, 612, 464, 210)
@@ -167,15 +173,21 @@ func _explore_min_zoom() -> float:
 func _map_world_at(point: Vector2) -> Vector2:
 	return ((point - _map_rect().position) / _map_rect().size).clamp(Vector2.ZERO, Vector2.ONE)
 
+# Two views only (playtest 15.10): the whole town, and one drag-around view at
+# this zoom (the old "most zoomed out" level). Zooming in further showed no
+# extra detail and players got lost, so +/- buttons and free zoom are gone.
+func _drag_zoom() -> float:
+	return _explore_min_zoom()
+
 func _explore_map_at(normalized: Vector2, anchor: Vector2 = MAP_VIEW.get_center()) -> void:
-	map_zoom = clampf(_overview_return_zoom, _explore_min_zoom(), 3.0)
+	map_zoom = _drag_zoom()
 	map_pan = anchor - normalized.clamp(Vector2.ZERO, Vector2.ONE) * TownView.MAP_SIZE * map_zoom - MAP_ORIGIN
 	_apply_map_layout()
 
 func _reset_exploration_camera() -> void:
 	_reset_map_gesture()
-	map_zoom = MAP_SCALE
-	_overview_return_zoom = MAP_SCALE
+	map_zoom = _drag_zoom()
+	_overview_return_zoom = _drag_zoom()
 	# Begin around the main stations so the first view contains useful crews,
 	# even when the world expands with new districts beyond the town center.
 	var stations: Dictionary = {}
@@ -186,6 +198,8 @@ func _reset_exploration_camera() -> void:
 			center += Vector2(unit.home)
 	_overview_return_center = center / stations.size() if not stations.is_empty() else Vector2(.5, .5)
 	_center_map(_overview_return_center)
+	# Every level starts on the whole town, so nobody has to discover the overview.
+	_toggle_overview()
 
 func _map_center() -> Vector2:
 	return (MAP_VIEW.get_center() - _map_rect().position) / _map_rect().size
@@ -209,28 +223,13 @@ func _apply_map_layout() -> void:
 	tactical_map.map_rect = _map_rect()
 	tactical_map.clear_hover()
 
+# The wheel switches between the two views: up = into the drag view at the
+# cursor, down = back to the whole town.
 func _zoom_map(direction: float, around: Vector2) -> void:
-	if _is_map_overview():
+	if direction > 0 and _is_map_overview():
 		_explore_map_at(_map_world_at(around), around)
-		return
-	var levels: Array[float] = [_explore_min_zoom()]
-	for level in [1.0, 1.5, 2.0, 2.5, 3.0]:
-		if level > _explore_min_zoom() + .01: levels.append(level)
-	var next: float = map_zoom
-	if direction > 0:
-		for level in levels:
-			if level > map_zoom + .01:
-				next = level
-				break
-	else:
-		for index in range(levels.size() - 1, -1, -1):
-			if levels[index] < map_zoom - .01:
-				next = levels[index]
-				break
-	var point := (around - _map_rect().position) / map_zoom
-	map_pan = around - point * next - MAP_ORIGIN
-	map_zoom = next
-	_apply_map_layout()
+	elif direction < 0 and not _is_map_overview():
+		_toggle_overview()
 
 func _toggle_overview() -> void:
 	_reset_map_gesture()
@@ -240,6 +239,9 @@ func _toggle_overview() -> void:
 		_overview_return_zoom = map_zoom
 		_overview_return_center = _map_center()
 		map_zoom = _fit_map_zoom()
+		# An open call card would cover the whole-town view: close it.
+		selected = -1
+		focus_hold_left = 0
 		_center_map(Vector2(.5, .5))
 
 func _reset_map_gesture() -> void:
@@ -266,7 +268,7 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 					if _is_map_overview(): _explore_map_at(_map_world_at(point))
 					tactical_map.activate_target(target)
 				return consumed
-			if MINIMAP_RECT.has_point(point):
+			if MINIMAP_RECT.has_point(point) and _minimap_shown():
 				_reset_map_gesture()
 				_minimap_drag = true
 				var destination := (point - MINIMAP_RECT.position) / MINIMAP_RECT.size
@@ -279,6 +281,11 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 				_map_press_position = point
 				_map_last_position = point
 				_map_press_target = tactical_map.pointer_target(event.position)
+				# Crews and stations are picked on press (playtest 15.10): if the
+				# mouse moves and it turns into a drag, the crew is still selected.
+				if str(_map_press_target.get("type", "")) in ["unit", "base"] and not _is_map_overview():
+					tactical_map.activate_target(_map_press_target)
+					_map_press_target.clear()
 				return true
 		elif event.button_index == MOUSE_BUTTON_MIDDLE:
 			if not event.pressed:
@@ -317,13 +324,19 @@ func _draw_map_tools() -> void:
 	_button("map_overview", "EXPLORE" if _is_map_overview() else "OVERVIEW", Rect2(-62, 18, 106, 34), TEAL if _is_map_overview() else PANEL, INK if _is_map_overview() else CREAM, 12)
 	cv.draw_rect(Rect2(46, 26, 18, 18), Color(INK, 0.8))
 	_text("F", Vector2(51, 40), 10, CREAM)
-	_button("map_out", "-", Rect2(-62, 61, 49, 30), PANEL, CREAM, 17)
-	_button("map_in", "+", Rect2(-5, 61, 49, 30), PANEL, CREAM, 17)
 	_draw_minimap()
 
+func _minimap_shown() -> bool:
+	return screen == "game" and not minimap_hidden and not _is_map_overview()
+
 func _draw_minimap() -> void:
-	_panel(MINIMAP_PANEL, Color(INK, .96), Color(CREAM, .24))
-	_text("BEACON BAY", MINIMAP_PANEL.position + Vector2(12, 18), 11, CREAM)
+	if _is_map_overview(): return
+	if minimap_hidden:
+		_button("minimap_toggle", "MINIMAP  N", MINIMAP_SHOW, Color(INK, .8), CREAM, 11)
+		return
+	_panel(MINIMAP_PANEL, Color(INK, .9), Color(CREAM, .24))
+	_text("BEACON BAY", MINIMAP_PANEL.position + Vector2(8, 16), 10, CREAM)
+	_button("minimap_toggle", "HIDE  N", MINIMAP_HIDE, Color(PANEL, .9), MUTED, 9)
 	cv.draw_rect(MINIMAP_RECT, Color("315553"))
 	for x: float in RescueSimulation.ROAD_X:
 		cv.draw_line(MINIMAP_RECT.position + Vector2(x * MINIMAP_RECT.size.x, 0), MINIMAP_RECT.position + Vector2(x * MINIMAP_RECT.size.x, MINIMAP_RECT.size.y), Color("7a9290"), 1)
@@ -373,7 +386,7 @@ func _draw_minimap() -> void:
 	var frame := Rect2(MINIMAP_RECT.position + visible_world.position * MINIMAP_RECT.size, visible_world.size * MINIMAP_RECT.size)
 	cv.draw_rect(frame, Color(CREAM, .08))
 	cv.draw_rect(frame, CREAM, false, 2)
-	_text("Click a district to explore" if _is_map_overview() else "Drag to pan \u00b7 Scroll to zoom", MINIMAP_PANEL.position + Vector2(12, 188), 12, CREAM if _is_map_overview() else MUTED)
+	_text("Click to jump there", MINIMAP_PANEL.position + Vector2(8, 136), 10, MUTED)
 
 func _draw_capture_status() -> void:
 	if voice == null: return
@@ -464,6 +477,10 @@ func _ready() -> void:
 	tactical_map.incident_selected.connect(_select_incident)
 	tactical_map.unit_selected.connect(_select_unit)
 	tactical_map.dispatch_requested.connect(_dispatch_selected)
+	tactical_map.scout_requested.connect(func(id: int):
+		if screen != "game": return
+		selected = id
+		_action("scout"))
 	tactical_map.road_event_selected.connect(_select_road_event)
 	_center_map(Vector2(.5, .5))
 	field_focus = preload("res://scripts/incident_focus.gd").new()
@@ -689,8 +706,9 @@ func _process(delta: float) -> void:
 	tactical_map.reduced_motion = reduced_motion
 	var blocked: Array[Rect2] = []
 	if screen=="game":
-		blocked.append(MINIMAP_PANEL)
-		blocked.append(Rect2(-70, 10, 122, 88))
+		if _minimap_shown(): blocked.append(MINIMAP_PANEL)
+		elif minimap_hidden and not _is_map_overview(): blocked.append(MINIMAP_SHOW)
+		blocked.append(Rect2(-70, 10, 122, 50))
 		blocked.append(_hud_rect())
 		blocked.append(Rect2(VIEW.position.x, CREW_BAR.position.y - 4, VIEW.size.x, VIEW.end.y - CREW_BAR.position.y + 4))
 	if field_focus.visible: blocked.append(Rect2(field_focus.position, FOCUS_RECT.size))
@@ -915,7 +933,7 @@ func _focus_button_rect() -> Rect2:
 	return Rect2(field_focus.position+Vector2(FOCUS_RECT.size.x-65,7),Vector2(57,24)) if field_focus.visible else Rect2(40,724,185,34)
 
 func _map_occluded(point: Vector2) -> bool:
-	if MINIMAP_PANEL.has_point(point): return true
+	if _minimap_shown() and MINIMAP_PANEL.has_point(point): return true
 	if tutorial_overlay.visible and tutorial_overlay.blocks_point(point + global_position): return true
 	if field_focus.visible and Rect2(field_focus.position,FOCUS_RECT.size).has_point(point): return true
 	return false
@@ -961,6 +979,10 @@ func _pick_department(kind: String) -> void:
 	var call: Dictionary = _incident(target)
 	var best: int = -1
 	var best_eta: float = INF
+	if not call.is_empty() and call.get("status","") in ["active","working"] and not bool(call.get("discovered", true)) and not tutorial_active:
+		selected=target
+		_toast("Unconfirmed call: scout it first (SCOUT button on its card, or Q).")
+		return
 	if not call.is_empty() and call.get("status","") in ["active","working"]:
 		for option: Dictionary in sim.dispatch_options(target):
 			if str(option.kind)==kind and float(option.eta)<best_eta:
@@ -1111,7 +1133,7 @@ func _draw_crew_cards() -> void:
 		var kind: String = DEPARTMENTS[i]
 		var rect := Rect2(CREW_BAR.position.x + i * (width + gap), CREW_BAR.position.y, width, CREW_BAR.size.y)
 		var mine: bool = network.owns(kind)
-		_panel(rect, Color(INK, 0.72), Color(KIND_COLOR[kind], 0.9) if mine and network.active else Color(CREAM, 0.1))
+		_panel(rect, Color(INK, 0.66), Color(KIND_COLOR[kind], 0.9) if mine and network.active else Color(CREAM, 0.12))
 		_symbol(kind, rect.position + Vector2(14, 14), KIND_COLOR[kind], 0.42)
 		var owner_text: String = KIND_NAME[kind]
 		if network.active:
@@ -1266,8 +1288,10 @@ func _draw_pause() -> void:
 	_button("unpause","BACK ON DUTY",Rect2(550,359,340,54),TEAL,INK)
 	_button("pause_settings","SETTINGS",Rect2(550,429,340,48),PANEL_LIGHT,CREAM)
 	_button("help","HOW TO PLAY",Rect2(550,491,340,48),PANEL_LIGHT,CREAM)
-	_button("tutorial_skip" if tutorial_active else "tutorial","LEAVE PRACTICE" if tutorial_active else "MEET THE CREW · TUTORIAL",Rect2(550,553,340,48),PANEL_LIGHT,GOLD,14)
-	_button("save_exit","SAVE & RETURN TO TOWN",Rect2(550,615,340,48),PANEL_LIGHT,CREAM,14)
+	# The tutorial is started from the title screen only (playtest 15.10).
+	if tutorial_active:
+		_button("tutorial_skip","LEAVE PRACTICE",Rect2(550,553,340,48),PANEL_LIGHT,GOLD,14)
+	_button("save_exit","SAVE & RETURN TO TOWN",Rect2(550,615 if tutorial_active else 553,340,48),PANEL_LIGHT,CREAM,14)
 	_text("ESC  resume    ·    F11  fullscreen",Vector2(561,705),13,MUTED)
 
 func _draw_help() -> void:
@@ -1277,7 +1301,7 @@ func _draw_help() -> void:
 	var tips := [
 		["01", "Send your crews", "Pick a crew, then a call. Or hover a call and press 1–4. Its icons show which departments are still needed."],
 		["02", "Help on scene", "Q scouts a ? call. E supplies an arrived crew. SPACE gives the team a coffee boost. F shows the whole town."],
-		["03", "Explore the town", "Drag: pan. Wheel: zoom. Minimap: jump. MAP: overview. Right-click: clear. F: close-up."],
+		["03", "Explore the town", "Click or scroll up: go there. Scroll down / F: whole town. Drag: pan. Minimap: jump. Right-click: clear."],
 		["04", "Coordinate", "Enable your microphone in Settings, then hold V to talk. Recordings are optional and saved on your computer."]
 	]
 	for i in range(tips.size()):
@@ -1307,12 +1331,26 @@ func _draw_results() -> void:
 		if earned and grow > 0.0: _star(Vector2(947+i*35,205),radius,GOLD)
 	var count_k: float = clampf((shown_for - 0.2) / 1.1, 0.0, 1.0)
 	count_k = 1.0 - pow(1.0 - count_k, 3)
-	var stats := [[str(roundi(sim.rescued * count_k)),"NEIGHBORS RESCUED"],[str(roundi(sim.resolved_count * count_k)),"CALLS RESOLVED"],["%d%%"%roundi(sim.reputation * count_k),"COMMUNITY CONFIDENCE"]]
+	var stats := [["%d / %d" % [roundi(sim.rescued * count_k), sim.target],"NEIGHBORS RESCUED / GOAL"],[str(roundi(sim.resolved_count * count_k)),"CALLS RESOLVED"],["%d%%"%roundi(sim.reputation * count_k),"COMMUNITY CONFIDENCE"]]
 	for i in range(3):
 		_text(stats[i][0],Vector2(390+i*226,344),37,GOLD)
 		_text(stats[i][1],Vector2(390+i*226,371),10,MUTED)
 	_text("BEST CHAIN %d    ·    %d ROADS CLEARED" % [sim.best_combo,int(sim.get("roads_cleared"))],Vector2(390,397),12,TEAL)
-	_text("%d calls resolved · %d missed" % [sim.resolved_count, sim.failed_count], Vector2(390,453),20,MUTED)
+	# Say exactly why there are (not) stars (playtest 15.10: 62%, 0 stars, no idea why).
+	var why: String = ""
+	var why_color: Color = MUTED
+	if not sim.won:
+		var reasons: Array[String] = []
+		if sim.rescued < sim.target: reasons.append("rescue %d more neighbors (goal %d)" % [sim.target - sim.rescued, sim.target])
+		if sim.reputation < sim.minimum_confidence: reasons.append("keep confidence at %d%% or more" % roundi(sim.minimum_confidence))
+		why = ("No stars: to win, " + " and ".join(reasons) + ".") if not reasons.is_empty() else "No stars this time."
+		why_color = CORAL
+	elif sim.stars == 1:
+		why = "2 stars: 75%+ confidence and at most 3 missed calls."
+	elif sim.stars == 2:
+		why = "3 stars: 92%%+ confidence, no missed calls and %d+ rescued." % (sim.target + 8)
+	_text("%d calls resolved · %d missed" % [sim.resolved_count, sim.failed_count], Vector2(390,440),18,MUTED)
+	if why != "": _text(why, Vector2(390,466), 15, why_color)
 	if research_enabled or voice.recording_enabled:
 		_button("open_data", "OPEN RECORDINGS", Rect2(390,480,260,40), PANEL_LIGHT, TEAL, 14)
 	if network.active and not network.hosting:
@@ -1518,6 +1556,8 @@ func _input(event: InputEvent) -> void:
 				if screen=="game": _action("special")
 			KEY_TAB:
 				if screen=="game": _cycle_incident()
+			KEY_N:
+				if screen=="game": _action("minimap_toggle")
 			KEY_M:
 				music_enabled = not music_enabled
 				audio.set_music_enabled(music_enabled)
@@ -1575,6 +1615,7 @@ func _action(id: String) -> void:
 	match id:
 		"lobby_settings": previous_screen="lobby"; screen="settings"
 		"map_overview": _toggle_overview()
+		"minimap_toggle": minimap_hidden = not minimap_hidden
 		"map_in": _zoom_map(1.0, MAP_VIEW.get_center())
 		"map_out": _zoom_map(-1.0, MAP_VIEW.get_center())
 		"game_settings": previous_screen="game"; screen="settings"
@@ -1858,7 +1899,15 @@ func _finish_shift() -> void:
 func _select_incident(id: int) -> void:
 	focus_hold_left=0
 	if screen != "game": return
-	# A crew is selected: clicking a call sends that crew there.
+	# A crew is selected: clicking a call sends that crew there. Not to a "?"
+	# call (playtest 15.10): that only opens its card, where it can be scouted,
+	# and the crew stays selected for another call.
+	var clicked: Dictionary = _incident(id)
+	if selected_unit>=0 and not clicked.is_empty() and not bool(clicked.get("discovered", true)) and not tutorial_active:
+		selected=id
+		_toast("Unconfirmed call: scout it first (SCOUT button on its card, or Q). Your crew is still selected.")
+		audio.play_cue("click")
+		return
 	if selected_unit>=0:
 		var crew: Dictionary = sim.get_unit(selected_unit)
 		var payload := {"incident_id":id,"kind":str(crew.get("kind","")),"unit_id":selected_unit}

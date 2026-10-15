@@ -66,7 +66,7 @@ func run() -> void:
 	replay.start_shift(0)
 	game._receive_snapshot({"screen": "game", "simulation": replay.net_snapshot()})
 	game._sync_capture()
-	check(game.map_zoom == game.MAP_SCALE, "A replay resets the guest to the movable exploration view")
+	check(game._is_map_overview(), "A replay starts the guest on the whole town")
 	check(game.capture_run_id != initial_run, "Same-shift replay creates a fresh capture run")
 	check(game.research.log_path != initial_events and game.voice.recording_path != initial_audio, "Replay cannot overwrite previous local files")
 	check(FileAccess.get_file_as_string(initial_events).contains("capture_stopped"), "Previous input file finalized on replay")

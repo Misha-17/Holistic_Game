@@ -7,6 +7,7 @@ signal unit_selected(id: int)
 signal incident_selected(id: int)
 signal dispatch_requested()
 signal road_event_selected(id: int)
+signal scout_requested(id: int)
 
 const INK := Color("142e3b")
 const PANEL := Color("183c46")
@@ -188,10 +189,22 @@ func _occluded(point: Vector2) -> bool:
 func _hit_at(point: Vector2) -> Dictionary:
 	if not is_visible_in_tree() or sim == null or not view_rect.has_point(point) or _occluded(point):
 		return {}
+	# Moving vehicles drive over calls and stations; they must not steal a
+	# click meant for what's underneath (playtest 15.10). Order of preference:
+	# buttons, calls and stations first, then a moving vehicle, then the
+	# striped area of a closed road.
+	var vehicle: Dictionary = {}
+	var area: Dictionary = {}
 	for i in range(_hits.size() - 1, -1, -1):
-		if _hits[i].rect.has_point(point):
-			return _hits[i]
-	return {}
+		var hit: Dictionary = _hits[i]
+		if not hit.rect.has_point(point): continue
+		if bool(hit.get("area", false)):
+			if area.is_empty(): area = hit
+		elif hit.type == "unit":
+			if vehicle.is_empty(): vehicle = hit
+		else:
+			return hit
+	return vehicle if not vehicle.is_empty() else area
 
 func _update_hover(point: Vector2) -> void:
 	_pointer = point
@@ -264,6 +277,8 @@ func activate_target(hit: Dictionary) -> void:
 			if not _unit(int(hit.id)).is_empty(): unit_selected.emit(int(hit.id))
 		"road":
 			road_event_selected.emit(int(hit.id))
+		"scout":
+			scout_requested.emit(int(hit.id))
 		"base":
 			var pick: int = _station_pick(str(hit.base_key))
 			if pick >= 0: unit_selected.emit(pick)
@@ -345,6 +360,12 @@ func _layout_call_cards() -> void:
 		item.card = rect
 		_occupied.append(rect.grow(6))
 		_hits.append({"rect": rect, "type": "call", "id": int(item.incident.id)})
+		# Unconfirmed call: a real SCOUT button on its card (not only the Q key).
+		if not bool(item.incident.get("discovered", true)):
+			_hits.append({"rect": _scout_button_rect(rect), "type": "scout", "id": int(item.incident.id)})
+
+func _scout_button_rect(card: Rect2) -> Rect2:
+	return Rect2(card.position + Vector2(8, 56), Vector2(118, 22))
 
 # Closed roads are collected before call pins. Pins are NOT pushed off the road:
 # when zoomed out that moved a call's marker a whole block away from its
@@ -390,7 +411,7 @@ func _layout_roads() -> void:
 		if not road.is_empty():
 			# The striped road sits below calls and crews so it never steals their
 			# clicks; its badge and label are always on top, so it can always be clicked.
-			_hits.insert(0, {"rect": area.grow(10), "type": "road", "id": road_id})
+			_hits.insert(0, {"rect": area.grow(10), "type": "road", "id": road_id, "area": true})
 			_hits.append({"rect": Rect2(area.get_center() - Vector2(34, 18), Vector2(68, 36)), "type": "road", "id": road_id})
 			_hits.append({"rect": rect, "type": "road", "id": road_id})
 
@@ -444,8 +465,9 @@ func _layout_bases() -> void:
 		if _base_origins.get(group.key, Vector2(INF, INF)) != point:
 			_base_positions.erase(group.key)
 			_base_origins[group.key] = point
-		var size := Vector2(58, 32)
-		var choices: Array[Vector2] = [point + Vector2(14, 13), point + Vector2(-72, 13), point + Vector2(14, -44), point + Vector2(-72, -44)]
+		# 20% bigger than before (playtest 15.10: easy to miss).
+		var size := Vector2(70, 38)
+		var choices: Array[Vector2] = [point + Vector2(14, 13), point + Vector2(-84, 13), point + Vector2(14, -52), point + Vector2(-84, -52)]
 		var rect: Rect2 = _base_positions.get(group.key, Rect2())
 		if not rect.has_area() or not _rect_free(rect):
 			rect = _place_rect(choices, size)
@@ -752,7 +774,9 @@ func _draw_routes() -> void:
 		var route: Array[Vector2] = [_world(_preview.get("pos", Vector2.ZERO))]
 		for point in _preview.get("path", []):
 			route.append(_world(point))
-		_draw_route(route, GOLD, true, true)
+		# Preview in the department's colour (Police purple, Fire orange...).
+		var kind: String = str(_preview.get("kind", _unit(int(_preview.get("unit_id", -1))).get("kind", "")))
+		_draw_route(route, ROLE_COLOR.get(kind, GOLD), true, true)
 
 func _clip_route_segment(start: Vector2, finish: Vector2) -> PackedVector2Array:
 	var delta := finish - start
@@ -812,8 +836,8 @@ func _draw_station(item: Dictionary) -> void:
 	var hovered: bool = str(item.key) == _hovered_base_key
 	var bright: bool = chosen or hovered or role_filter == item.kind
 	_panel(rect, Color("234851f0") if bright else Color("17363dda"), GOLD if chosen else (color if bright else Color("5a7473")), 3 if chosen else (2 if bright else 1))
-	_role_icon(str(item.kind), rect.position + Vector2(16, 16), color)
-	_text(str(item.ready), rect.position + Vector2(34, 22), 17, CREAM if int(item.ready) > 0 else MUTED)
+	_role_icon(str(item.kind), rect.position + Vector2(19, 19), color, 1.2)
+	_text(str(item.ready), rect.position + Vector2(41, 27), 20, CREAM if int(item.ready) > 0 else MUTED)
 	if chosen:
 		var pulse: float = 0.0 if reduced_motion else (sin(_elapsed * 6.0) + 1.0) * 2.0
 		draw_rect(rect.grow(4 + pulse), GOLD, false, 2)
@@ -998,7 +1022,11 @@ func _draw_call(item: Dictionary) -> void:
 	elif selected and _crew_on_scene(incident) and int(incident.get("supply_count", 0)) < 2:
 		hint = "E  SUPPLIES: %d" % int(sim.supplies)
 	if not known:
-		hint = "Q  SCOUT"
+		var button: Rect2 = _scout_button_rect(rect)
+		var over: bool = button.has_point(_pointer) and _pointer_valid
+		_panel(button, Color(GOLD, .95) if over else Color(INK, .95), GOLD, 2)
+		_btext("SCOUT  (Q)", button.position + Vector2(button.size.x * .5, 16), 13, INK if over else GOLD, true)
+		hint = ""
 	if hint != "":
 		_btext(hint, rect.position + Vector2(10, 71), 12, GOLD)
 

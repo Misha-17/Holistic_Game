@@ -65,10 +65,10 @@ static func shifts() -> Array[Dictionary]:
 		{"title": "DUNE SPRINGS", "subtitle": "A desert town. Here comes the sand.", "weather": "desert", "target": 64, "introduction": "Sandstorms sweep across the town. Inside a storm everyone drives slowly and calls are hard to see. Get crews out before it arrives.", "accent": "f0b36b", "interval": 16.0, "max_active": 5, "weights": [4, 4, 3, 6, 3], "disruptions": []},
 		{"title": "BEACON NIGHT", "subtitle": "A whole town, looking out for each other.", "weather": "sunset", "target": 72, "introduction": "Your final watch: the river, a blackout and a squall. Use every lesson and every teammate.", "accent": "ffa784", "interval": 14.5, "max_active": 5, "weights": [5, 5, 5, 5, 5], "disruptions": [{"at": 286.0, "type": "clear", "duration": 44.0, "text": "The beacon shines • neighbors help finish the watch"}]}
 	]
-	var intervals: Array[float] = [18.5, 16.7, 15.5, 14.3, 14.0, 13.2]
-	var capacities: Array[int] = [4, 5, 5, 6, 6, 6]
+	var intervals: Array[float] = [18.5, 16.7, 15.5, 11.8, 11.4, 10.8]
+	var capacities: Array[int] = [4, 5, 5, 7, 7, 8]
 	
-	var rescue_targets: Array[int] = [60, 72, 78, 90, 92, 100]
+	var rescue_targets: Array[int] = [60, 72, 78, 104, 108, 116]
 	for index: int in range(scenarios.size()):
 		scenarios[index].interval = intervals[index]
 		scenarios[index].max_active = capacities[index]
@@ -146,7 +146,8 @@ static func road_events(index: int) -> Array[Dictionary]:
 	# The call that comes with a closure is led by another department than the
 	# one that clears it, so a closure always involves at least two players.
 	var plans: Array = [
-		[[46.0, "jam", "Crash", "harbor_road", 0, "fire"], [112.0, "road_fire", "Car fire", "marina_road", 1, "police"], [146.0, "debris", "Fallen tree", "east_hill_road", 1, "medical"], [208.0, "accident", "Pile-up", "island_road", 0, "power"]],
+		# Level 1 has no road events (playtest 15.10): it's for learning the basics.
+		[],
 		[[41.0, "accident", "Fender-bender", "ferry_road", 0, "police"], [104.0, "debris", "Bridge works", "quay_road", 0, "fire"], [213.0, "jam", "Festival crowd", "market_street", 1, "medical"], [250.0, "road_fire", "Grass fire", "north_avenue", 2, "power"]],
 		[[49.0, "jam", "Stalled bus", "orchard_road", 1, "fire"], [112.0, "accident", "Bus crash", "seawall_road", 1, "police"], [147.0, "road_fire", "Burning truck", "harbor_road", 3, "medical"], [246.0, "debris", "Flooded underpass", "dock_road", 2, "flood"]],
 		# Lights Out: blackouts already keep Engineering busy, so no debris here.
@@ -353,10 +354,15 @@ static func upgrade_cost(id: String, level: int) -> int:
 	var entry := upgrade_data(id)
 	return int(round(float(entry.get("cost", 0)) * (1.0 + 0.65 * level)))
 
+# Crews per department, the same for every department (playtest 15.10):
+# 3 in the first three levels, 4 in the last three.
+static func crews_per_department(index: int) -> int:
+	return 3 if clampi(index, 0, 5) < 3 else 4
+
 static func responder_profile(kind: String, crew_index: int) -> Dictionary:
 	var profiles: Dictionary = {
-		"fire": [["Bram", "Finn"], ["Kai", "Rosa"], ["Idris", "Piper"]],
-		"medic": [["Elio", "Theo"], ["Noor", "Bea"], ["Ada", "Elias"]],
+		"fire": [["Bram", "Finn"], ["Kai", "Rosa"], ["Idris", "Piper"], ["Hugo", "Maya"]],
+		"medic": [["Elio", "Theo"], ["Noor", "Bea"], ["Ada", "Elias"], ["Lena", "Omar"]],
 		"engineer": [["Tess", "Niko"], ["Olavi", "Zara"], ["Esme", "Otto"], ["Rune", "Lila"]],
 		"police": [["Nova", "Juno"], ["Mika", "Remy"], ["Sol", "Ines"], ["Arlo", "Vera"]]
 	}

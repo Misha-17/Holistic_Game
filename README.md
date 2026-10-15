@@ -40,7 +40,7 @@ The old slow zones (school crossing, harbor deliveries, market queues, bridge wo
 ## Map spread, extra crews, early finish (`andrei-traffic-events`)
 
 - **Stations spread over the town:** each department has a main station and a second station in another district. Fire: north-west centre + south-east. Medical: north centre-east + south-west. Engineering: east + west. Police: south centre + north-east.
-- **Police and Engineering have 4 crews** (Fire and Medical 3; 14 in total), because they also clear road events.
+- **Every department has the same number of crews** (playtest 15.10: every player must carry the same load for the data): **3 each in levels 1–3, 4 each in levels 4–6**. With 4 crews the last three levels have more calls at once (up to 7, 8 in the finale), calls come more often (every 11.8 / 11.4 / 10.8 s on average) and the rescue goals are 104 / 108 / 116. **Level 1 has no road events** (it's for learning the basics). Tested with simulated four-player teams: decent teams win every level with 1–2 stars on levels 4–6; a slow team wins levels 1–4 and usually loses 5–6.
 - **Calls spread over the whole town:** 11 new sites in the south and east (59 in total), and calls pick one of nine districts evenly before picking a site. Over all six shifts with a bot: 40 calls in the north third, 70 in the middle, 52 in the south.
 - **Shifts end early** once the last scheduled call has arrived, every road event has happened, no call is open and no crew is still out ("Every call handled • shift complete"). Calls keep arriving until about 4:45, so this saves up to ~40 s.
 - Disruption texts no longer promise slower travel (only road events slow traffic now).

@@ -231,7 +231,8 @@ func _test_legacy_coordinates() -> void:
 
 func _test_version_3_expansion() -> void:
 	var source := Sim.new()
-	source.start_shift(0)
+	# Level 2: level 1 has no road events since 15.10.
+	source.start_shift(1)
 	source._spawn_incident()
 	source.drain_events()
 	var state: Dictionary = source._raw_state()

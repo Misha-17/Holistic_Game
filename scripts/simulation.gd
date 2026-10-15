@@ -7,8 +7,10 @@ const INCIDENT_KINDS: Array[String] = ["fire", "medical", "flood", "power", "pol
 # Countdowns tick in real seconds, so each call's deadline includes the time the crews need to work on scene.
 const WORK_TIME_ALLOWANCE := 1.35
 const CREWS_PER_DEPARTMENT := 3
-# Police and Engineering also clear road events, so they get one extra crew each (14 crews in total).
-const CREWS_BY_DEPARTMENT := {"fire": 3, "medic": 3, "engineer": 4, "police": 4}
+# Every department has the same number of crews, so every player carries the
+# same load (playtest 15.10): 3 each in levels 1-3, 4 each in levels 4-6.
+# See Campaign.crews_per_department().
+const CREWS_BY_DEPARTMENT := {"fire": 3, "medic": 3, "engineer": 3, "police": 3}
 const ROAD_X: Array[float] = [96.0 / 2752, 352.0 / 2752, 608.0 / 2752, 864.0 / 2752, 1120.0 / 2752, 1376.0 / 2752, 1632.0 / 2752, 1888.0 / 2752, 2144.0 / 2752, 2400.0 / 2752, 2656.0 / 2752]
 const ROAD_Y: Array[float] = [192.0 / 1536, 448.0 / 1536, 704.0 / 1536, 928.0 / 1536, 1184.0 / 1536, 1440.0 / 1536]
 # The new navigable world has larger buildings and streets. Use one uniform
@@ -1112,10 +1114,10 @@ func _fleet_home(kind: String, crew_index: int) -> Vector2:
 	return (base + Vector2(8.0 * (crew_index / 2), 0.0)) / Campaign.MAP_SIZE
 
 func _build_fleet() -> void:
-	var crew_names: Dictionary = {"fire": ["Ember", "Cinder", "Spark"], "medic": ["Clover", "Willow", "Fern"], "engineer": ["Bolt", "Copper", "Wren", "Rivet"], "police": ["Badge", "Patrol", "Siren", "Beacon"]}
+	var crew_names: Dictionary = {"fire": ["Ember", "Cinder", "Spark", "Blaze"], "medic": ["Clover", "Willow", "Fern", "Sage"], "engineer": ["Bolt", "Copper", "Wren", "Rivet"], "police": ["Badge", "Patrol", "Siren", "Beacon"]}
 	var id: int = 0
 	for kind: String in UNIT_KINDS:
-		var count: int = int(CREWS_BY_DEPARTMENT.get(kind, CREWS_PER_DEPARTMENT))
+		var count: int = Campaign.crews_per_department(shift_index)
 		for crew_index: int in range(count):
 			var home: Vector2 = _fleet_home(kind, crew_index)
 			var unit: Dictionary = {"id": id, "name": crew_names[kind][crew_index], "kind": kind, "pos": home, "home": home, "target": -1, "state": "idle", "remaining": 0.0, "fatigue": 0.0, "path": [], "path_index": 0, "heading": Vector2.RIGHT, "jobs": 0, "arrival_at": -1.0, "work_elapsed": 0.0, "work_phase": "idle", "assignment_suitable": true, "inspection_remaining": 0.0, "dispatch_guard_until": 0.0, "divert_after": 0.0, "clear_target": -1}

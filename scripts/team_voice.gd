@@ -11,14 +11,14 @@ const Wav = preload("res://scripts/team_voice_wav.gd")
 const DIRECTORY := "user://research/voice"
 const RATE := 16000
 const FRAMES := 320
+const RECEIVED_VOICE_GAIN := 2.0
 
 var mic_enabled := false
 var recording_enabled := false
 var recording_consent := false
 var recording_active := false
 var recording_path := ""
-var status := "Mic off"
-var push_to_talk := false
+var status := "Voice chat disabled"
 var playback_level := 50
 var peer_playback_gains: Dictionary = {}
 
@@ -120,7 +120,6 @@ func set_mic_enabled(value: bool) -> void:
 		if _capture != null: _capture.clear_buffer()
 		_source.clear()
 		_resample_position = 0.0
-		push_to_talk = false
 		_mixer.remove_peer(_local_peer)
 	mic_enabled = value
 	_publish_state()
@@ -154,17 +153,6 @@ func set_recording_enabled(value: bool) -> void:
 	_refresh_status()
 
 
-func set_push_to_talk(pressed: bool) -> void:
-	var next := pressed and mic_enabled and not _server_only
-	if next and not push_to_talk:
-		# A key press starts fresh capture, not the previous idle microphone tail.
-		if _capture != null: _capture.clear_buffer()
-		_source.clear()
-		_resample_position = 0.0
-	push_to_talk = next
-	_refresh_status()
-
-
 func get_participants() -> Dictionary:
 	return _network.voice_participants.duplicate(true) if _network != null else {}
 
@@ -173,7 +161,7 @@ func get_recording_info() -> Dictionary:
 	return {"active": recording_active, "path": ProjectSettings.globalize_path(recording_path) if recording_path != "" else "",
 		"session_id": session_id, "sample_rate": RATE, "channels": 1,
 		"frames": int(_writer.bytes_written) / 2 if _writer != null else 0,
-		"session_seconds": _session_time, "push_to_talk": push_to_talk}
+		"session_seconds": _session_time, "microphone_enabled": mic_enabled}
 
 
 func shutdown() -> void:
@@ -241,7 +229,7 @@ func _render_audio(until_frame: int = -1) -> void:
 				if int(peer_id) != _local_peer:
 					permissions[peer_id] = bool(_network.voice_participants[peer_id].consent)
 	while _cursor + FRAMES <= now:
-		var mixed: Dictionary = _mixer.render(_cursor, _local_peer, permissions, peer_playback_gains)
+		var mixed: Dictionary = _mixer.render(_cursor, _local_peer, permissions, peer_playback_gains, RECEIVED_VOICE_GAIN)
 		_cursor += FRAMES
 		if _playback != null and _playback.can_push_buffer(FRAMES):
 			_playback.push_buffer(mixed.playback)
@@ -284,15 +272,18 @@ func _capture_microphone() -> void:
 			pcm.encode_s16(index * 2, clampi(roundi((stereo.x + stereo.y) * 0.5 * 32768.0), -32768, 32767))
 		_resample_position += FRAMES * step
 		_sequence += 1
-		if push_to_talk:
-			_mixer.push(_local_peer, _sequence, pcm, _clock_frame())
-			if _network != null: _network.send_voice(_sequence, pcm)
+		_send_microphone_packet(pcm)
 		packets += 1
 	var consumed := int(_resample_position)
 	if consumed > 0:
 		_source = _source.slice(consumed)
 		_resample_position -= consumed
 
+
+func _send_microphone_packet(pcm: PackedByteArray) -> void:
+	if not mic_enabled or _server_only: return
+	_mixer.push(_local_peer, _sequence, pcm, _clock_frame())
+	if _network != null: _network.send_voice(_sequence, pcm)
 
 func _create_microphone() -> bool:
 	if _microphone != null: return true
@@ -364,7 +355,6 @@ func _participants_updated() -> void:
 
 func _disconnected() -> void:
 	stop()
-	set_push_to_talk(false)
 	_mixer.reset(_cursor)
 
 
@@ -390,7 +380,7 @@ func _log(event: String, data: Dictionary) -> void:
 
 
 func _refresh_status() -> void:
-	var text := "Speaking" if push_to_talk else ("Hold V to talk" if mic_enabled else "Mic off")
+	var text := "Voice chat enabled" if mic_enabled else "Voice chat disabled"
 	if recording_active: text += " | Saving team voice"
 	var recorders := 0
 	if _network != null:

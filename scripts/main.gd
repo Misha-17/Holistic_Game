@@ -389,7 +389,7 @@ func _draw_minimap() -> void:
 func _draw_capture_status() -> void:
 	if voice == null: return
 	var rows: Array[String] = []
-	if voice.mic_enabled: rows.append("V · TALK")
+	rows.append("Voice chat enabled" if voice.mic_enabled else "Voice chat disabled")
 	if voice.recording_active: rows.append("● VOICE REC")
 	if research.enabled: rows.append("● MOUSE REC")
 	if network.has_method("voice_recording_peers"):
@@ -726,8 +726,7 @@ func _process(delta: float) -> void:
 	hud.queue_redraw()
 
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_APPLICATION_FOCUS_OUT and voice != null:
-		voice.set_push_to_talk(false)
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
 		_reset_map_gesture()
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		if tutorial_active: _end_tutorial(false,false)
@@ -1262,7 +1261,7 @@ func _draw_settings() -> void:
 		["sfx", "Sound effects", "Calls, crews and rescue cues", sfx_enabled],
 		["motion", "Reduced motion", "Calmer animation", reduced_motion],
 		["research", "Record my mouse", "My in-game movements and clicks, saved here", research_enabled],
-		["mic", "Microphone", "Hold V to talk · headphones recommended", voice.mic_enabled],
+		["mic", "Voice chat", "Open microphone while enabled · headphones recommended", voice.mic_enabled],
 		["voice_consent", "Allow team recording", "Let teammates include my voice in their files", voice.recording_consent],
 		["voice_record", "Save team voice", "One local audio file with consenting players", voice.recording_enabled]
 	]
@@ -1305,7 +1304,7 @@ func _draw_help() -> void:
 		["01", "Send your crews", "Pick a crew, then a call. Or hover a call and press 1–4. Its icons show which departments are still needed."],
 		["02", "Help on scene", "Q scouts a ? call. E supplies an arrived crew. SPACE gives the team a coffee boost."],
 		["03", "Explore the town", "Click or scroll up: go there. Scroll down: whole town. Drag: pan. M: minimap. Right-click: clear."],
-		["04", "Coordinate", "Enable your microphone in Settings, then hold V to talk. Recordings are optional and saved on your computer."]
+		["04", "Coordinate", "Enable Voice chat in Settings to keep your microphone open. Turn it off there to mute. Recordings are optional and local."]
 	]
 	for i in range(tips.size()):
 		var y := 257+i*105
@@ -1456,10 +1455,6 @@ func _input(event: InputEvent) -> void:
 		research.set_clock(sim.elapsed, sim.shift_index)
 		if event is InputEventMouseMotion: research.log_pointer(event.position, event.relative)
 		elif event is InputEventMouseButton: research.log_mouse_button(event)
-	if event is InputEventKey and event.keycode == KEY_V and not event.echo and not ip_input.has_focus():
-		voice.set_push_to_talk(event.pressed)
-		get_viewport().set_input_as_handled()
-		return
 	var over_hud_button: bool = false
 	if screen=="game" and event is InputEventMouse:
 		var p: Vector2 = event.position - global_position
@@ -1656,7 +1651,6 @@ func _action(id: String) -> void:
 			screen="title"
 		"pause":
 			screen="pause"
-			voice.set_push_to_talk(false)
 		"unpause":
 			screen="game"
 		"help":

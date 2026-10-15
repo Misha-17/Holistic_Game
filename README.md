@@ -12,7 +12,7 @@ A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engi
 - With a crew selected, clicking a **?** call does **not** send the crew: it opens the call's card with a **SCOUT** button, and the crew stays selected. 1–4 over a ? call also asks you to scout first.
 - The clicked call's card has a **CLOSE** button. The whole-town view shows the countryside around the town instead of empty side bars. The pause menu is compact. The results screen shows the rescue goal and says exactly why a level gave no (or fewer) stars.
 - **Right-click / Esc:** clear selection.
-- Enable **Microphone** in Settings; hold **V** to talk. Use headphones.
+- Enable **Voice chat** in Settings for an open microphone; turn it off there to mute. No key needs to be held. Use headphones.
 - **Esc:** menu. Solo pauses; a shared shift continues while personal menus are open.
 
 Departments split automatically between connected players. The campaign has six 5:30 shifts. The world is **2752 by 1536** (16:9, so the whole-town view fills the screen), with **69 playable locations**. In Oct 2026 (playtest 15.10) one road column with five call sites was added on each side (west: Westwind Farm, Pinecrest Cabins, Old Mill, Heron Marsh Homes, West Beach Huts; east: Summit Lodge, Quarry Works, Seal Point Homes, Cape Clinic, East Beach Cafe); the old town and its stations moved 224 px east unchanged. To keep the balance, crews drive ~8% faster (130 world px/s), every call gets 2 s more decision time, and the finale's rescue goal is 100. Old saves are converted (map version 5); the network protocol is now 9, so everyone in a co-op game needs this version. A click selects or dispatches on release; dragging across a crew or call never dispatches it. Travel is calibrated to keep the more distant districts practical to reach. Original crew rules, joint calls and campaign remain; the upgrade workshop was removed (Oct 2026).
@@ -97,7 +97,7 @@ Use **Settings** or the in-game **AUDIO** button. All capture switches start off
 
 | Setting | Effect |
 | --- | --- |
-| Microphone | Enables in-game push-to-talk on V. |
+| Voice chat | Keeps the microphone open until disabled, including in menus. Starts off each launch. |
 | Allow team recording | Allows teammates to include your transmitted voice in their local files. |
 | Save team voice | Saves your own voice plus consenting teammates in one mixed WAV per shift on your computer. |
 | Record my mouse | Saves your own in-game movements, every mouse button press/release and wheel input in a local JSONL file. |

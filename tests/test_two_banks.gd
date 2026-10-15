@@ -27,8 +27,8 @@ func _test_layout_only_on_level_3() -> void:
 func _test_flood_detour() -> void:
 	var sim := Sim.new()
 	sim.start_shift(2)
-	var north: Vector2 = Vector2(1152, 704) / Campaign.MAP_SIZE
-	var south: Vector2 = Vector2(1152, 928) / Campaign.MAP_SIZE
+	var north: Vector2 = Vector2(1376, 704) / Campaign.MAP_SIZE
+	var south: Vector2 = Vector2(1376, 928) / Campaign.MAP_SIZE
 	var crew: Dictionary = sim.units[0]
 	var open_route: Dictionary = sim._best_route(crew, north, south)
 	_check(float(open_route.eta) < 4.0, "Town Bridge crossing should be short when open")
@@ -40,7 +40,7 @@ func _test_flood_detour() -> void:
 	for point: Vector2 in flooded_route.path:
 		var pixels: Vector2 = point * Campaign.MAP_SIZE
 		if pixels.y > Campaign.RIVER_TOP and pixels.y < Campaign.RIVER_BOTTOM:
-			_check(absf(pixels.x - 1152.0) > 1.0, "Detour must not use the flooded bridge")
+			_check(absf(pixels.x - 1376.0) > 1.0, "Detour must not use the flooded bridge")
 	# The planned deadline ignores temporary floods (like road events).
 	sim._ignore_road_events = true
 	_check(absf(float(sim._best_route(crew, north, south).eta) - float(open_route.eta)) < 0.01, "Deadlines assume open bridges")
@@ -71,7 +71,7 @@ func _test_full_shift() -> void:
 			var p: Vector2 = unit.pos * Campaign.MAP_SIZE
 			if p.y > Campaign.RIVER_TOP + 4 and p.y < Campaign.RIVER_BOTTOM - 4:
 				var on_bridge := false
-				for column: int in [1, 4, 7]:
+				for column: int in [2, 5, 8]:
 					if absf(p.x - Sim.ROAD_X[column] * Campaign.MAP_SIZE.x) < 2: on_bridge = true
 				if not on_bridge: in_river += 1
 	_check(in_river == 0, "Crews drove through the river %d times" % in_river)

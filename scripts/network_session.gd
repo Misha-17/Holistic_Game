@@ -11,7 +11,7 @@ signal voice_packet_received(peer_id: int, sequence: int, pcm: PackedByteArray)
 signal voice_participants_changed
 
 const PORT := 24680
-const PROTOCOL_VERSION := 8 # Expanded 2304x1536 map v4, deterministic waves and team voice.
+const PROTOCOL_VERSION := 9 # 16:9 map v5 (2752x1536), level hazards, fire/medical road events.
 const UNRELIABLE_SNAPSHOT_LIMIT := 1100 # Leave room for RPC/ENet headers below the path MTU.
 # Every player has the same job: command one (or more) emergency departments.
 # Departments are split automatically by how many people are in the room.

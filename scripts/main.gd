@@ -130,9 +130,9 @@ const MAP_PIXELS := BeaconCampaign.MAP_SIZE * MAP_SCALE
 # (playtest 15.10). Markers are kept out from under them by the occlusions.
 const MAP_VIEW := Rect2(-80, 0, 1600, 900)
 # Smaller minimap, only in the drag view (the whole-town view needs none).
-const MINIMAP_RECT := Rect2(1340, 684, 168, 112)
-const MINIMAP_PANEL := Rect2(1334, 662, 180, 140)
-const MINIMAP_HIDE := Rect2(1452, 665, 58, 18)
+const MINIMAP_RECT := Rect2(1328, 692, 182, 102)
+const MINIMAP_PANEL := Rect2(1322, 670, 194, 130)
+const MINIMAP_HIDE := Rect2(1452, 673, 58, 18)
 const MINIMAP_SHOW := Rect2(1408, 794, 104, 30)
 const DRAG_THRESHOLD := 6.0
 const CREW_BAR := Rect2(-72, 836, 1584, 58)

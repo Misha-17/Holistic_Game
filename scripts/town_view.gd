@@ -9,7 +9,7 @@ const MAP_SIZE := BeaconCampaign.MAP_SIZE
 const PixelArt = preload("res://scripts/pixel_town_art.gd")
 const INK := Color("30474e")
 const CREAM := Color("f1dfb4")
-const ROAD_X := [128.0,384.0,640.0,896.0,1152.0,1408.0,1664.0,1920.0,2176.0]
+const ROAD_X := [96.0,352.0,608.0,864.0,1120.0,1376.0,1632.0,1888.0,2144.0,2400.0,2656.0]
 const ROAD_Y := [192.0,448.0,704.0,928.0,1184.0,1440.0]
 const SITE_TILES := [0,1,2,11,4,0,5,6,7,8,9,10,11,0,12,13,0,11,12,11,15,3,5,11,13,6,7,13,6,5,5,14]
 
@@ -135,10 +135,10 @@ func _paint_static(canvas: Node2D) -> void:
 		if desert: canvas.draw_rect(Rect2(point,Vector2(4,2)),Color("cdb27a") if i%3 else Color("e8d6a6"))
 		else: canvas.draw_rect(Rect2(point,Vector2(3,2)),Color("91af7e") if i%3 else Color("b3ca96"))
 	for district: Dictionary in [
-		{"area":Rect2(1438,214,452,454),"color":Color("a4bf8b")},
-		{"area":Rect2(1950,214,194,454),"color":Color("9bb895")},
-		{"area":Rect2(162,980,710,164),"color":Color("a8c493")},
-		{"area":Rect2(930,1216,1220,190),"color":Color("b0bf96")}
+		{"area":Rect2(1662,214,452,454),"color":Color("a4bf8b")},
+		{"area":Rect2(2174,214,194,454),"color":Color("9bb895")},
+		{"area":Rect2(386,980,710,164),"color":Color("a8c493")},
+		{"area":Rect2(1154,1216,1220,190),"color":Color("b0bf96")}
 	]:
 		canvas.draw_rect(district.area,district.color if not desert else Color(district.color.lerp(Color("d5b980"),0.85)))
 	if desert:
@@ -149,7 +149,7 @@ func _paint_static(canvas: Node2D) -> void:
 		_draw_dune_band(canvas)
 	else:
 		# Harbor basin in the original district, plus an extended southern waterfront.
-		if not str(layout.get("theme","")) == "night": _draw_basin(canvas,Rect2(948,856,428,106))
+		if not str(layout.get("theme","")) == "night": _draw_basin(canvas,Rect2(1172,856,428,106))
 		canvas.draw_rect(Rect2(0,1473,MAP_SIZE.x,MAP_SIZE.y-1473),Color("4f8f98"))
 		canvas.draw_rect(Rect2(0,1484,MAP_SIZE.x,MAP_SIZE.y-1484),Color("367f8e"))
 		for x: int in range(0,int(MAP_SIZE.x),24):
@@ -176,13 +176,13 @@ func _paint_static(canvas: Node2D) -> void:
 						art._lamp(x+side*32,y+20)
 	var sites: Array[Dictionary] = BeaconCampaign.locations()
 	# House groups fill empty city blocks without changing the playable sites.
-	for column: int in range(8):
+	for column: int in range(ROAD_X.size() - 1):
 		for row: int in range(6):
-			var point := Vector2(250+column*256,[120,330,585,815,1075,1330][row])
+			var point := Vector2(ROAD_X[column]+122,[120,330,585,815,1075,1330][row])
 			var free := true
 			for site: Dictionary in sites:
 				if point.distance_to(site.pos*MAP_SIZE)<112: free=false
-			if not free or Rect2(922,820,480,160).has_point(point): continue
+			if not free or Rect2(1146,820,480,160).has_point(point): continue
 			if _in_water(layout, point, 40.0): continue
 			canvas.draw_set_transform(point-Vector2(65,55),0,Vector2.ONE*1.5)
 			art._building(0,0,32,30,(column+row)%3,"house")
@@ -201,13 +201,13 @@ func _paint_static(canvas: Node2D) -> void:
 	# Distinct scenery makes exploring the east and south recognisable.
 	for row: int in range(3):
 		for col: int in range(5):
-			if desert: _cactus(canvas, Vector2(1720+col*32,70+row*27), (row+col)%3)
-			else: art.tree(Vector2(1720+col*32,70+row*27),12.0,(row+col)%3)
-	for x: int in range(100,800,54):
+			if desert: _cactus(canvas, Vector2(1944+col*32,70+row*27), (row+col)%3)
+			else: art.tree(Vector2(1944+col*32,70+row*27),12.0,(row+col)%3)
+	for x: int in range(324,1024,54):
 		if not desert: art._flowerbed(x,1230,30,8)
 		art._bench(x+3,1248)
 	if not desert:
-		for point: Vector2 in [Vector2(978,885),Vector2(1320,887),Vector2(1690,1508),Vector2(490,1509)]:
+		for point: Vector2 in [Vector2(1202,885),Vector2(1544,887),Vector2(1914,1508),Vector2(714,1509),Vector2(250,1510),Vector2(2500,1506)]:
 			if not _in_water(layout, point, 0.0) or layout.has("river"): art._boat(point,1,false)
 	if theme_index == 1:
 		canvas.draw_rect(OUTSKIRTS,Color(0.05,0.08,0.22,0.5 if str(layout.get("theme","")) == "night" else 0.20))
@@ -401,8 +401,8 @@ func _draw_roads(canvas: Node2D, layout: Dictionary = {}) -> void:
 	# Harbor bridge railings.
 	if not str(layout.get("theme","")) in ["", "river"]: return
 	for y: int in [907,949]:
-		canvas.draw_rect(Rect2(948,y,428,3),Color("d7cfac"))
-		for x: int in range(950,1376,14): canvas.draw_rect(Rect2(x,y-1,3,5),Color("8a9680"))
+		canvas.draw_rect(Rect2(1172,y,428,3),Color("d7cfac"))
+		for x: int in range(1174,1600,14): canvas.draw_rect(Rect2(x,y-1,3,5),Color("8a9680"))
 
 func _draw() -> void:
 	_draw_water()

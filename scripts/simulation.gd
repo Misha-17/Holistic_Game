@@ -9,7 +9,7 @@ const WORK_TIME_ALLOWANCE := 1.35
 const CREWS_PER_DEPARTMENT := 3
 # Police and Engineering also clear road events, so they get one extra crew each (14 crews in total).
 const CREWS_BY_DEPARTMENT := {"fire": 3, "medic": 3, "engineer": 4, "police": 4}
-const ROAD_X: Array[float] = [128.0 / 2304, 384.0 / 2304, 640.0 / 2304, 896.0 / 2304, 1152.0 / 2304, 1408.0 / 2304, 1664.0 / 2304, 1920.0 / 2304, 2176.0 / 2304]
+const ROAD_X: Array[float] = [96.0 / 2752, 352.0 / 2752, 608.0 / 2752, 864.0 / 2752, 1120.0 / 2752, 1376.0 / 2752, 1632.0 / 2752, 1888.0 / 2752, 2144.0 / 2752, 2400.0 / 2752, 2656.0 / 2752]
 const ROAD_Y: Array[float] = [192.0 / 1536, 448.0 / 1536, 704.0 / 1536, 928.0 / 1536, 1184.0 / 1536, 1440.0 / 1536]
 # The new navigable world has larger buildings and streets. Use one uniform
 # physical speed in both axes, calibrated to cross the full width in 19.2s.
@@ -905,6 +905,9 @@ func _migrate_world_and_schedule(restored: Dictionary) -> void:
 	var previous_map_version: int = int(restored.get("map_version", 1))
 	if previous_map_version == 3:
 		_expand_version_3_map(restored.has("_shift"))
+		_widen_version_4_map(restored.has("_shift"))
+	elif previous_map_version == 4:
+		_widen_version_4_map(restored.has("_shift"))
 	elif previous_map_version < Campaign.MAP_VERSION:
 		_migrate_map_layout(previous_map_version)
 	if not restored.has("chaos_schedule_version"):
@@ -929,7 +932,7 @@ func _expand_version_3_map(has_saved_shift: bool) -> void:
 	# v4 adds new land east/south of v3. Preserve exact physical positions and
 	# every waypoint; multiplying normalized values by this ratio does not
 	# teleport, stretch or relocate any existing part of the city.
-	var factor: Vector2 = Campaign.MAP_V3_SIZE / Campaign.MAP_SIZE
+	var factor: Vector2 = Campaign.MAP_V3_SIZE / Campaign.MAP_V4_SIZE
 	for incident: Dictionary in incidents:
 		incident.pos *= factor
 	for unit: Dictionary in units:
@@ -945,6 +948,34 @@ func _expand_version_3_map(has_saved_shift: bool) -> void:
 		if event.get("pos") is Vector2: event.pos *= factor
 	if last_action_effect.get("pos") is Vector2: last_action_effect.pos *= factor
 	_emit_research("map_migrated", {"at": elapsed, "from_map_version": 3,
+		"map_version": Campaign.MAP_VERSION, "physical_positions_preserved": true})
+
+# v5 (Oct 2026) adds a road column on each side: the v4 town keeps its exact
+# physical layout, shifted 224 px east inside the wider map.
+func _v5_point(v4_normalized: Vector2) -> Vector2:
+	return (v4_normalized * Campaign.MAP_V4_SIZE + Vector2(Campaign.TOWN_SHIFT_X, 0.0)) / Campaign.MAP_SIZE
+
+func _v5_size(v4_normalized: Vector2) -> Vector2:
+	return v4_normalized * Campaign.MAP_V4_SIZE / Campaign.MAP_SIZE
+
+func _widen_version_4_map(has_saved_shift: bool) -> void:
+	for incident: Dictionary in incidents:
+		incident.pos = _v5_point(incident.pos)
+	for unit: Dictionary in units:
+		unit.pos = _v5_point(unit.pos)
+		unit.home = _v5_point(unit.home)
+		for index: int in range(unit.path.size()): unit.path[index] = _v5_point(unit.path[index])
+	var areas: Array = road_events.duplicate()
+	if has_saved_shift: areas.append_array(_shift.get("traffic", []))
+	for area: Dictionary in areas:
+		if area.has("position"): area.position = _v5_point(area.position)
+		if area.has("size"): area.size = _v5_size(area.size)
+		if area.has("target"): area.target = _v5_point(area.target)
+	for event: Dictionary in events:
+		if event.get("pos") is Vector2: event.pos = _v5_point(event.pos)
+	if last_action_effect.get("pos") is Vector2: last_action_effect.pos = _v5_point(last_action_effect.pos)
+	_edge_cache.clear()
+	_emit_research("map_migrated", {"at": elapsed, "from_map_version": 4,
 		"map_version": Campaign.MAP_VERSION, "physical_positions_preserved": true})
 
 func _migrate_map_layout(previous_version: int) -> void:
@@ -976,7 +1007,7 @@ func _migrate_map_layout(previous_version: int) -> void:
 		elif unit.state in ["travel", "return"]:
 			# Older layouts were relocated into v3; keep that relative placement
 			# inside the original district rather than stretching into new land.
-			unit.pos = Vector2(unit.pos).clamp(Vector2.ZERO, Vector2.ONE) * Campaign.MAP_V3_SIZE / Campaign.MAP_SIZE
+			unit.pos = _v5_point(Vector2(unit.pos).clamp(Vector2.ZERO, Vector2.ONE) * Campaign.MAP_V3_SIZE / Campaign.MAP_V4_SIZE)
 			var destination: Vector2 = call.pos if unit.state == "travel" and not call.is_empty() else unit.home
 			var old_eta: float = float(unit.remaining)
 			var route: Dictionary = _best_route(unit, unit.pos, destination)
@@ -1075,8 +1106,8 @@ func _fleet_home(kind: String, crew_index: int) -> Vector2:
 	# main station and a second station in a different district, so which crew is
 	# closest changes from call to call. Even crew numbers use the main station,
 	# odd ones the second station. Stations sit on junctions that no road event closes.
-	var homes: Dictionary = {"fire": Vector2(640, 448), "medic": Vector2(1408, 448), "engineer": Vector2(1664, 704), "police": Vector2(1152, 928)}
-	var standby: Dictionary = {"fire": Vector2(1664, 1184), "medic": Vector2(640, 1184), "engineer": Vector2(384, 928), "police": Vector2(1920, 192)}
+	var homes: Dictionary = {"fire": Vector2(864, 448), "medic": Vector2(1632, 448), "engineer": Vector2(1888, 704), "police": Vector2(1376, 928)}
+	var standby: Dictionary = {"fire": Vector2(1888, 1184), "medic": Vector2(864, 1184), "engineer": Vector2(608, 928), "police": Vector2(2144, 192)}
 	var base: Vector2 = standby[kind] if crew_index % 2 == 1 else homes[kind]
 	return (base + Vector2(8.0 * (crew_index / 2), 0.0)) / Campaign.MAP_SIZE
 
@@ -1170,7 +1201,8 @@ func _spawn_incident(forced_location: int = -1, forced_kind: String = "") -> voi
 			fastest = minf(fastest, float(route.eta) + handover)
 		arrival_budget = maxf(arrival_budget, fastest)
 	_ignore_road_events = false
-	var decision_slack: float = 18.0 - shift_index * 1.2
+	# +2 s since the town got wider (Oct 2026): more calls sit far from a station.
+	var decision_slack: float = 20.0 - shift_index * 1.2
 	if total_spawned > 2 and _rng.randf() < 0.25: decision_slack *= 0.58
 	var deadline: float = arrival_budget * 1.12 + work_duration * WORK_TIME_ALLOWANCE + decision_slack + _rng.randf_range(-2.0, 4.0) + 7.0 * upgrade_level("radio")
 	if not report_clear: deadline += 4.0
@@ -1442,7 +1474,9 @@ func _send_home(unit: Dictionary) -> void:
 	unit.remaining = float(route.eta)
 
 func _travel_speed(unit: Dictionary, offset: float = 0.0) -> float:
-	var speed: float = 0.1171875 * (1.0 + upgrade_level("engines") * 0.14) # 120 world pixels/second
+	# 130 world pixels/second (was 120): the town got wider on both sides (Oct 2026)
+	# and the average drive to a call should stay about as long as before.
+	var speed: float = 0.126953125 * (1.0 + upgrade_level("engines") * 0.14)
 	speed *= 1.0 - float(unit.fatigue) * 0.12
 	if special_duration > offset and special_duration > 0.0:
 		speed *= 1.5

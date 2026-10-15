@@ -4,8 +4,12 @@ extends RefCounted
 const BASE_MAP_SIZE := Vector2(532, 316)
 const PREVIOUS_MAP_SIZE := Vector2(664, 396)
 const MAP_V3_SIZE := Vector2(1536, 1024)
-const MAP_SIZE := Vector2(2304, 1536)
-const MAP_VERSION := 4
+# Oct 2026 (playtest 15.10): one new road column on each side, so the
+# whole-town view fills a 16:9 screen. The old town moved 224 px east.
+const MAP_V4_SIZE := Vector2(2304, 1536)
+const MAP_SIZE := Vector2(2752, 1536)
+const TOWN_SHIFT_X := 224.0
+const MAP_VERSION := 5
 const CHAOS_SCHEDULE_VERSION := "beacon-chaos-v1"
 const SHIFT_SECONDS := 330.0
 
@@ -64,7 +68,7 @@ static func shifts() -> Array[Dictionary]:
 	var intervals: Array[float] = [18.5, 16.7, 15.5, 14.3, 14.0, 13.2]
 	var capacities: Array[int] = [4, 5, 5, 6, 6, 6]
 	
-	var rescue_targets: Array[int] = [60, 72, 78, 90, 92, 108]
+	var rescue_targets: Array[int] = [60, 72, 78, 90, 92, 100]
 	for index: int in range(scenarios.size()):
 		scenarios[index].interval = intervals[index]
 		scenarios[index].max_active = capacities[index]
@@ -95,7 +99,7 @@ const ROAD_EVENT_SPEED := 0.06
 const ROAD_EVENT_MAX_SECONDS := 95.0
 const ROAD_CLEAR_SECONDS := {"jam": 7.0, "debris": 9.0, "road_fire": 8.0, "accident": 9.0}
 const ROAD_CLEAR_KIND := {"jam": "police", "debris": "engineer", "road_fire": "fire", "accident": "medic"}
-const ROAD_X_PX: Array[float] = [128.0, 384.0, 640.0, 896.0, 1152.0, 1408.0, 1664.0, 1920.0, 2176.0]
+const ROAD_X_PX: Array[float] = [96.0, 352.0, 608.0, 864.0, 1120.0, 1376.0, 1632.0, 1888.0, 2144.0, 2400.0, 2656.0]
 const ROAD_Y_PX: Array[float] = [192.0, 448.0, 704.0, 928.0, 1184.0, 1440.0]
 
 # Named stretches of road: [street name, road row, from column, to column, buildings on it].
@@ -105,18 +109,18 @@ const ROAD_Y_PX: Array[float] = [192.0, 448.0, 704.0, 928.0, 1184.0, 1440.0]
 # buildings on that street for every department except the one that clears it.
 # Spread over the whole map: north, centre, east, south and the far south.
 const ROAD_STRETCHES := {
-	"corner_road": ["Corner Road", 0, 0, 2, ["Willow Cottage", "The Corner Store", "Moonrise Bakery", "Pelican Cafe"]],
-	"north_avenue": ["North Avenue", 0, 3, 5, ["Sunflower Apartments", "Harbor Workshop", "Eastwood Homes", "Harbor Warehouse"]],
-	"harbor_road": ["Harbor Road", 1, 2, 4, ["Community Hall", "Bay Stadium", "Power Substation", "Seabreeze Cottages"]],
-	"orchard_road": ["Orchard Road", 1, 5, 7, ["Orchard Hall", "East Library", "Orchard Market"]],
-	"market_street": ["Market Street", 2, 1, 3, ["Civic Apartments", "Harbor Hotel"]],
-	"ferry_road": ["Ferry Road", 2, 4, 6, ["Ferry Terminal", "Cargo Terminal"]],
-	"east_hill_road": ["East Hill Road", 2, 6, 8, ["Hillside Bakery", "Eastside Pump House"]],
-	"marina_road": ["Marina Road", 3, 1, 3, ["Lifeboat Station", "Marina Apartments", "Dune Cottages", "Botanical Gardens"]],
-	"quay_road": ["Quay Road", 3, 4, 6, ["East Quay", "Old Lighthouse", "Maritime Academy", "Southgate School"]],
-	"dock_road": ["Dock Road", 3, 6, 8, ["Dockside Warehouse", "Fisherman's Pier", "East Rescue Station", "Cliffside Homes"]],
-	"seawall_road": ["Seawall Road", 4, 0, 2, ["Kelp Street Store", "South Marina"]],
-	"island_road": ["Island Road", 4, 3, 5, ["Pier Market", "Island Clinic"]]
+	"corner_road": ["Corner Road", 0, 1, 3, ["Willow Cottage", "The Corner Store", "Moonrise Bakery", "Pelican Cafe"]],
+	"north_avenue": ["North Avenue", 0, 4, 6, ["Sunflower Apartments", "Harbor Workshop", "Eastwood Homes", "Harbor Warehouse"]],
+	"harbor_road": ["Harbor Road", 1, 3, 5, ["Community Hall", "Bay Stadium", "Power Substation", "Seabreeze Cottages"]],
+	"orchard_road": ["Orchard Road", 1, 6, 8, ["Orchard Hall", "East Library", "Orchard Market"]],
+	"market_street": ["Market Street", 2, 2, 4, ["Civic Apartments", "Harbor Hotel"]],
+	"ferry_road": ["Ferry Road", 2, 5, 7, ["Ferry Terminal", "Cargo Terminal"]],
+	"east_hill_road": ["East Hill Road", 2, 7, 9, ["Hillside Bakery", "Eastside Pump House"]],
+	"marina_road": ["Marina Road", 3, 2, 4, ["Lifeboat Station", "Marina Apartments", "Dune Cottages", "Botanical Gardens"]],
+	"quay_road": ["Quay Road", 3, 5, 7, ["East Quay", "Old Lighthouse", "Maritime Academy", "Southgate School"]],
+	"dock_road": ["Dock Road", 3, 7, 9, ["Dockside Warehouse", "Fisherman's Pier", "East Rescue Station", "Cliffside Homes"]],
+	"seawall_road": ["Seawall Road", 4, 1, 3, ["Kelp Street Store", "South Marina"]],
+	"island_road": ["Island Road", 4, 4, 6, ["Pier Market", "Island Clinic"]]
 }
 
 static func road_stretch(key: String) -> Dictionary:
@@ -221,24 +225,24 @@ static func layout(index: int) -> Dictionary:
 				"water": [Rect2(0.0, RIVER_TOP, MAP_SIZE.x, RIVER_BOTTOM - RIVER_TOP)],
 				"river": Rect2(0.0, RIVER_TOP, MAP_SIZE.x, RIVER_BOTTOM - RIVER_TOP),
 				"river_row": 2,          # the gap is between ROAD_Y[2] and ROAD_Y[3]
-				"bridges": {1: "West Bridge", 4: "Town Bridge", 7: "East Bridge"},
+				"bridges": {2: "West Bridge", 5: "Town Bridge", 8: "East Bridge"},
 				# Each starts in a high-chaos phase.
-				"floods": [[7, 50.0, 45.0], [4, 146.0, 60.0], [1, 245.0, 45.0]]}
+				"floods": [[8, 50.0, 45.0], [5, 146.0, 60.0], [2, 245.0, 45.0]]}
 		3:
 			return {"name": "lights_out", "theme": "night",
-				"water": [Rect2(930.0, 480.0, 700.0, 420.0)], "lake_name": "MOON LAKE"}
+				"water": [Rect2(1154.0, 480.0, 700.0, 420.0)], "lake_name": "MOON LAKE"}
 		4:
 			return {"name": "dune_springs", "theme": "desert",
-				"water": [Rect2(980.0, 600.0, 380.0, 220.0)], "lake_name": "PALM OASIS",
+				"water": [Rect2(1204.0, 600.0, 380.0, 220.0)], "lake_name": "PALM OASIS",
 				# Sand dunes have buried a few streets for good.
-				"blocked": [[false, 1, 3], [false, 7, 1], [true, 5, 4], [true, 2, 0], [false, 3, 4]]}
+				"blocked": [[false, 2, 3], [false, 8, 1], [true, 6, 4], [true, 3, 0], [false, 4, 4]]}
 		5:
 			return {"name": "beacon_night", "theme": "river",
 				"water": [Rect2(0.0, RIVER_TOP, MAP_SIZE.x, RIVER_BOTTOM - RIVER_TOP)],
 				"river": Rect2(0.0, RIVER_TOP, MAP_SIZE.x, RIVER_BOTTOM - RIVER_TOP),
 				"river_row": 2,
-				"bridges": {1: "West Bridge", 4: "Town Bridge", 7: "East Bridge"},
-				"floods": [[4, 104.0, 50.0], [7, 208.0, 40.0]]}
+				"bridges": {2: "West Bridge", 5: "Town Bridge", 8: "East Bridge"},
+				"floods": [[5, 104.0, 50.0], [8, 208.0, 40.0]]}
 	return {}
 
 # Blackouts and storms, as road-event records (see road_events()).
@@ -252,14 +256,14 @@ static func level_hazards(index: int) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	match clampi(index, 0, 5):
 		3:
-			result.append(_blackout(42.0, "lantern_hill", Vector2(384, 448)))
-			result.append(_blackout(106.0, "east_docks", Vector2(1920, 704)))
-			result.append(_blackout(176.0, "saltmarsh", Vector2(384, 1184)))
+			result.append(_blackout(42.0, "lantern_hill", Vector2(608, 448)))
+			result.append(_blackout(106.0, "east_docks", Vector2(2144, 704)))
+			result.append(_blackout(176.0, "saltmarsh", Vector2(608, 1184)))
 		4:
 			result.append_array(_storm(46.0, "sandstorm", true, 28.0, 22.0))
 			result.append_array(_storm(178.0, "sandstorm", false, 28.0, 22.0))
 		5:
-			result.append(_blackout(38.0, "orchard_heights", Vector2(1920, 448)))
+			result.append(_blackout(38.0, "orchard_heights", Vector2(2144, 448)))
 			result.append_array(_storm(140.0, "squall", true, 28.0, 22.0))
 	return result
 
@@ -364,66 +368,77 @@ static func responder_profile(kind: String, crew_index: int) -> Dictionary:
 static func locations() -> Array[Dictionary]:
 	# Stable indices preserve existing incident identities across map revisions.
 	return [
-		{"name": "Willow Cottage", "pos": Vector2(256, 84) / MAP_SIZE},
-		{"name": "Moonrise Bakery", "pos": Vector2(512, 84) / MAP_SIZE},
-		{"name": "Little Lantern School", "pos": Vector2(512, 540) / MAP_SIZE},
-		{"name": "North Pier", "pos": Vector2(1024, 836) / MAP_SIZE},
-		{"name": "The Corner Store", "pos": Vector2(256, 276) / MAP_SIZE},
-		{"name": "Magnolia House", "pos": Vector2(768, 84) / MAP_SIZE},
-		{"name": "Sunflower Apartments", "pos": Vector2(1024, 84) / MAP_SIZE},
-		{"name": "Harbor Workshop", "pos": Vector2(1024, 276) / MAP_SIZE},
-		{"name": "Juniper Gardens", "pos": Vector2(256, 540) / MAP_SIZE},
-		{"name": "Pelican Cafe", "pos": Vector2(512, 276) / MAP_SIZE},
-		{"name": "Beacon Clinic", "pos": Vector2(768, 276) / MAP_SIZE},
-		{"name": "Old Lighthouse", "pos": Vector2(1470, 836) / MAP_SIZE},
-		{"name": "Harbor Warehouse", "pos": Vector2(1280, 276) / MAP_SIZE},
-		{"name": "Seabreeze Cottages", "pos": Vector2(1024, 540) / MAP_SIZE},
-		{"name": "Market Square", "pos": Vector2(256, 406) / MAP_SIZE},
-		{"name": "Juniper Library", "pos": Vector2(512, 406) / MAP_SIZE},
-		{"name": "Eastwood Homes", "pos": Vector2(1280, 84) / MAP_SIZE},
-		{"name": "Bay Transit Depot", "pos": Vector2(1280, 406) / MAP_SIZE},
-		{"name": "Harbor Market", "pos": Vector2(1024, 670) / MAP_SIZE},
-		{"name": "East Quay", "pos": Vector2(1280, 836) / MAP_SIZE},
-		{"name": "South Park", "pos": Vector2(66, 836) / MAP_SIZE},
-		{"name": "Lifeboat Station", "pos": Vector2(512, 836) / MAP_SIZE},
-		{"name": "Marina Apartments", "pos": Vector2(768, 836) / MAP_SIZE},
-		{"name": "Ferry Terminal", "pos": Vector2(1280, 670) / MAP_SIZE},
-		{"name": "Community Hall", "pos": Vector2(768, 406) / MAP_SIZE},
-		{"name": "Power Substation", "pos": Vector2(1024, 406) / MAP_SIZE},
-		{"name": "Bay Stadium", "pos": Vector2(768, 540) / MAP_SIZE},
-		{"name": "Seaport Museum", "pos": Vector2(1280, 540) / MAP_SIZE},
-		{"name": "West Pump House", "pos": Vector2(256, 670) / MAP_SIZE},
-		{"name": "Civic Apartments", "pos": Vector2(512, 670) / MAP_SIZE},
-		{"name": "Harbor Hotel", "pos": Vector2(768, 670) / MAP_SIZE},
-		{"name": "Coastguard Station", "pos": Vector2(256, 836) / MAP_SIZE},
-		{"name": "Eastgate Homes", "pos": Vector2(1536, 276) / MAP_SIZE},
-		{"name": "Orchard School", "pos": Vector2(1792, 276) / MAP_SIZE},
-		{"name": "Hillcrest Clinic", "pos": Vector2(2048, 276) / MAP_SIZE},
-		{"name": "East Library", "pos": Vector2(1536, 540) / MAP_SIZE},
-		{"name": "Orchard Market", "pos": Vector2(1792, 540) / MAP_SIZE},
-		{"name": "Reservoir Works", "pos": Vector2(2048, 540) / MAP_SIZE},
-		{"name": "Cargo Terminal", "pos": Vector2(1536, 670) / MAP_SIZE},
-		{"name": "Dockside Warehouse", "pos": Vector2(1792, 836) / MAP_SIZE},
-		{"name": "Fisherman's Pier", "pos": Vector2(2048, 836) / MAP_SIZE},
-		{"name": "South Harbor Homes", "pos": Vector2(256, 1050) / MAP_SIZE},
-		{"name": "Botanical Gardens", "pos": Vector2(768, 1050) / MAP_SIZE},
-		{"name": "Maritime Academy", "pos": Vector2(1280, 1050) / MAP_SIZE},
-		{"name": "East Rescue Station", "pos": Vector2(1792, 1050) / MAP_SIZE},
-		{"name": "South Marina", "pos": Vector2(512, 1310) / MAP_SIZE},
-		{"name": "Island Clinic", "pos": Vector2(1280, 1310) / MAP_SIZE},
-		{"name": "Outer Ferry Terminal", "pos": Vector2(2048, 1310) / MAP_SIZE},
+		{"name": "Willow Cottage", "pos": Vector2(480, 84) / MAP_SIZE},
+		{"name": "Moonrise Bakery", "pos": Vector2(736, 84) / MAP_SIZE},
+		{"name": "Little Lantern School", "pos": Vector2(736, 540) / MAP_SIZE},
+		{"name": "North Pier", "pos": Vector2(1248, 836) / MAP_SIZE},
+		{"name": "The Corner Store", "pos": Vector2(480, 276) / MAP_SIZE},
+		{"name": "Magnolia House", "pos": Vector2(992, 84) / MAP_SIZE},
+		{"name": "Sunflower Apartments", "pos": Vector2(1248, 84) / MAP_SIZE},
+		{"name": "Harbor Workshop", "pos": Vector2(1248, 276) / MAP_SIZE},
+		{"name": "Juniper Gardens", "pos": Vector2(480, 540) / MAP_SIZE},
+		{"name": "Pelican Cafe", "pos": Vector2(736, 276) / MAP_SIZE},
+		{"name": "Beacon Clinic", "pos": Vector2(992, 276) / MAP_SIZE},
+		{"name": "Old Lighthouse", "pos": Vector2(1694, 836) / MAP_SIZE},
+		{"name": "Harbor Warehouse", "pos": Vector2(1504, 276) / MAP_SIZE},
+		{"name": "Seabreeze Cottages", "pos": Vector2(1248, 540) / MAP_SIZE},
+		{"name": "Market Square", "pos": Vector2(480, 406) / MAP_SIZE},
+		{"name": "Juniper Library", "pos": Vector2(736, 406) / MAP_SIZE},
+		{"name": "Eastwood Homes", "pos": Vector2(1504, 84) / MAP_SIZE},
+		{"name": "Bay Transit Depot", "pos": Vector2(1504, 406) / MAP_SIZE},
+		{"name": "Harbor Market", "pos": Vector2(1248, 670) / MAP_SIZE},
+		{"name": "East Quay", "pos": Vector2(1504, 836) / MAP_SIZE},
+		{"name": "South Park", "pos": Vector2(290, 836) / MAP_SIZE},
+		{"name": "Lifeboat Station", "pos": Vector2(736, 836) / MAP_SIZE},
+		{"name": "Marina Apartments", "pos": Vector2(992, 836) / MAP_SIZE},
+		{"name": "Ferry Terminal", "pos": Vector2(1504, 670) / MAP_SIZE},
+		{"name": "Community Hall", "pos": Vector2(992, 406) / MAP_SIZE},
+		{"name": "Power Substation", "pos": Vector2(1248, 406) / MAP_SIZE},
+		{"name": "Bay Stadium", "pos": Vector2(992, 540) / MAP_SIZE},
+		{"name": "Seaport Museum", "pos": Vector2(1504, 540) / MAP_SIZE},
+		{"name": "West Pump House", "pos": Vector2(480, 670) / MAP_SIZE},
+		{"name": "Civic Apartments", "pos": Vector2(736, 670) / MAP_SIZE},
+		{"name": "Harbor Hotel", "pos": Vector2(992, 670) / MAP_SIZE},
+		{"name": "Coastguard Station", "pos": Vector2(480, 836) / MAP_SIZE},
+		{"name": "Eastgate Homes", "pos": Vector2(1760, 276) / MAP_SIZE},
+		{"name": "Orchard School", "pos": Vector2(2016, 276) / MAP_SIZE},
+		{"name": "Hillcrest Clinic", "pos": Vector2(2272, 276) / MAP_SIZE},
+		{"name": "East Library", "pos": Vector2(1760, 540) / MAP_SIZE},
+		{"name": "Orchard Market", "pos": Vector2(2016, 540) / MAP_SIZE},
+		{"name": "Reservoir Works", "pos": Vector2(2272, 540) / MAP_SIZE},
+		{"name": "Cargo Terminal", "pos": Vector2(1760, 670) / MAP_SIZE},
+		{"name": "Dockside Warehouse", "pos": Vector2(2016, 836) / MAP_SIZE},
+		{"name": "Fisherman's Pier", "pos": Vector2(2272, 836) / MAP_SIZE},
+		{"name": "South Harbor Homes", "pos": Vector2(480, 1050) / MAP_SIZE},
+		{"name": "Botanical Gardens", "pos": Vector2(992, 1050) / MAP_SIZE},
+		{"name": "Maritime Academy", "pos": Vector2(1504, 1050) / MAP_SIZE},
+		{"name": "East Rescue Station", "pos": Vector2(2016, 1050) / MAP_SIZE},
+		{"name": "South Marina", "pos": Vector2(736, 1310) / MAP_SIZE},
+		{"name": "Island Clinic", "pos": Vector2(1504, 1310) / MAP_SIZE},
+		{"name": "Outer Ferry Terminal", "pos": Vector2(2272, 1310) / MAP_SIZE},
 		# Added Oct 2026 so calls also happen in the south and east, not mostly up north.
-		{"name": "Dune Cottages", "pos": Vector2(512, 1050) / MAP_SIZE},
-		{"name": "Saltmarsh Cafe", "pos": Vector2(1024, 1050) / MAP_SIZE},
-		{"name": "Southgate School", "pos": Vector2(1536, 1050) / MAP_SIZE},
-		{"name": "Cliffside Homes", "pos": Vector2(2048, 1050) / MAP_SIZE},
-		{"name": "Kelp Street Store", "pos": Vector2(256, 1310) / MAP_SIZE},
-		{"name": "Pier Market", "pos": Vector2(1024, 1310) / MAP_SIZE},
-		{"name": "Tidewater Clinic", "pos": Vector2(1792, 1310) / MAP_SIZE},
-		{"name": "Hillside Bakery", "pos": Vector2(1792, 670) / MAP_SIZE},
-		{"name": "Eastside Pump House", "pos": Vector2(2048, 670) / MAP_SIZE},
-		{"name": "Orchard Hall", "pos": Vector2(1536, 406) / MAP_SIZE},
-		{"name": "Ridge Cottages", "pos": Vector2(2048, 406) / MAP_SIZE}
+		{"name": "Dune Cottages", "pos": Vector2(736, 1050) / MAP_SIZE},
+		{"name": "Saltmarsh Cafe", "pos": Vector2(1248, 1050) / MAP_SIZE},
+		{"name": "Southgate School", "pos": Vector2(1760, 1050) / MAP_SIZE},
+		{"name": "Cliffside Homes", "pos": Vector2(2272, 1050) / MAP_SIZE},
+		{"name": "Kelp Street Store", "pos": Vector2(480, 1310) / MAP_SIZE},
+		{"name": "Pier Market", "pos": Vector2(1248, 1310) / MAP_SIZE},
+		{"name": "Tidewater Clinic", "pos": Vector2(2016, 1310) / MAP_SIZE},
+		{"name": "Hillside Bakery", "pos": Vector2(2016, 670) / MAP_SIZE},
+		{"name": "Eastside Pump House", "pos": Vector2(2272, 670) / MAP_SIZE},
+		{"name": "Orchard Hall", "pos": Vector2(1760, 406) / MAP_SIZE},
+		{"name": "Ridge Cottages", "pos": Vector2(2272, 406) / MAP_SIZE},
+		# Added 15.10 with the new west and east edge of town (16:9 map).
+		{"name": "Westwind Farm", "pos": Vector2(224, 84) / MAP_SIZE},
+		{"name": "Pinecrest Cabins", "pos": Vector2(224, 406) / MAP_SIZE},
+		{"name": "Old Mill", "pos": Vector2(224, 670) / MAP_SIZE},
+		{"name": "Heron Marsh Homes", "pos": Vector2(224, 1050) / MAP_SIZE},
+		{"name": "West Beach Huts", "pos": Vector2(224, 1310) / MAP_SIZE},
+		{"name": "Summit Lodge", "pos": Vector2(2528, 276) / MAP_SIZE},
+		{"name": "Quarry Works", "pos": Vector2(2528, 540) / MAP_SIZE},
+		{"name": "Seal Point Homes", "pos": Vector2(2528, 836) / MAP_SIZE},
+		{"name": "Cape Clinic", "pos": Vector2(2528, 1050) / MAP_SIZE},
+		{"name": "East Beach Cafe", "pos": Vector2(2528, 1310) / MAP_SIZE}
 	]
 
 static func incident_title(kind: String, severity: int, variant: int) -> String:

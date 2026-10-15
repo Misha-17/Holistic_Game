@@ -81,15 +81,20 @@ static func shifts() -> Array[Dictionary]:
 # A road event blocks one stretch of road between two junctions. Other
 # departments crawl through it (or detour); only the department that can deal
 # with it drives through at full speed and can clear it:
-#   jam    -> Police clears it (crash, crowd, stalled traffic)
-#   debris -> Engineering clears it (fallen tree, burst main, flooding)
+#   jam       -> Police clears it (crash, crowd, stalled traffic)
+#   debris    -> Engineering clears it (fallen tree, burst main, flooding)
+#   road_fire -> Fire puts it out (burning car, grass fire by the road)
+#   accident  -> Medical clears it (pile-up: paramedics treat and take away the injured)
+# Since 15.10 (4-player playtest: Police and Engineering had more to do) every
+# department clears roads, about equally often in every level.
 # Clearing takes a crew off calls for a while, so the team has to decide
 # together whether to open the road or take the next call. Events are part of
 # the fixed per-shift script: same time, same place, every session. Most land
 # a few seconds into a high-chaos phase; none starts in a low phase.
 const ROAD_EVENT_SPEED := 0.06
 const ROAD_EVENT_MAX_SECONDS := 95.0
-const ROAD_CLEAR_SECONDS := {"jam": 7.0, "debris": 9.0}
+const ROAD_CLEAR_SECONDS := {"jam": 7.0, "debris": 9.0, "road_fire": 8.0, "accident": 9.0}
+const ROAD_CLEAR_KIND := {"jam": "police", "debris": "engineer", "road_fire": "fire", "accident": "medic"}
 const ROAD_X_PX: Array[float] = [128.0, 384.0, 640.0, 896.0, 1152.0, 1408.0, 1664.0, 1920.0, 2176.0]
 const ROAD_Y_PX: Array[float] = [192.0, 448.0, 704.0, 928.0, 1184.0, 1440.0]
 
@@ -134,14 +139,16 @@ static func location_index(name: String) -> int:
 static func road_events(index: int) -> Array[Dictionary]:
 	# [at, type, title, stretch, which building on it, call kind at that building]
 	# Each shift's closures land in different parts of town.
+	# The call that comes with a closure is led by another department than the
+	# one that clears it, so a closure always involves at least two players.
 	var plans: Array = [
-		[[46.0, "jam", "Crash", "harbor_road", 0, "medical"], [112.0, "jam", "Market crowd", "marina_road", 1, "fire"], [146.0, "debris", "Fallen tree", "east_hill_road", 1, "medical"], [208.0, "debris", "Burst water main", "island_road", 0, "fire"]],
-		[[41.0, "jam", "Fender-bender", "ferry_road", 0, "medical"], [104.0, "debris", "Bridge works", "quay_road", 0, "fire"], [213.0, "jam", "Festival crowd", "market_street", 1, "medical"], [250.0, "debris", "Fallen tree", "north_avenue", 2, "fire"]],
-		[[49.0, "jam", "Stalled bus", "orchard_road", 1, "medical"], [112.0, "debris", "Flooded underpass", "seawall_road", 1, "fire"], [147.0, "debris", "Burst water main", "harbor_road", 3, "medical"], [246.0, "jam", "Crash", "dock_road", 2, "fire"]],
-		# Lights Out: blackouts already keep Engineering busy, so its closures are Police jams.
-		[[60.0, "jam", "Crash", "corner_road", 1, "medical"], [140.0, "jam", "Dark junction", "marina_road", 2, "fire"], [250.0, "jam", "Stalled bus", "east_hill_road", 0, "medical"]],
-		[[60.0, "jam", "Stalled truck", "quay_road", 3, "medical"], [112.0, "debris", "Sand drift", "corner_road", 0, "fire"], [186.0, "jam", "Crash", "north_avenue", 1, "medical"], [252.0, "debris", "Sand drift", "seawall_road", 0, "fire"]],
-		[[110.0, "jam", "Crash", "dock_road", 2, "medical"], [150.0, "debris", "Fallen tree", "corner_road", 2, "fire"], [236.0, "jam", "Crowd at the market", "market_street", 0, "fire"]]
+		[[46.0, "jam", "Crash", "harbor_road", 0, "fire"], [112.0, "road_fire", "Car fire", "marina_road", 1, "police"], [146.0, "debris", "Fallen tree", "east_hill_road", 1, "medical"], [208.0, "accident", "Pile-up", "island_road", 0, "power"]],
+		[[41.0, "accident", "Fender-bender", "ferry_road", 0, "police"], [104.0, "debris", "Bridge works", "quay_road", 0, "fire"], [213.0, "jam", "Festival crowd", "market_street", 1, "medical"], [250.0, "road_fire", "Grass fire", "north_avenue", 2, "power"]],
+		[[49.0, "jam", "Stalled bus", "orchard_road", 1, "fire"], [112.0, "accident", "Bus crash", "seawall_road", 1, "police"], [147.0, "road_fire", "Burning truck", "harbor_road", 3, "medical"], [246.0, "debris", "Flooded underpass", "dock_road", 2, "flood"]],
+		# Lights Out: blackouts already keep Engineering busy, so no debris here.
+		[[60.0, "road_fire", "Car fire", "corner_road", 1, "medical"], [140.0, "jam", "Dark junction", "marina_road", 2, "fire"], [150.0, "accident", "Crash", "harbor_road", 0, "fire"], [200.0, "accident", "Crash in the dark", "dock_road", 2, "police"], [250.0, "road_fire", "Brush fire", "east_hill_road", 0, "police"]],
+		[[60.0, "jam", "Stalled truck", "quay_road", 3, "medical"], [112.0, "road_fire", "Brush fire", "corner_road", 0, "police"], [186.0, "accident", "Pile-up in the dust", "north_avenue", 1, "fire"], [252.0, "debris", "Sand drift", "seawall_road", 0, "medical"]],
+		[[110.0, "jam", "Crash", "dock_road", 2, "medical"], [150.0, "road_fire", "Car fire", "corner_road", 2, "police"], [236.0, "accident", "Crash", "market_street", 0, "fire"]]
 	]
 	var result: Array[Dictionary] = []
 	var number: int = 1
@@ -149,7 +156,7 @@ static func road_events(index: int) -> Array[Dictionary]:
 		var stretch: Dictionary = road_stretch(str(plan[3]))
 		var type: String = str(plan[1])
 		result.append({"id": number, "at": float(plan[0]), "duration": ROAD_EVENT_MAX_SECONDS,
-			"type": type, "clear_kind": "police" if type == "jam" else "engineer",
+			"type": type, "clear_kind": str(ROAD_CLEAR_KIND[type]),
 			"clear_time": float(ROAD_CLEAR_SECONDS[type]),
 			"name": "%s on %s" % [str(plan[2]), stretch.street], "street": stretch.street,
 			"position": stretch.position, "size": stretch.size, "speed_factor": ROAD_EVENT_SPEED,
@@ -248,7 +255,6 @@ static func level_hazards(index: int) -> Array[Dictionary]:
 			result.append(_blackout(42.0, "lantern_hill", Vector2(384, 448)))
 			result.append(_blackout(106.0, "east_docks", Vector2(1920, 704)))
 			result.append(_blackout(176.0, "saltmarsh", Vector2(384, 1184)))
-			result.append(_blackout(244.0, "north_end", Vector2(1152, 192)))
 		4:
 			result.append_array(_storm(46.0, "sandstorm", true, 28.0, 22.0))
 			result.append_array(_storm(178.0, "sandstorm", false, 28.0, 22.0))

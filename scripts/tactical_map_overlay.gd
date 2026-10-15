@@ -373,7 +373,7 @@ func _layout_roads() -> void:
 			_layout_hazard(road, area, zone)
 			continue
 		if not road.is_empty():
-			var who: String = "POLICE" if kind == "police" else "ENGINEERS"
+			var who: String = str({"police": "POLICE", "engineer": "ENGINEERS", "fire": "FIRE", "medic": "MEDICS"}.get(kind, kind.to_upper()))
 			var crew: Dictionary = _unit(int(road.assigned_unit))
 			if str(road.status) == "clearing":
 				label = "%s CLEARING %s" % [str(crew.get("crew_name", "CREW")).to_upper(), str(road.street).to_upper()]
@@ -621,9 +621,12 @@ func _draw_roads() -> void:
 		var tint: Color = ROLE_COLOR.get(kind, GOLD)
 		var hovered: bool = int(road.id) == hovered_road_id
 		var invites: bool = int(road.assigned_unit) < 0 and _unit(selected_unit_id).get("kind", "") == kind
-		draw_rect(rect, Color(.55, .12, .10, .55))
+		# A burning car or a pile-up is drawn on the road itself (town_view), so
+		# those closures get lighter stripes that leave the scene visible.
+		var scene: bool = str(road.get("type", "")) in ["road_fire", "accident"]
+		draw_rect(rect, Color(.55, .12, .10, .22 if scene else .55))
 		# Hazard stripes in the colour of the department that can clear it.
-		var stripe: Color = Color(tint, .85)
+		var stripe: Color = Color(tint, .38 if scene else .85)
 		var step: int = 22
 		var horizontal: bool = rect.size.x >= rect.size.y
 		if horizontal:
@@ -636,7 +639,7 @@ func _draw_roads() -> void:
 					from = from.lerp(to, (rect.position.x - from.x) / (to.x - from.x))
 				if to.x > rect.end.x:
 					to = to.lerp(from, (to.x - rect.end.x) / (to.x - from.x))
-				if to.x > from.x: draw_line(from, to, stripe, 6, false)
+				if to.x > from.x: draw_line(from, to, stripe, 4 if scene else 6, false)
 		else:
 			for y in range(int(rect.position.y) - int(rect.size.x), int(rect.end.y), step):
 				var from := Vector2(rect.position.x, y + rect.size.x)

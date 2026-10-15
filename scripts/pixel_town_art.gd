@@ -95,7 +95,7 @@ func tree(foot: Vector2, size: float, variant: int) -> void:
 func vehicle(point: Vector2, kind: String, heading: Vector2, active: bool, time: float, scale: float = 2.0) -> void:
 	elapsed = time
 	_painter.draw_set_transform(point.round(),0,Vector2.ONE*scale)
-	var color: Color = {"fire":Color("cc8066"),"medic":Color("e9e2c7"),"engineer":Color("d9b875"),"police":Color("6b84a0")}.get(kind,CREAM)
+	var color: Color = {"fire":Color("cc8066"),"medic":Color("e9e2c7"),"engineer":Color("d9b875"),"police":Color("6b84a0"),"wreck":Color("8d8a86")}.get(kind,CREAM)
 	var vertical := absf(heading.y)>absf(heading.x)
 	_car(Vector2.ZERO,color,vertical,active,1 if kind=="medic" else 0)
 	if kind == "fire" and not vertical:

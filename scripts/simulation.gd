@@ -579,7 +579,7 @@ func _tick_road_events() -> void:
 				event.linked_incident = int(incidents.back().id)
 			else:
 				_emit_research("road_call_capacity_skipped", {"road_event_id": int(event.id), "shift": shift_index, "at": elapsed, "active_calls": active_count(), "site_busy": site_busy})
-		var who: String = "Police" if event.clear_kind == "police" else "Engineering"
+		var who: String = _department_title(str(event.clear_kind))
 		if bool(event.get("hazard", false)):
 			_emit("hazard_started", _hazard_text(event), {"road_event_id": event.id, "pos": road_event_center(event), "clear_kind": event.clear_kind, "hazard_type": event.type})
 		else:
@@ -608,7 +608,11 @@ func _road_event_record(event: Dictionary) -> Dictionary:
 		"clear_started_at": float(event.clear_started_at), "ended_at": float(event.ended_at),
 		"seconds_open": (float(event.ended_at) if float(event.ended_at) >= 0.0 else elapsed) - float(event.started_at)}
 
-# Send a Police crew to a jam or an Engineering crew to debris.
+func _department_title(kind: String) -> String:
+	return str({"police": "Police", "engineer": "Engineering", "fire": "Fire", "medic": "Medical"}.get(kind, kind.capitalize()))
+
+# Send the department that can deal with it: Police to a jam, Engineering to
+# debris, Fire to a road fire, Medical to an accident.
 func clear_road(event_id: int, unit_id: int) -> bool:
 	if not running:
 		return false
@@ -623,7 +627,7 @@ func clear_road(event_id: int, unit_id: int) -> bool:
 		return false
 	var crew: Dictionary = get_unit(unit_id)
 	if crew.is_empty() or str(crew.kind) != str(event.clear_kind):
-		_emit("action_denied", "Only %s can clear %s" % ["Police" if event.clear_kind == "police" else "Engineering", event.street])
+		_emit("action_denied", "Only %s can clear %s" % [_department_title(str(event.clear_kind)), event.street])
 		return false
 	if not _unit_available(crew):
 		_emit("action_denied", "%s is busy" % crew.get("crew_name", crew.name))

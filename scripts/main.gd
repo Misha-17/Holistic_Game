@@ -979,7 +979,7 @@ func _pick_department(kind: String) -> void:
 		return
 	_select_unit(best)
 
-# Road events: pick a Police crew (jam) or an Engineering crew (debris), then click the road.
+# Road events: pick a crew of the department shown on the road (POL jam, ENG debris, FIRE road fire, MED accident), then click the road.
 func _select_road_event(road_id: int) -> void:
 	if screen != "game": return
 	var road: Dictionary = sim.get_road_event(road_id)

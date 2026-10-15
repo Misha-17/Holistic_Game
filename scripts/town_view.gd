@@ -367,6 +367,7 @@ func _draw() -> void:
 	_draw_water()
 	if sim != null and not title_mode:
 		_draw_level_hazards()
+		_draw_road_scenes()
 	if sim != null:
 		_draw_routes()
 		for incident: Dictionary in sim.incidents:
@@ -545,6 +546,38 @@ func _draw_level_hazards() -> void:
 					for i: int in range(14):
 						var c := Vector2(area.position.x + fposmod(i * 173.0 + drift * 0.5, area.size.x), fposmod(i * 211.0, MAP_SIZE.y))
 						draw_circle(c, 46.0 + (i % 3) * 16.0, Color(0.93, 0.76, 0.50, 0.20 * fade))
+
+# What blocks the road, drawn on the street itself: a burning car (Fire puts
+# it out) or a pile-up with injured people (Medical takes them away).
+func _draw_road_scenes() -> void:
+	for event: Dictionary in sim.active_road_events():
+		var type: String = str(event.type)
+		if type not in ["road_fire", "accident"]: continue
+		var area := Rect2(Vector2(event.position) * MAP_SIZE, Vector2(event.size) * MAP_SIZE)
+		var center: Vector2 = area.get_center()
+		var left: float = 1.0 - clampf(float(event.get("clear_progress", 0.0)), 0.0, 1.0)
+		if type == "road_fire":
+			_draw_vehicle(center + Vector2(-120, 4), "wreck", Vector2(1, 0.15).normalized(), false, 0)
+			for offset: Vector2 in [Vector2(-120, -6), Vector2(-170, 2), Vector2(-75, -2), Vector2(80, 2), Vector2(130, -4), Vector2(175, 3)]:
+				Responders.draw_flames(self, center + offset, 0.75 * left, 1.0 - left, elapsed + offset.x * 0.01, 1.8)
+			if not reduced_motion:
+				for i: int in range(6):
+					var rise: float = fposmod(elapsed * 0.6 + i / 6.0, 1.0)
+					draw_circle(center + Vector2(-120 + sin(i * 2.1) * 10.0, -24 - rise * 70.0), 8.0 + rise * 14.0, Color(0.25, 0.25, 0.27, 0.35 * (1.0 - rise) * left))
+		else:
+			_draw_vehicle(center + Vector2(-130, -4), "wreck", Vector2(1, 0.45).normalized(), false, 0)
+			_draw_vehicle(center + Vector2(-86, 6), "wreck", Vector2(-1, 0.6).normalized(), false, 1)
+			# Warning triangle and the injured waiting for the medics.
+			var t: Vector2 = center + Vector2(-185, 8)
+			draw_colored_polygon(PackedVector2Array([t + Vector2(-9, 8), t + Vector2(0, -9), t + Vector2(9, 8)]), Color("e8573f"))
+			draw_colored_polygon(PackedVector2Array([t + Vector2(-5, 5), t + Vector2(0, -4), t + Vector2(5, 5)]), Color("f4e9d2"))
+			var people: int = ceili(3.0 * left)
+			for i: int in range(people):
+				var p: Vector2 = center + Vector2(80 + i * 22, -10 + (i % 2) * 16)
+				draw_circle(p + Vector2(0, -8), 4.0, Color("e9c39b"))
+				draw_rect(Rect2(p + Vector2(-4, -4), Vector2(8, 10)), Color("6b84a0") if i % 2 else Color("b56a4f"))
+			if not reduced_motion and fposmod(elapsed * 2.0, 1.0) < 0.5:
+				draw_circle(center + Vector2(-130, -20), 4.0, Color(1.0, 0.75, 0.2, 0.9))
 
 func _draw_weather() -> void:
 	if theme_index == 3 and not reduced_motion:

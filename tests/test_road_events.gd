@@ -1,7 +1,8 @@
 extends SceneTree
 
-# Road events (traffic rework): scripted closures that only Police (jams) or
-# Engineering (debris) can drive through and clear.
+# Road events (traffic rework): scripted closures that only one department can
+# drive through and clear: Police (jams), Engineering (debris), Fire (road
+# fires) and Medical (accidents).
 # Run: godot --headless --path . -s tests/test_road_events.gd
 const Sim = preload("res://scripts/simulation.gd")
 const Campaign = preload("res://scripts/campaign.gd")
@@ -13,6 +14,7 @@ func _initialize() -> void:
 	_test_wrong_department_and_expiry()
 	_test_network_snapshot()
 	_test_deadlines_assume_open_roads()
+	_test_fire_and_medic_events()
 	_report_effect()
 	if failures.is_empty():
 		print("PASS: road events are scripted, block other departments, clear, expire, survive snapshots")
@@ -45,7 +47,8 @@ func _test_schedule() -> void:
 			var area := Rect2(Vector2(event.position) * Campaign.MAP_SIZE, Vector2(event.size) * Campaign.MAP_SIZE)
 			_check(Rect2(Vector2.ZERO, Campaign.MAP_SIZE).encloses(area), "%s lies outside the map" % event.name)
 		_check(closures >= 3, "Shift %d should have at least three road closures" % (shift + 1))
-		_check(kinds.has("police") and kinds.has("engineer"), "Shift %d needs work for both Police and Engineering" % (shift + 1))
+		for department: String in ["police", "engineer", "fire", "medic"]:
+			_check(kinds.has(department), "Shift %d needs road work for %s" % [shift + 1, department])
 	# Same plan every time.
 	_check(str(Campaign.shift_data(0).traffic) == str(Campaign.shift_data(0).traffic), "Road events must be deterministic")
 
@@ -140,6 +143,32 @@ func _test_deadlines_assume_open_roads() -> void:
 	a._spawn_incident()
 	b._spawn_incident()
 	_check(absf(float(a.incidents.back().deadline) - float(b.incidents.back().deadline)) < 0.001, "A closed road must not quietly lengthen new deadlines")
+
+func _first_of(sim: RescueSimulation, type: String) -> Dictionary:
+	while sim.elapsed < 330.0:
+		for event: Dictionary in sim.active_road_events():
+			if str(event.type) == type: return event
+		sim.tick(0.1)
+	return {}
+
+# 15.10 playtest: Fire and Medical get road work too.
+func _test_fire_and_medic_events() -> void:
+	for pair: Array in [["road_fire", "fire", "Fire puts out the burning car"], ["accident", "medic", "Medics clear the pile-up"]]:
+		var sim := _quiet_shift(0)
+		var event: Dictionary = _first_of(sim, str(pair[0]))
+		_check(not event.is_empty(), "Shift 1 has a %s" % pair[0])
+		if event.is_empty(): continue
+		_check(str(event.clear_kind) == str(pair[1]), "%s is cleared by %s" % [pair[0], pair[1]])
+		var center: Vector2 = sim.road_event_center(event)
+		var police: Dictionary = _crew(sim, "police")
+		var specialist: Dictionary = _crew(sim, str(pair[1]))
+		_check(float(sim._best_route(specialist, specialist.pos, center).eta) < float(sim._best_route(police, police.pos, center).eta) + 30.0, "%s drives through its own event" % pair[1])
+		_check(not sim.clear_road(int(event.id), int(police.id)), "Police cannot clear a %s" % pair[0])
+		_check(sim.clear_road(int(event.id), int(specialist.id)), str(pair[2]))
+		var started: float = sim.elapsed
+		while str(sim.get_road_event(int(event.id)).status) in ["active", "clearing"] and sim.elapsed < started + 60.0:
+			sim.tick(0.1)
+		_check(str(sim.get_road_event(int(event.id)).status) == "cleared", "%s gets cleared" % pair[0])
 
 # Not a pass/fail check: how much road events matter for a bot that reacts like a person.
 func _report_effect() -> void:

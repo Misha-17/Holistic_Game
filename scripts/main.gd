@@ -85,6 +85,7 @@ var show_help := false
 var result_saved := false
 var hovered_button := ""
 var ip_input: LineEdit
+var name_input: LineEdit
 var rating := 5
 
 var orders: Dictionary = {}
@@ -535,6 +536,15 @@ func _ready() -> void:
 	# Must sit above the HUD layer (z 10), which draws the lobby panel.
 	ip_input.z_index = 20
 	add_child(ip_input)
+	name_input = LineEdit.new()
+	name_input.position = Vector2(452, 463)
+	name_input.size = Vector2(536, 52)
+	name_input.placeholder_text = "Enter your name"
+	name_input.tooltip_text = "Up to 20 characters: A-Z, numbers, spaces, hyphens and apostrophes. Leave blank to use Player 1, Player 2, etc."
+	name_input.max_length = NetworkSession.MAX_PLAYER_NAME_LENGTH
+	name_input.add_theme_font_size_override("font_size", 20)
+	name_input.z_index = 20
+	add_child(name_input)
 	_load_save()
 	audio.set_music_enabled(music_enabled)
 	audio.set_sfx_enabled(sfx_enabled)
@@ -699,7 +709,7 @@ func _process(delta: float) -> void:
 		for kind in DEPARTMENTS:
 			if not network.owns(kind):
 				var owner: int = network.owner_of(kind)
-				owners[kind] = "P%d" % (int(network.roster.get(owner, 0)) + 1) if owner > 0 else "?"
+				owners[kind] = _short(network.player_label(owner), 10) if owner > 0 else "?"
 	tactical_map.owner_labels = owners
 	if tutorial_active:
 		var planned_crew: Dictionary=sim.get_unit(selected_unit)
@@ -751,6 +761,7 @@ func _update_visibility() -> void:
 	tactical_map.visible = screen=="game"
 	tutorial_overlay.visible = tutorial_active and screen=="game"
 	ip_input.visible = screen == "lobby" and not network.active
+	name_input.visible = ip_input.visible
 	sound_settings.visible = screen == "settings" and settings_tab == "sounds"
 
 func _draw_all(canvas: CanvasItem) -> void:
@@ -1192,26 +1203,27 @@ func _draw_campaign() -> void:
 
 func _draw_lobby() -> void:
 	_draw_page_header("Play together", "UP TO FOUR PLAYERS")
-	_panel(Rect2(400,240,640,486) if network.active else Rect2(400,240,640,452),PANEL)
+	_panel(Rect2(400,240,640,486) if network.active else Rect2(400,240,640,500),PANEL)
 	if not network.active:
 		_text("Meet at the station",Vector2(451,293),28,CREAM)
 		_text("Join a shared server, or host on your network.",Vector2(452,331),16,MUTED)
 		_text("SERVER ADDRESS",Vector2(452,370),12,TEAL)
-		_button("host","HOST A ROOM",Rect2(452,456,536,54),TEAL,INK)
-		_button("join","JOIN THIS ADDRESS",Rect2(452,524,536,54),PANEL_LIGHT,CREAM)
-		_wrap("Command your departments. Coordinate with the team to cover every call.",Vector2(452,620),526,16,MUTED,24)
+		_text("YOUR NAME (A-Z, 0-9, UP TO 20 CHARACTERS)",Vector2(452,454),12,TEAL)
+		_button("host","HOST A ROOM",Rect2(452,537,536,54),TEAL,INK)
+		_button("join","JOIN THIS ADDRESS",Rect2(452,605,536,54),PANEL_LIGHT,CREAM)
+		_wrap("Command your departments. Coordinate with the team to cover every call.",Vector2(452,696),526,16,MUTED,24)
 	else:
 		_text("%d / 4 CREW CONNECTED" % network.roster.size(),Vector2(452,291),21,TEAL)
 		_text(network.status,Vector2(452,326),15,MUTED)
 		var row := 0
 		for peer_id in network.roster:
 			var r: int = int(network.roster[peer_id])
-			_text("%s%s" %[network.player_label(int(peer_id)), "  (you)" if int(peer_id)==multiplayer.get_unique_id() else ""],Vector2(452,373+row*42),19,CREAM)
-			var dx: float = 640
+			_text("%s%s" %[_short(network.player_label(int(peer_id)),16), "  (you)" if int(peer_id)==multiplayer.get_unique_id() else ""],Vector2(452,373+row*42),17,CREAM)
+			var dx: float = 720
 			for kind in network.departments_for(int(peer_id)):
 				_symbol(kind,Vector2(dx,367+row*42),KIND_COLOR[kind],0.5)
 				_text(str(KIND_SHORT[kind]),Vector2(dx+12,373+row*42),15,KIND_COLOR[kind])
-				dx += 74
+				dx += 66
 			row += 1
 		if network.hosting:
 			_draw_level_picker(Vector2(452,514))
@@ -1514,7 +1526,7 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 	if event is InputEventKey and event.pressed and not event.echo:
-		if ip_input.has_focus():
+		if ip_input.has_focus() or name_input.has_focus():
 			if event.keycode == KEY_ENTER: _action("join")
 			return
 		match event.keycode:
@@ -1633,8 +1645,16 @@ func _action(id: String) -> void:
 			voice.shutdown()
 			get_tree().quit()
 		"co_op": screen="lobby"
-		"host": network.host(); _toast(network.status)
+		"host":
+			network.local_player_name = NetworkSession.clean_player_name(name_input.text)
+			name_input.text = network.local_player_name
+			name_input.release_focus()
+			network.host()
+			_toast(network.status)
 		"join":
+			network.local_player_name = NetworkSession.clean_player_name(name_input.text)
+			name_input.text = network.local_player_name
+			name_input.release_focus()
 			guest_progress=sim.snapshot()
 			network.join(ip_input.text)
 			ip_input.release_focus()

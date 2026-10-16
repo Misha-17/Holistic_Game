@@ -33,7 +33,8 @@ func run() -> void:
 	game.audio.set_sfx_enabled(false)
 	game.research_enabled = true
 	game._begin_shift(0)
-	game.map_zoom = 3.0
+	check(game._is_map_overview(), "A level starts on the whole town")
+	game.map_zoom = game._drag_zoom()
 	game._center_map(Vector2(.5, .5))
 	game.sim._spawn_incident()
 	var call: Dictionary = game.sim.incidents.back()
@@ -67,8 +68,8 @@ func run() -> void:
 	check(game.sim.successful_dispatches == 1, "A released click dispatches exactly once")
 	button(point, false)
 	check(game.sim.successful_dispatches == 1, "An unmatched mouse release never dispatches")
-	# Dragging a mobile crew also suppresses selection; the gesture belongs to
-	# the camera until the button is released.
+	# Playtest 15.10: a crew is picked on press, so a press that turns into a
+	# drag still selects it (and still pans the town).
 	var fire: Dictionary = game.sim.units[0]
 	fire.state = "return"
 	fire.pos = Vector2(.56, .62)
@@ -78,11 +79,12 @@ func run() -> void:
 	button(point, true)
 	motion(point + Vector2(24, 12), Vector2(24, 12))
 	button(point + Vector2(24, 12), false)
-	check(game.selected_unit == -1, "Dragging a crew never selects it")
+	check(game.selected_unit == int(fire.id), "Pressing a crew selects it even when the press becomes a drag")
+	game.selected_unit = -1
 	# A marker outside the viewport belongs on the minimap, never clamped onto
 	# an unrelated street along the visible viewport edge.
 	call.pos = Vector2(.01, .01)
-	game.map_zoom = 3.0
+	game.map_zoom = game._drag_zoom()
 	game._center_map(Vector2(.9, .9))
 	game.tactical_map.refresh()
 	check(not game.tactical_map.call_hit_rect(int(call.id)).has_area(), "Offscreen calls are not clickable edge ghosts")
@@ -96,14 +98,21 @@ func run() -> void:
 	check(game._map_rect().size.x <= game.MAP_VIEW.size.x + 1 and game._map_rect().size.y <= game.MAP_VIEW.size.y + 1, "Overview contains every world edge")
 	game._toggle_overview()
 	check(is_equal_approx(game.map_zoom, old_zoom) and game._map_center().distance_to(old_center) < .002, "Overview returns to previous camera")
-	# Zoom stays anchored to the pointer away from map bounds.
-	game.map_zoom = maxf(game._fit_map_zoom(), 2.5)
-	game._center_map(Vector2(.5, .5))
+	# Only two views: the wheel switches between them, never zooms further.
+	game._zoom_map(1, Vector2(690, 390))
+	check(is_equal_approx(game.map_zoom, game._drag_zoom()), "Wheel up in the drag view does not zoom further in")
+	game.selected = int(call.id)
+	game._zoom_map(-1, Vector2(690, 390))
+	check(game._is_map_overview(), "Wheel down shows the whole town")
+	check(game.selected == -1, "Switching to the whole town closes the open call card")
+	game._zoom_map(-1, Vector2(690, 390))
+	check(game._is_map_overview(), "Wheel down on the whole town stays there")
 	var anchor := Vector2(690, 390)
 	var world_before: Vector2 = (anchor - game._map_rect().position) / game._map_rect().size
 	game._zoom_map(1, anchor)
+	check(is_equal_approx(game.map_zoom, game._drag_zoom()), "Wheel up on the whole town opens the drag view")
 	var world_after: Vector2 = (anchor - game._map_rect().position) / game._map_rect().size
-	check(world_before.distance_to(world_after) < .002, "Wheel zoom preserves cursor world anchor")
+	check(world_before.distance_to(world_after) < .02, "The drag view opens where the cursor was")
 	initial_pan = game.map_pan
 	button(Vector2(700, 500), true, MOUSE_BUTTON_MIDDLE)
 	motion(Vector2(740, 520), Vector2(40, 20))
@@ -127,7 +136,7 @@ func run() -> void:
 	game.queue_free()
 	await process_frame
 	await process_frame
-	if failures.is_empty(): print("PASS: drag-versus-click, minimap, overview, zoom anchor, HUD input and local recording")
+	if failures.is_empty(): print("PASS: drag-versus-click, press-to-select crews, minimap, two views (whole town / drag), HUD input and local recording")
 	else:
 		for failure in failures: printerr("FAIL: ", failure)
 	quit(0 if failures.is_empty() else 1)

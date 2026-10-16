@@ -25,16 +25,18 @@ func _check(condition: bool, message: String) -> void:
 	if not condition: failures.append(message)
 
 func _test_map_and_routes() -> void:
-	_check(Campaign.MAP_SIZE == Vector2(2304, 1536), "Navigable world must cover 2304x1536 logical pixels")
+	_check(Campaign.MAP_SIZE == Vector2(2752, 1536), "Navigable world must cover 2752x1536 logical pixels (16:9)")
 	_check(Campaign.MAP_SIZE.x * Campaign.MAP_SIZE.y > 5.0 * 664 * 396, "World must be substantially larger than the earlier expansion")
 	var sites: Array[Dictionary] = Campaign.locations()
-	_check(sites.size() == 48, "Expanded town needs 48 playable sites")
+	# 48 sites from the map expansion + 11 southern/eastern sites added with the station spread
+	# + 10 on the new west/east edge (16:9 map, 15.10).
+	_check(sites.size() == 69, "Expanded town needs 69 playable sites")
 	var sim := Sim.new()
 	sim.start_shift(0)
 	var outer_sites: int = 0
 	for site: Dictionary in sites:
 		var pixels: Vector2 = site.pos * Campaign.MAP_SIZE
-		if pixels.x >= 1536 or pixels.y >= 1024: outer_sites += 1
+		if pixels.x < 250 or pixels.x >= 1536 + Campaign.TOWN_SHIFT_X or pixels.y >= 1024: outer_sites += 1
 		_check(Rect2(Vector2.ZERO, Campaign.MAP_SIZE).has_point(pixels), "Site outside map: " + str(site.name))
 		_check(pixels.y < 1460, "Call site occupies reserved southern coastline")
 		for other: Dictionary in sites:
@@ -45,8 +47,8 @@ func _test_map_and_routes() -> void:
 			var route: Dictionary = sim._best_route(crew, crew.home, site.pos)
 			_check(is_finite(float(route.eta)) and float(route.eta) > 0.0, "Unreachable site: " + str(site.name))
 			_check(not route.path.is_empty() and route.path.back().is_equal_approx(site.pos), "Route misses destination")
-	_check(outer_sites == 16, "Sixteen added sites must occupy geography outside v3")
-	var original_positions: Array[Vector2] = [Vector2(256,84),Vector2(512,84),Vector2(512,540),Vector2(1024,836),Vector2(256,276),Vector2(768,84),Vector2(1024,84),Vector2(1024,276),Vector2(256,540),Vector2(512,276),Vector2(768,276),Vector2(1470,836),Vector2(1280,276),Vector2(1024,540),Vector2(256,406),Vector2(512,406),Vector2(1280,84),Vector2(1280,406),Vector2(1024,670),Vector2(1280,836),Vector2(66,836),Vector2(512,836),Vector2(768,836),Vector2(1280,670),Vector2(768,406),Vector2(1024,406),Vector2(768,540),Vector2(1280,540),Vector2(256,670),Vector2(512,670),Vector2(768,670),Vector2(256,836)]
+	_check(outer_sites == 37, "The 37 added sites must occupy geography outside v3")
+	var original_positions: Array[Vector2] = [Vector2(480,84),Vector2(736,84),Vector2(736,540),Vector2(1248,836),Vector2(480,276),Vector2(992,84),Vector2(1248,84),Vector2(1248,276),Vector2(480,540),Vector2(736,276),Vector2(992,276),Vector2(1694,836),Vector2(1504,276),Vector2(1248,540),Vector2(480,406),Vector2(736,406),Vector2(1504,84),Vector2(1504,406),Vector2(1248,670),Vector2(1504,836),Vector2(290,836),Vector2(736,836),Vector2(992,836),Vector2(1504,670),Vector2(992,406),Vector2(1248,406),Vector2(992,540),Vector2(1504,540),Vector2(480,670),Vector2(736,670),Vector2(992,670),Vector2(480,836)]
 	for index: int in range(32):
 		_check((sites[index].pos * Campaign.MAP_SIZE).is_equal_approx(original_positions[index]), "Original city was stretched instead of expanded")
 	# Physical speed is uniform in both axes, with practical town crossings.
@@ -54,9 +56,9 @@ func _test_map_and_routes() -> void:
 	var horizontal: Dictionary = sim._travel_segment(crew, Vector2.ZERO, Vector2(512, 0) / Campaign.MAP_SIZE, 0.0, INF, [])
 	var vertical: Dictionary = sim._travel_segment(crew, Vector2.ZERO, Vector2(0, 512) / Campaign.MAP_SIZE, 0.0, INF, [])
 	_check(absf(float(horizontal.time) - float(vertical.time)) < 0.001, "Equal physical distances must take equal travel time")
-	var crossing: Dictionary = sim._travel_segment(crew, Vector2.ZERO, Vector2(2304, 0) / Campaign.MAP_SIZE, 0.0, INF, [])
-	_check(float(crossing.time) > 12 and float(crossing.time) < 20, "Full-town travel must remain meaningful and practical")
-	_check(absf(float(crossing.time) / float(horizontal.time) - 4.5) < 0.001, "Travel no longer scales with route distance")
+	var crossing: Dictionary = sim._travel_segment(crew, Vector2.ZERO, Vector2(2752, 0) / Campaign.MAP_SIZE, 0.0, INF, [])
+	_check(float(crossing.time) > 12 and float(crossing.time) < 24, "Full-town travel must remain meaningful and practical")
+	_check(absf(float(crossing.time) / float(horizontal.time) - 5.375) < 0.001, "Travel no longer scales with route distance")
 
 func _test_outer_district_dispatches() -> void:
 	for site: Dictionary in Campaign.locations():
@@ -72,7 +74,9 @@ func _test_outer_district_dispatches() -> void:
 		call.work_duration = 5.0
 		for kind: String in Sim.UNIT_KINDS:
 			# Exercise every department from its primary station.
-			var crew: Dictionary = sim.units[Sim.UNIT_KINDS.find(kind) * 3]
+			var crew: Dictionary = {}
+			for candidate: Dictionary in sim.units:
+				if candidate.kind == kind: crew = candidate; break
 			_check(sim.dispatch(int(call.id), kind, int(crew.id)), "Dispatch into expanded district rejected")
 			for point: Vector2 in crew.path:
 				_check(Rect2(Vector2.ZERO, Vector2.ONE).has_point(point), "Route leaves playable map")
@@ -86,7 +90,7 @@ func _test_outer_district_dispatches() -> void:
 		_check(travel_elapsed > 8.0, "Expanded district did not require meaningful travel")
 		# Intermediate legs must follow an actual connected road; the last leg
 		# is the short driveway from that road to the incident entrance.
-		var origin := Vector2(384, 448) / Campaign.MAP_SIZE
+		var origin := Vector2(608, 448) / Campaign.MAP_SIZE
 		var path: Array = sim._best_route(sim.units[0], origin, site.pos).path
 		path.push_front(origin)
 		for index: int in range(1, path.size() - 1):
@@ -227,7 +231,8 @@ func _test_legacy_coordinates() -> void:
 
 func _test_version_3_expansion() -> void:
 	var source := Sim.new()
-	source.start_shift(0)
+	# Level 2: level 1 has no road events since 15.10.
+	source.start_shift(1)
 	source._spawn_incident()
 	source.drain_events()
 	var state: Dictionary = source._raw_state()
@@ -252,13 +257,13 @@ func _test_version_3_expansion() -> void:
 	state.events = [{"type":"dispatch","pos":Vector2(512,448)/old_size}]
 	var migrated := Sim.new()
 	migrated.apply_snapshot(state)
-	_check((migrated.incidents[0].pos * Campaign.MAP_SIZE).is_equal_approx(Vector2(1024,836)), "v3 incident teleported during expansion")
-	_check((migrated.units[0].pos * Campaign.MAP_SIZE).is_equal_approx(Vector2(512,448)), "v3 moving crew changed physical position")
-	_check((migrated.units[0].home * Campaign.MAP_SIZE).is_equal_approx(Vector2(384,448)), "v3 crew home was relocated")
+	_check((migrated.incidents[0].pos * Campaign.MAP_SIZE).is_equal_approx(Vector2(1248,836)), "v3 incident teleported during expansion")
+	_check((migrated.units[0].pos * Campaign.MAP_SIZE).is_equal_approx(Vector2(736,448)), "v3 moving crew changed physical position")
+	_check((migrated.units[0].home * Campaign.MAP_SIZE).is_equal_approx(Vector2(608,448)), "v3 crew home was relocated")
 	for index: int in range(state.units[0].path.size()):
-		_check((migrated.units[0].path[index] * Campaign.MAP_SIZE).is_equal_approx(state.units[0].path[index] * old_size), "v3 route waypoint was stretched")
-	_check((migrated._shift.traffic[0].position * Campaign.MAP_SIZE).is_equal_approx(Vector2(364,178)), "v3 roadworks position changed")
-	_check((migrated.events[0].pos * Campaign.MAP_SIZE).is_equal_approx(Vector2(512,448)), "v3 pending spatial event moved")
+		_check((migrated.units[0].path[index] * Campaign.MAP_SIZE).is_equal_approx(state.units[0].path[index] * old_size + Vector2(Campaign.TOWN_SHIFT_X, 0)), "v3 route waypoint was stretched")
+	_check((migrated._shift.traffic[0].position * Campaign.MAP_SIZE).is_equal_approx(Vector2(588,178)), "v3 roadworks position changed")
+	_check((migrated.events[0].pos * Campaign.MAP_SIZE).is_equal_approx(Vector2(736,448)), "v3 pending spatial event moved")
 	_check(migrated.elapsed == 55.0 and migrated.arrival_index == 4 and migrated.chaos_phase == "high", "v3 expansion changed the experimental clock")
 	var restored := Sim.new()
 	restored.apply_snapshot(migrated.snapshot())
@@ -267,7 +272,8 @@ func _test_version_3_expansion() -> void:
 	network_state.erase("_shift")
 	var guest := Sim.new()
 	guest.apply_snapshot(network_state)
-	_check((guest._shift.traffic[0].position * Campaign.MAP_SIZE).is_equal_approx(Vector2(364,178)), "Rebuilt network plan was scaled twice")
+	# The guest rebuilds the plan from the campaign (road events since the traffic rework).
+	_check(guest._shift.traffic[0].position.is_equal_approx(Campaign.shift_data(guest.shift_index).traffic[0].position), "Rebuilt network plan was scaled twice")
 
 func _tutorial_dispatch(tutorial: TutorialDirector, kind: String, incident_id: int) -> void:
 	var sim: RescueSimulation = tutorial.sim
@@ -336,6 +342,13 @@ func _bot_action(sim: RescueSimulation) -> void:
 	if sim.active_count() >= 3 and sim.special_cooldown <= 0.0:
 		sim.use_special()
 		return
+	# Like a team that talks: once a road is closed or a district is dark for a
+	# few seconds, the department that can fix it sends a crew.
+	for event: Dictionary in sim.active_road_events():
+		if int(event.assigned_unit) < 0 and str(event.clear_kind) != "" and sim.elapsed - float(event.started_at) > 4.0:
+			for unit: Dictionary in sim.units:
+				if unit.kind == event.clear_kind and unit.state == "idle":
+					if sim.clear_road(int(event.id), int(unit.id)): return
 	var calls: Array[Dictionary] = []
 	for incident: Dictionary in sim.incidents:
 		if incident.status in ["active", "working"]: calls.append(incident)

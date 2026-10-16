@@ -54,7 +54,8 @@ func run() -> void:
 	game._begin_shift(0)
 	game.toast_left = 0
 	await snapshot("default")
-	check(game.map_zoom > game._fit_map_zoom() + .2, "New shifts start close enough to explore")
+	# Playtest 15.10: every level starts on the whole town.
+	check(game._is_map_overview(), "New shifts start on the whole town")
 	var kinds: Dictionary = {}
 	for unit: Dictionary in game.sim.units:
 		if kinds.has(unit.kind): continue
@@ -62,6 +63,7 @@ func run() -> void:
 		var station_point: Vector2 = game._map_rect().position + Vector2(unit.home) * game._map_rect().size
 		check(game.MAP_VIEW.has_point(station_point), "Initial exploration includes the main " + str(unit.kind) + " station")
 	var point := Vector2(700, 450)
+	game._toggle_overview()
 	var before: Vector2 = game.map_pan
 	button(point, true)
 	check(game._map_press_pending, "Real viewport routes map press to gesture handler")
@@ -79,21 +81,22 @@ func run() -> void:
 	check(game.map_zoom > game._fit_map_zoom() + .2, "Dragging overview returns to exploration")
 	check(game.map_pan.distance_to(before) > 100, "Overview drag changes the visible streets")
 	await snapshot("overview-drag")
-	# Clicking a distant minimap point in overview must enter a useful close view.
-	game.map_zoom = game._fit_map_zoom()
-	game._center_map(Vector2(.5, .5))
+	# The minimap (drag view only) jumps to a distant district.
+	game._center_map(Vector2(.3, .3))
 	var destination: Vector2 = game.MINIMAP_RECT.position + game.MINIMAP_RECT.size * Vector2(.82, .8)
 	button(destination, true)
 	button(destination, false)
-	check(game.map_zoom > game._fit_map_zoom() + .2, "Minimap click leaves whole-map overview")
+	check(not game._is_map_overview(), "Minimap click keeps the drag view")
 	check(game._map_center().x > .6 and game._map_center().y > .6, "Minimap reaches the southeast districts")
 	await snapshot("minimap-southeast")
-	game.map_zoom = game._fit_map_zoom()
-	game._center_map(Vector2(.5, .5))
+	# Two views: wheel down = whole town, wheel up = drag view; nothing in between.
 	button(point, true, MOUSE_BUTTON_WHEEL_DOWN)
-	check(game.map_zoom > game._fit_map_zoom() + .2, "Even zoom-out scroll leaves overview")
-	for i in range(8): button(point, true, MOUSE_BUTTON_WHEEL_DOWN)
-	check(game.map_zoom > game._fit_map_zoom() + .2, "Exploration wheel floor never becomes immovable overview")
+	check(game._is_map_overview(), "Scrolling down shows the whole town")
+	for i in range(4): button(point, true, MOUSE_BUTTON_WHEEL_DOWN)
+	check(game._is_map_overview(), "More scrolling down stays on the whole town")
+	button(point, true, MOUSE_BUTTON_WHEEL_UP)
+	for i in range(4): button(point, true, MOUSE_BUTTON_WHEEL_UP)
+	check(is_equal_approx(game.map_zoom, game._drag_zoom()), "Scrolling up opens the drag view and never zooms further")
 	await snapshot("zoom-floor")
 	var floor_zoom: float = game.map_zoom
 	var floor_center: Vector2 = game._map_center()

@@ -21,6 +21,10 @@ const KIND_SHORT := {"fire":"FIRE","medic":"MED","engineer":"ENG","police":"POL"
 
 var cv: CanvasItem
 var hud: Node2D
+var fx = null # JuiceFx (scripts/juice_fx.gd)
+var rescued_anchor := Vector2(560, 42)
+var results_since := -1.0
+var results_stars_played := 0
 var sim: RescueSimulation
 var town: TownView
 var map_clip: Control
@@ -31,6 +35,7 @@ var voice: Node
 var capture_run_id := ""
 var capture_shift := -1
 var map_zoom := 1.5
+var minimap_hidden := false
 var map_pan := Vector2.ZERO
 var map_dragging := false
 var _map_press_pending := false
@@ -46,6 +51,8 @@ var hero: Texture2D
 var title_art: Sprite2D
 var screen := "title"
 var previous_screen := "game"
+var settings_tab := "settings"
+var sound_settings: Control
 var selected := -1
 var selected_unit := -1
 var role_filter := ""
@@ -78,6 +85,7 @@ var show_help := false
 var result_saved := false
 var hovered_button := ""
 var ip_input: LineEdit
+var name_input: LineEdit
 var rating := 5
 
 var orders: Dictionary = {}
@@ -100,6 +108,8 @@ var host_speed := 1.0
 var dedicated_server := false
 var _dedicated_shift_started := false
 var show_perf := false
+# Co-op: the level the host (or the first player on a dedicated server) picked in the lobby.
+var lobby_level := 0
 var _snapshot_gap_ms := 0.0
 var _last_snapshot_ms := -1
 var pressure_display := 0.0
@@ -117,11 +127,17 @@ const VIEW := Rect2(-80, 0, 1600, 900)
 const MAP_SCALE := 1.5
 const MAP_ORIGIN := Vector2.ZERO
 const MAP_PIXELS := BeaconCampaign.MAP_SIZE * MAP_SCALE
-const MAP_VIEW := Rect2(-80, 0, 1600, 832)
-const MINIMAP_RECT := Rect2(1284, 650, 216, 144)
-const MINIMAP_PANEL := Rect2(1272, 624, 240, 202)
+# The map fills the whole screen; the top bar and crew cards float over it
+# (playtest 15.10). Markers are kept out from under them by the occlusions.
+const MAP_VIEW := Rect2(-80, 0, 1600, 900)
+# Smaller minimap, only in the drag view (the whole-town view needs none).
+const MINIMAP_RECT := Rect2(1328, 692, 182, 102)
+const MINIMAP_PANEL := Rect2(1322, 670, 194, 130)
+const MINIMAP_HIDE := Rect2(1452, 673, 58, 18)
+const MINIMAP_SHOW := Rect2(1408, 794, 104, 30)
 const DRAG_THRESHOLD := 6.0
 const CREW_BAR := Rect2(-72, 836, 1584, 58)
+const UNIT_CONTROL_RECT := Rect2(440, 758, 620, 68)
 const FOCUS_RECT := Rect2(-64, 612, 464, 210)
 const SURGE_RECT := Rect2(598, 158, 478, 51)
 
@@ -159,15 +175,22 @@ func _explore_min_zoom() -> float:
 func _map_world_at(point: Vector2) -> Vector2:
 	return ((point - _map_rect().position) / _map_rect().size).clamp(Vector2.ZERO, Vector2.ONE)
 
+# Two views only (playtest 15.10): the whole town, and one drag-around view at
+# this zoom (the old "most zoomed out" level). Zooming in further showed no
+# extra detail and players got lost, so +/- buttons and free zoom are gone.
+func _drag_zoom() -> float:
+	# 5% closer than the old most-zoomed-out level (playtest 15.10).
+	return _explore_min_zoom() * 1.05
+
 func _explore_map_at(normalized: Vector2, anchor: Vector2 = MAP_VIEW.get_center()) -> void:
-	map_zoom = clampf(_overview_return_zoom, _explore_min_zoom(), 3.0)
+	map_zoom = _drag_zoom()
 	map_pan = anchor - normalized.clamp(Vector2.ZERO, Vector2.ONE) * TownView.MAP_SIZE * map_zoom - MAP_ORIGIN
 	_apply_map_layout()
 
 func _reset_exploration_camera() -> void:
 	_reset_map_gesture()
-	map_zoom = MAP_SCALE
-	_overview_return_zoom = MAP_SCALE
+	map_zoom = _drag_zoom()
+	_overview_return_zoom = _drag_zoom()
 	# Begin around the main stations so the first view contains useful crews,
 	# even when the world expands with new districts beyond the town center.
 	var stations: Dictionary = {}
@@ -178,6 +201,8 @@ func _reset_exploration_camera() -> void:
 			center += Vector2(unit.home)
 	_overview_return_center = center / stations.size() if not stations.is_empty() else Vector2(.5, .5)
 	_center_map(_overview_return_center)
+	# Every level starts on the whole town, so nobody has to discover the overview.
+	_toggle_overview()
 
 func _map_center() -> Vector2:
 	return (MAP_VIEW.get_center() - _map_rect().position) / _map_rect().size
@@ -201,28 +226,13 @@ func _apply_map_layout() -> void:
 	tactical_map.map_rect = _map_rect()
 	tactical_map.clear_hover()
 
+# The wheel switches between the two views: up = into the drag view at the
+# cursor, down = back to the whole town.
 func _zoom_map(direction: float, around: Vector2) -> void:
-	if _is_map_overview():
+	if direction > 0 and _is_map_overview():
 		_explore_map_at(_map_world_at(around), around)
-		return
-	var levels: Array[float] = [_explore_min_zoom()]
-	for level in [1.0, 1.5, 2.0, 2.5, 3.0]:
-		if level > _explore_min_zoom() + .01: levels.append(level)
-	var next: float = map_zoom
-	if direction > 0:
-		for level in levels:
-			if level > map_zoom + .01:
-				next = level
-				break
-	else:
-		for index in range(levels.size() - 1, -1, -1):
-			if levels[index] < map_zoom - .01:
-				next = levels[index]
-				break
-	var point := (around - _map_rect().position) / map_zoom
-	map_pan = around - point * next - MAP_ORIGIN
-	map_zoom = next
-	_apply_map_layout()
+	elif direction < 0 and not _is_map_overview():
+		_toggle_overview()
 
 func _toggle_overview() -> void:
 	_reset_map_gesture()
@@ -232,6 +242,9 @@ func _toggle_overview() -> void:
 		_overview_return_zoom = map_zoom
 		_overview_return_center = _map_center()
 		map_zoom = _fit_map_zoom()
+		# An open call card would cover the whole-town view: close it.
+		selected = -1
+		focus_hold_left = 0
 		_center_map(Vector2(.5, .5))
 
 func _reset_map_gesture() -> void:
@@ -258,7 +271,7 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 					if _is_map_overview(): _explore_map_at(_map_world_at(point))
 					tactical_map.activate_target(target)
 				return consumed
-			if MINIMAP_RECT.has_point(point):
+			if MINIMAP_RECT.has_point(point) and _minimap_shown():
 				_reset_map_gesture()
 				_minimap_drag = true
 				var destination := (point - MINIMAP_RECT.position) / MINIMAP_RECT.size
@@ -271,6 +284,11 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 				_map_press_position = point
 				_map_last_position = point
 				_map_press_target = tactical_map.pointer_target(event.position)
+				# Crews and stations are picked on press (playtest 15.10): if the
+				# mouse moves and it turns into a drag, the crew is still selected.
+				if str(_map_press_target.get("type", "")) in ["unit", "base"] and not _is_map_overview():
+					tactical_map.activate_target(_map_press_target)
+					_map_press_target.clear()
 				return true
 		elif event.button_index == MOUSE_BUTTON_MIDDLE:
 			if not event.pressed:
@@ -307,13 +325,19 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 
 func _draw_map_tools() -> void:
 	_button("map_overview", "EXPLORE" if _is_map_overview() else "OVERVIEW", Rect2(-62, 18, 106, 34), TEAL if _is_map_overview() else PANEL, INK if _is_map_overview() else CREAM, 12)
-	_button("map_out", "-", Rect2(-62, 61, 49, 30), PANEL, CREAM, 17)
-	_button("map_in", "+", Rect2(-5, 61, 49, 30), PANEL, CREAM, 17)
 	_draw_minimap()
 
+func _minimap_shown() -> bool:
+	return screen == "game" and not minimap_hidden and not _is_map_overview()
+
 func _draw_minimap() -> void:
-	_panel(MINIMAP_PANEL, Color(INK, .96), Color(CREAM, .24))
-	_text("BEACON BAY", MINIMAP_PANEL.position + Vector2(12, 18), 11, CREAM)
+	if _is_map_overview(): return
+	if minimap_hidden:
+		_button("minimap_toggle", "MINIMAP  M", MINIMAP_SHOW, Color(INK, .8), CREAM, 11)
+		return
+	_panel(MINIMAP_PANEL, Color(INK, .9), Color(CREAM, .24))
+	_text("BEACON BAY", MINIMAP_PANEL.position + Vector2(8, 16), 10, CREAM)
+	_button("minimap_toggle", "HIDE  M", MINIMAP_HIDE, Color(PANEL, .9), MUTED, 9)
 	cv.draw_rect(MINIMAP_RECT, Color("315553"))
 	for x: float in RescueSimulation.ROAD_X:
 		cv.draw_line(MINIMAP_RECT.position + Vector2(x * MINIMAP_RECT.size.x, 0), MINIMAP_RECT.position + Vector2(x * MINIMAP_RECT.size.x, MINIMAP_RECT.size.y), Color("7a9290"), 1)
@@ -321,6 +345,37 @@ func _draw_minimap() -> void:
 		cv.draw_line(MINIMAP_RECT.position + Vector2(0, y * MINIMAP_RECT.size.y), MINIMAP_RECT.position + Vector2(MINIMAP_RECT.size.x, y * MINIMAP_RECT.size.y), Color("7a9290"), 1)
 	for site: Dictionary in BeaconCampaign.locations():
 		cv.draw_rect(Rect2(MINIMAP_RECT.position + site.pos * MINIMAP_RECT.size - Vector2(1, 1), Vector2(3, 3)), Color("a5b29a"))
+	var level_layout: Dictionary = BeaconCampaign.layout(sim.shift_index)
+	for water: Rect2 in level_layout.get("water", []):
+		cv.draw_rect(Rect2(MINIMAP_RECT.position + water.position / BeaconCampaign.MAP_SIZE * MINIMAP_RECT.size, water.size / BeaconCampaign.MAP_SIZE * MINIMAP_RECT.size), Color("4f8f98"))
+	for piece: Array in level_layout.get("blocked", []):
+		var a := Vector2(RescueSimulation.ROAD_X[int(piece[1])], RescueSimulation.ROAD_Y[int(piece[2])])
+		var b: Vector2 = Vector2(RescueSimulation.ROAD_X[int(piece[1]) + 1], a.y) if bool(piece[0]) else Vector2(a.x, RescueSimulation.ROAD_Y[int(piece[2]) + 1])
+		cv.draw_line(MINIMAP_RECT.position + a.lerp(b, 0.15) * MINIMAP_RECT.size, MINIMAP_RECT.position + a.lerp(b, 0.85) * MINIMAP_RECT.size, Color("d9b878"), 4)
+	# Blackouts and storms: tinted districts; upcoming ones blink.
+	for event: Dictionary in sim.active_road_events():
+		if not bool(event.get("hazard", false)): continue
+		var zone := Rect2(MINIMAP_RECT.position + Vector2(event.position) * MINIMAP_RECT.size, Vector2(event.size) * MINIMAP_RECT.size)
+		cv.draw_rect(zone, Color(0.02, 0.03, 0.12, 0.55) if str(event.type) == "blackout" else Color(HAZARD_TINT.get(str(event.type), GOLD), 0.35))
+		if str(event.type) == "blackout" and event.has("target"):
+			cv.draw_rect(Rect2(MINIMAP_RECT.position + Vector2(event.target) * MINIMAP_RECT.size - Vector2(3, 3), Vector2(6, 6)), GOLD)
+	if int(elapsed_ui * 4.0) % 2 == 0 or reduced_motion:
+		for item: Dictionary in sim.upcoming_hazards():
+			var zone := Rect2(MINIMAP_RECT.position + Vector2(item.position) * MINIMAP_RECT.size, Vector2(item.size) * MINIMAP_RECT.size)
+			cv.draw_rect(zone.grow(1), HAZARD_TINT.get(str(item.type), GOLD), false, 2)
+	if level_layout.has("river"):
+		var river: Rect2 = level_layout.river
+		for column: int in level_layout.bridges:
+			var bx: float = MINIMAP_RECT.position.x + RescueSimulation.ROAD_X[column] * MINIMAP_RECT.size.x
+			cv.draw_rect(Rect2(bx - 1.5, MINIMAP_RECT.position.y + river.position.y / BeaconCampaign.MAP_SIZE.y * MINIMAP_RECT.size.y, 3, river.size.y / BeaconCampaign.MAP_SIZE.y * MINIMAP_RECT.size.y), Color("c9d2c8"))
+		for flood: Dictionary in sim.flooded_bridges():
+			cv.draw_rect(Rect2(MINIMAP_RECT.position + Vector2(flood.position) * MINIMAP_RECT.size, Vector2(flood.size) * MINIMAP_RECT.size).grow(1.5), Color("9fd3ff"))
+	# Closed roads show as red bars so they're findable when off screen.
+	for road: Dictionary in sim.active_road_events():
+		if bool(road.get("hazard", false)): continue
+		var area := Rect2(MINIMAP_RECT.position + Vector2(road.position) * MINIMAP_RECT.size, Vector2(road.size) * MINIMAP_RECT.size)
+		cv.draw_rect(area.grow(1.5), Color("ff6b57"))
+		cv.draw_rect(Rect2(area.get_center() - Vector2(2, 2), Vector2(4, 4)), KIND_COLOR.get(road.clear_kind, CREAM))
 	for unit: Dictionary in sim.units:
 		cv.draw_rect(Rect2(MINIMAP_RECT.position + unit.pos * MINIMAP_RECT.size - Vector2(2, 2), Vector2(4, 4)), KIND_COLOR.get(unit.kind, CREAM))
 	for call: Dictionary in sim.incidents:
@@ -332,12 +387,11 @@ func _draw_minimap() -> void:
 	var frame := Rect2(MINIMAP_RECT.position + visible_world.position * MINIMAP_RECT.size, visible_world.size * MINIMAP_RECT.size)
 	cv.draw_rect(frame, Color(CREAM, .08))
 	cv.draw_rect(frame, CREAM, false, 2)
-	_text("Click a district to explore" if _is_map_overview() else "Drag to pan \u00b7 Scroll to zoom", MINIMAP_PANEL.position + Vector2(12, 188), 12, CREAM if _is_map_overview() else MUTED)
 
 func _draw_capture_status() -> void:
 	if voice == null: return
 	var rows: Array[String] = []
-	if voice.mic_enabled: rows.append("V · TALK")
+	rows.append("Voice chat enabled" if voice.mic_enabled else "Voice chat disabled")
 	if voice.recording_active: rows.append("● VOICE REC")
 	if research.enabled: rows.append("● MOUSE REC")
 	if network.has_method("voice_recording_peers"):
@@ -423,6 +477,15 @@ func _ready() -> void:
 	tactical_map.incident_selected.connect(_select_incident)
 	tactical_map.unit_selected.connect(_select_unit)
 	tactical_map.dispatch_requested.connect(_dispatch_selected)
+	tactical_map.close_requested.connect(func():
+		selected = -1
+		focus_hold_left = 0
+		audio.play_cue("click"))
+	tactical_map.scout_requested.connect(func(id: int):
+		if screen != "game": return
+		selected = id
+		_action("scout"))
+	tactical_map.road_event_selected.connect(_select_road_event)
 	_center_map(Vector2(.5, .5))
 	field_focus = preload("res://scripts/incident_focus.gd").new()
 	field_focus.position = FOCUS_RECT.position
@@ -437,6 +500,10 @@ func _ready() -> void:
 	hud.game = self
 	hud.z_index = 10
 	add_child(hud)
+	fx = preload("res://scripts/juice_fx.gd").new()
+	fx.game = self
+	fx.view_rect = VIEW
+	add_child(fx)
 	tutorial_overlay = TutorialOverlay.new()
 	add_child(tutorial_overlay)
 	tutorial_overlay.position = Vector2(-64, CREW_BAR.position.y - tutorial_overlay.panel_size.y - 10)
@@ -450,6 +517,13 @@ func _ready() -> void:
 	voice = preload("res://scripts/team_voice.gd").new()
 	add_child(voice)
 	voice.configure(network, false)
+	audio.sound_level_changed.connect(func(_key: String, _value: int): _refresh_voice_mix())
+	network.roster_changed.connect(_refresh_voice_mix)
+	_refresh_voice_mix()
+	sound_settings = preload("res://scripts/sound_settings.gd").new()
+	add_child(sound_settings)
+	sound_settings.build(audio, network)
+	sound_settings.visible = false
 	voice.voice_error.connect(_toast)
 	voice.recording_changed.connect(_voice_recording_changed)
 	research.log_error.connect(func(message: String): research_enabled=false; _toast(message))
@@ -463,6 +537,15 @@ func _ready() -> void:
 	# Must sit above the HUD layer (z 10), which draws the lobby panel.
 	ip_input.z_index = 20
 	add_child(ip_input)
+	name_input = LineEdit.new()
+	name_input.position = Vector2(452, 463)
+	name_input.size = Vector2(536, 52)
+	name_input.placeholder_text = "Enter your name"
+	name_input.tooltip_text = "Up to 20 characters: A-Z, numbers, spaces, hyphens and apostrophes. Leave blank to use Player 1, Player 2, etc."
+	name_input.max_length = NetworkSession.MAX_PLAYER_NAME_LENGTH
+	name_input.add_theme_font_size_override("font_size", 20)
+	name_input.z_index = 20
+	add_child(name_input)
 	_load_save()
 	audio.set_music_enabled(music_enabled)
 	audio.set_sfx_enabled(sfx_enabled)
@@ -534,6 +617,14 @@ func _start_dedicated_server() -> void:
 
 func _process(delta: float) -> void:
 	elapsed_ui += delta
+	if fx != null:
+		fx.reduced_motion = reduced_motion
+		position = Vector2(UI_OFFSET_X, 0) + fx.shake_offset()
+		if screen == "results" and results_since < 0.0:
+			results_since = elapsed_ui
+			results_stars_played = 0
+		elif screen != "results":
+			results_since = -1.0
 	toast_left = maxf(0, toast_left - delta)
 	action_feedback_left = maxf(0, action_feedback_left - delta)
 	focused_unit_left = maxf(0, focused_unit_left - delta)
@@ -564,7 +655,6 @@ func _process(delta: float) -> void:
 	_sync_capture()
 	if screen == "game":
 		pressure_display = lerpf(pressure_display, _pressure(), 1.0-exp(-delta*3.0))
-		audio.set_intensity(pressure_display)
 		refresh += delta
 		if refresh >= 1.0 and not tutorial_active:
 			refresh = 0.0
@@ -590,8 +680,12 @@ func _process(delta: float) -> void:
 				selected_unit = -1
 				role_filter = ""
 	else:
-		audio.set_intensity(0.0)
 		audio.set_ticking(false)
+	# Personal multiplayer menus keep the shared gameplay pressure. Solo menus
+	# hold qualification timers rather than feeding an artificial zero pressure.
+	var music_shift_active := sim.running and _session_screen()
+	audio.set_intensity(pressure_display if screen == "game" else _pressure())
+	audio.update_music_context(delta, music_shift_active, _simulation_active() and not tutorial_active)
 	for p in particles:
 		p.life -= delta
 		p.pos += p.velocity * delta
@@ -600,7 +694,7 @@ func _process(delta: float) -> void:
 	town.tactical_mode = true
 	if selected_unit >= 0:
 		var chosen: Dictionary = sim.get_unit(selected_unit)
-		if chosen.is_empty() or chosen.state not in ["idle","return"]:
+		if chosen.is_empty() or not network.owns(str(chosen.kind)) or chosen.state == "rest":
 			selected_unit = -1
 			role_filter = ""
 	tactical_map.sim = sim
@@ -609,14 +703,14 @@ func _process(delta: float) -> void:
 	tactical_map.role_filter = role_filter
 	tactical_map.focused_unit_id = focused_unit
 	var planned: Dictionary = sim.get_unit(selected_unit)
-	tactical_map.dispatch_enabled = not planned.is_empty() and network.owns(str(planned.kind))
+	tactical_map.dispatch_enabled = not planned.is_empty() and network.owns(str(planned.kind)) and sim._unit_available(planned)
 	tactical_map.owned_kinds = network.departments_for()
 	var owners: Dictionary = {}
 	if network.active:
 		for kind in DEPARTMENTS:
 			if not network.owns(kind):
 				var owner: int = network.owner_of(kind)
-				owners[kind] = "P%d" % (int(network.roster.get(owner, 0)) + 1) if owner > 0 else "?"
+				owners[kind] = _short(network.player_label(owner), 10) if owner > 0 else "?"
 	tactical_map.owner_labels = owners
 	if tutorial_active:
 		var planned_crew: Dictionary=sim.get_unit(selected_unit)
@@ -625,10 +719,12 @@ func _process(delta: float) -> void:
 	tactical_map.reduced_motion = reduced_motion
 	var blocked: Array[Rect2] = []
 	if screen=="game":
-		blocked.append(MINIMAP_PANEL)
-		blocked.append(Rect2(-70, 10, 122, 88))
+		if _minimap_shown(): blocked.append(MINIMAP_PANEL)
+		elif minimap_hidden and not _is_map_overview(): blocked.append(MINIMAP_SHOW)
+		blocked.append(Rect2(-70, 10, 122, 50))
 		blocked.append(_hud_rect())
 		blocked.append(Rect2(VIEW.position.x, CREW_BAR.position.y - 4, VIEW.size.x, VIEW.end.y - CREW_BAR.position.y + 4))
+		if _withdraw_control_visible(): blocked.append(UNIT_CONTROL_RECT)
 	if field_focus.visible: blocked.append(Rect2(field_focus.position, FOCUS_RECT.size))
 	if tutorial_overlay.visible: blocked.append(Rect2(tutorial_overlay.position,tutorial_overlay.panel_size))
 	tactical_map.occlusions = blocked
@@ -642,8 +738,7 @@ func _process(delta: float) -> void:
 	hud.queue_redraw()
 
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_APPLICATION_FOCUS_OUT and voice != null:
-		voice.set_push_to_talk(false)
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
 		_reset_map_gesture()
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		if tutorial_active: _end_tutorial(false,false)
@@ -668,6 +763,8 @@ func _update_visibility() -> void:
 	tactical_map.visible = screen=="game"
 	tutorial_overlay.visible = tutorial_active and screen=="game"
 	ip_input.visible = screen == "lobby" and not network.active
+	name_input.visible = ip_input.visible
+	sound_settings.visible = screen == "settings" and settings_tab == "sounds"
 
 func _draw_all(canvas: CanvasItem) -> void:
 	cv = canvas
@@ -678,7 +775,6 @@ func _draw_all(canvas: CanvasItem) -> void:
 		"campaign": _draw_campaign()
 		"lobby": _draw_lobby()
 		"settings": _draw_settings()
-		"upgrades": _draw_upgrades()
 		"game", "pause", "results", "help":
 			_draw_game()
 			if screen != "game": buttons.clear()
@@ -742,7 +838,11 @@ func _draw_game() -> void:
 		if mine.size() >= DEPARTMENTS.size(): _text("ALL", Vector2(x, 48), 16, CREAM)
 		x += 130
 	_text("RESCUED", Vector2(x, 26), 10, MUTED)
-	_text("%d / %d" % [sim.rescued, sim.target] if not tutorial_active else str(sim.rescued), Vector2(x, 50), 22, CREAM if sim.rescued < sim.target else TEAL)
+	# The counter counts up and jumps when rescue icons land on it.
+	var shown_rescued: int = roundi(fx.displayed_rescued) if fx != null else sim.rescued
+	var punch: float = fx.counter_punch if fx != null and not reduced_motion else 0.0
+	rescued_anchor = Vector2(x + 28, 42)
+	_text("%d / %d" % [shown_rescued, sim.target] if not tutorial_active else str(shown_rescued), Vector2(x, 50 + punch * 3), 22 + int(punch * 8), GOLD.lerp(CREAM if sim.rescued < sim.target else TEAL, 1.0 - punch))
 	x += 120
 	_text("COMMUNITY", Vector2(x, 26), 10, MUTED)
 	_bar(Rect2(x, 36, 140, 10), sim.reputation / 100.0, TEAL if sim.reputation > sim.minimum_confidence + 10 else CORAL)
@@ -763,9 +863,48 @@ func _draw_game() -> void:
 	_text(sub, boost.position + Vector2((boost.size.x - sw) / 2, 34), 10, MUTED)
 	_button("help", "?", Rect2(bar.end.x - 102, 16, 40, 36), Color(PANEL_LIGHT, 0.85), CREAM, 18)
 	_button("pause", "II", Rect2(bar.end.x - 54, 16, 40, 36), Color(PANEL_LIGHT, 0.85), CREAM, 16)
+	_draw_hazard_strip(bar)
 	_draw_map_tools()
 	_draw_capture_status()
 	_draw_crew_cards()
+	_draw_unit_control()
+
+const HAZARD_TINT := {"blackout": Color("bda6ff"), "sandstorm": Color("f0b36b"), "squall": Color("9fc4e0"), "flood": Color("9fd3ff")}
+
+# Level hazards at a glance, right under the top bar: what is happening now and
+# what is coming next (playtest 14.10: the bridge floods were easy to miss).
+func _draw_hazard_strip(bar: Rect2) -> void:
+	if tutorial_active or not sim.has_method("current_hazards"): return
+	var lines: Array[Dictionary] = []
+	for item: Dictionary in sim.upcoming_hazards():
+		lines.append({"text": "⚠ %s IN %ds" % [str(item.title).to_upper(), ceili(float(item["in"]))], "type": item.type, "soon": true})
+	for item: Dictionary in sim.current_hazards():
+		lines.append({"text": "%s · %ds" % [str(item.title).to_upper(), ceili(float(item.remaining))], "type": item.type, "soon": false})
+	if lines.is_empty(): return
+	# One line under the bar (a second row would hide behind the toast): the
+	# most urgent item first, then up to two more in smaller type.
+	var parts: Array[Dictionary] = []
+	var total: float = 30.0
+	for index: int in range(mini(3, lines.size())):
+		var line: Dictionary = lines[index]
+		var size: int = 15 if index == 0 else 12
+		var text: String = str(line.text)
+		var w: float = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+		parts.append({"text": text, "size": size, "w": w, "type": line.type, "soon": line.soon})
+		total += w + (24.0 if index > 0 else 0.0)
+	var rect := Rect2(bar.get_center().x - total * 0.5, bar.end.y + 6, total, 26)
+	var first: Dictionary = parts[0]
+	var pulse: float = 0.0 if reduced_motion or not bool(first.soon) else (sin(elapsed_ui * 8.0) + 1.0) * 0.5
+	_panel(rect, Color(INK, 0.9), Color(HAZARD_TINT.get(str(first.type), GOLD), 0.55 + 0.45 * pulse))
+	var x: float = rect.position.x + 15.0
+	for index: int in range(parts.size()):
+		var part: Dictionary = parts[index]
+		if index > 0:
+			cv.draw_rect(Rect2(x + 9, rect.position.y + 7, 2, 12), Color(CREAM, 0.3))
+			x += 24.0
+		var tint: Color = HAZARD_TINT.get(str(part.type), GOLD)
+		_text(str(part.text), Vector2(x, rect.position.y + (18 if index == 0 else 17)), int(part.size), tint if bool(part.soon) or index == 0 else CREAM)
+		x += float(part.w)
 
 func _pill(rect: Rect2, text: String, color: Color) -> void:
 	var pulse: float = 0.0 if reduced_motion else (sin(elapsed_ui * 6.0) + 1.0) * 0.5
@@ -809,7 +948,8 @@ func _focus_button_rect() -> Rect2:
 	return Rect2(field_focus.position+Vector2(FOCUS_RECT.size.x-65,7),Vector2(57,24)) if field_focus.visible else Rect2(40,724,185,34)
 
 func _map_occluded(point: Vector2) -> bool:
-	if MINIMAP_PANEL.has_point(point): return true
+	if _withdraw_control_visible() and UNIT_CONTROL_RECT.has_point(point): return true
+	if _minimap_shown() and MINIMAP_PANEL.has_point(point): return true
 	if tutorial_overlay.visible and tutorial_overlay.blocks_point(point + global_position): return true
 	if field_focus.visible and Rect2(field_focus.position,FOCUS_RECT.size).has_point(point): return true
 	return false
@@ -848,10 +988,17 @@ func _pick_department(kind: String) -> void:
 		var owner: int = network.owner_of(kind)
 		_toast("%s crews belong to %s." % [str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind)), network.player_label(owner) if owner>0 else "a teammate"])
 		return
+	if int(tactical_map.hovered_road_id)>=0:
+		_clear_road_with(int(tactical_map.hovered_road_id), kind)
+		return
 	var target: int = int(tactical_map.hovered_incident_id) if int(tactical_map.hovered_incident_id)>=0 else selected
 	var call: Dictionary = _incident(target)
 	var best: int = -1
 	var best_eta: float = INF
+	if not call.is_empty() and call.get("status","") in ["active","working"] and not bool(call.get("discovered", true)) and not tutorial_active:
+		selected=target
+		_toast("Unconfirmed call: scout it first (SCOUT button on its card, or Q).")
+		return
 	if not call.is_empty() and call.get("status","") in ["active","working"]:
 		for option: Dictionary in sim.dispatch_options(target):
 			if str(option.kind)==kind and float(option.eta)<best_eta:
@@ -869,6 +1016,53 @@ func _pick_department(kind: String) -> void:
 		_toast("No %s crew is free right now." % str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind)).to_lower())
 		return
 	_select_unit(best)
+
+# Road events: pick a crew of the department shown on the road (POL jam, ENG debris, FIRE road fire, MED accident), then click the road.
+func _select_road_event(road_id: int) -> void:
+	if screen != "game": return
+	var road: Dictionary = sim.get_road_event(road_id)
+	if road.is_empty() or str(road.status) not in ["active","clearing"]: return
+	var kind: String = str(road.clear_kind)
+	if kind.is_empty():
+		_toast("Nobody can clear a %s. Send crews around it, or wait until it passes." % str(road.type))
+		return
+	var who: String = str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind))
+	if int(road.assigned_unit)>=0:
+		var crew_on_it: Dictionary = sim.get_unit(int(road.assigned_unit))
+		_toast("%s is already on %s." % [crew_on_it.get("crew_name","A crew"), road.street])
+		return
+	if selected_unit>=0:
+		var crew: Dictionary = sim.get_unit(selected_unit)
+		if not crew.is_empty() and crew.state not in ["idle", "return"]:
+			_toast("Withdraw this crew from its current assignment first.")
+			return
+		if str(crew.get("kind",""))!=kind:
+			_toast("Only %s can clear %s. %s" % [who, road.street, ("Ask %s." % network.player_label(network.owner_of(kind))) if network.active and not network.owns(kind) else "Pick one of their crews."])
+			return
+		_command("clear_road",{"road_event_id":road_id,"kind":kind,"unit_id":selected_unit})
+		return
+	if network.owns(kind):
+		_toast("Pick a %s crew, then click %s to clear it." % [who.to_lower(), road.street])
+	else:
+		_toast("%s can clear %s — ask %s over voice." % [who, road.street, network.player_label(network.owner_of(kind)) if network.owner_of(kind)>0 else "your team"])
+
+func _clear_road_with(road_id: int, kind: String) -> void:
+	var road: Dictionary = sim.get_road_event(road_id)
+	if road.is_empty() or str(road.clear_kind).is_empty(): return
+	if kind!=str(road.clear_kind):
+		_toast("Only %s can clear %s." % [str(NetworkSession.DEPARTMENT_NAMES.get(road.clear_kind,road.clear_kind)), road.street])
+		return
+	var best: int = -1
+	var best_eta: float = INF
+	var center: Vector2 = sim.road_event_center(road)
+	for unit in sim.units:
+		if unit.kind==kind and unit.state in ["idle","return"] and sim.elapsed>=float(unit.get("dispatch_guard_until",0.0)) and sim.elapsed>=float(unit.get("divert_after",0.0)):
+			var eta: float = float(sim._best_route(unit, unit.pos, center).eta)
+			if eta<best_eta: best_eta=eta; best=int(unit.id)
+	if best<0:
+		_toast("No %s crew is free right now." % str(NetworkSession.DEPARTMENT_NAMES.get(kind,kind)).to_lower())
+		return
+	_command("clear_road",{"road_event_id":road_id,"kind":kind,"unit_id":best})
 
 func _cached_dispatch_options(target: int) -> Array:
 	var now := Time.get_ticks_msec()
@@ -896,11 +1090,11 @@ func _select_unit(id: int) -> void:
 	if selected_unit==id:
 		selected_unit=-1
 		return
-	if unit.state not in ["idle","return"]:
-		_toast("%s is busy. Pick a free crew." % unit.get("crew_name",unit.name))
+	if unit.state not in ["idle","return"] and (tutorial_active or not sim.can_withdraw(id)):
+		_toast("%s is resting. Pick another crew." % unit.get("crew_name",unit.name))
 		return
 	var wait_left: float = maxf(float(unit.get("divert_after",0.0)),float(unit.get("dispatch_guard_until",0.0))) - sim.elapsed
-	if wait_left>0:
+	if unit.state in ["idle", "return"] and wait_left>0:
 		_toast("%s can take another call in %ds." % [unit.get("crew_name",unit.name),ceili(wait_left)])
 		return
 	if tutorial_active and not tutorial.can_action("select_unit",{"unit_id":id,"incident_id":selected,"kind":unit.kind}): return
@@ -946,10 +1140,24 @@ func _locate_unit(id: int) -> void:
 
 func _dispatch_selected() -> void:
 	var unit: Dictionary = sim.get_unit(selected_unit)
+	if not unit.is_empty() and unit.state not in ["idle", "return"]:
+		_toast("Withdraw this crew from its current assignment first.")
+		return
 	if selected<0 or unit.is_empty():
 		_toast("Pick a crew, then click a call.")
 		return
 	_command("dispatch",{"incident_id":selected,"kind":unit.kind,"unit_id":selected_unit})
+
+func _withdraw_control_visible() -> bool:
+	return screen == "game" and not tutorial_active and sim.can_withdraw(selected_unit) and network.owns(str(sim.get_unit(selected_unit).get("kind", "")))
+
+func _draw_unit_control() -> void:
+	if not _withdraw_control_visible(): return
+	var unit: Dictionary = sim.get_unit(selected_unit)
+	_panel(UNIT_CONTROL_RECT, Color(INK, 0.94), KIND_COLOR[unit.kind])
+	_text("%s · %s" % [unit.get("crew_name", unit.name), KIND_SHORT[unit.kind]], UNIT_CONTROL_RECT.position + Vector2(16, 25), 18, CREAM)
+	_text("Leave this assignment and return to standby.", UNIT_CONTROL_RECT.position + Vector2(16, 49), 14, MUTED)
+	_button("withdraw:%d" % unit.id, "WITHDRAW  [V]", Rect2(UNIT_CONTROL_RECT.position + Vector2(438, 14), Vector2(166, 40)), CORAL, INK, 15)
 
 func _draw_crew_cards() -> void:
 	var gap: float = 8.0
@@ -958,7 +1166,7 @@ func _draw_crew_cards() -> void:
 		var kind: String = DEPARTMENTS[i]
 		var rect := Rect2(CREW_BAR.position.x + i * (width + gap), CREW_BAR.position.y, width, CREW_BAR.size.y)
 		var mine: bool = network.owns(kind)
-		_panel(rect, Color(INK, 0.72), Color(KIND_COLOR[kind], 0.9) if mine and network.active else Color(CREAM, 0.1))
+		_panel(rect, Color(INK, 0.66), Color(KIND_COLOR[kind], 0.9) if mine and network.active else Color(CREAM, 0.12))
 		_symbol(kind, rect.position + Vector2(14, 14), KIND_COLOR[kind], 0.42)
 		var owner_text: String = KIND_NAME[kind]
 		if network.active:
@@ -980,13 +1188,18 @@ func _draw_crew_cards() -> void:
 			if int(unit.id)==selected_unit:
 				cv.draw_rect(card_area, Color(GOLD, 0.18))
 				cv.draw_rect(card_area, GOLD, false, 2)
+			if fx != null and fx.card_pulse.has(int(unit.id)):
+				# Just dispatched: the card flashes in the department colour.
+				var pulse: float = clampf(float(fx.card_pulse[int(unit.id)]) / 0.7, 0.0, 1.0)
+				cv.draw_rect(card_area.grow(3.0 * pulse), Color(KIND_COLOR[kind], 0.35 * pulse))
+				cv.draw_rect(card_area.grow(3.0 * pulse), Color(KIND_COLOR[kind], pulse), false, 2)
 			ResponderArt.draw_portrait_rect(cv, Rect2(rect.position + Vector2(x, 23), Vector2(28, 32)), kind)
 			_text(_short(str(unit.get("crew_name",unit.name)),8), rect.position + Vector2(x + 34, 38), 13, CREAM)
-			var status: String = {"idle":"READY","travel":"EN ROUTE","working":"ON SCENE","return":"RETURNING","rest":"RESTING"}.get(unit.state,str(unit.state).to_upper())
+			var status: String = {"idle":"READY","travel":"EN ROUTE","working":"ON SCENE","return":"RETURNING","rest":"RESTING","clearing":"CLEARING"}.get(unit.state,str(unit.state).to_upper())
 			if unit.state=="travel": status="ARRIVE %ds" % ceili(sim.unit_eta(unit))
 			var ready_in: float = maxf(float(unit.get("divert_after",0.0)),float(unit.get("dispatch_guard_until",0.0))) - sim.elapsed
 			if unit.state in ["idle","return"] and ready_in>0: status="READY IN %ds" % ceili(ready_in)
-			_text(status, rect.position + Vector2(x + 34, 52), 10, KIND_COLOR[kind] if unit.state in ["travel","working"] else MUTED)
+			_text(status, rect.position + Vector2(x + 34, 52), 10, KIND_COLOR[kind] if unit.state in ["travel","working","clearing"] else MUTED)
 			idx += 1
 
 func _draw_campaign() -> void:
@@ -1002,75 +1215,106 @@ func _draw_campaign() -> void:
 		_text(_short(str(data.get("subtitle","")),42),rect.position+Vector2(23,112),14,MUTED)
 		_text("05:30   ·   %d neighbors" % int(data.get("target",12)),rect.position+Vector2(23,141),12,MUTED)
 		_button("shift:%d"%i if is_open else "locked", "START SHIFT  >" if is_open else "COMPLETE PREVIOUS SHIFT", Rect2(rect.position+Vector2(20,153),Vector2(362,29)),PANEL_LIGHT if is_open else PANEL,TEAL if is_open else MUTED,12)
-	_button("upgrades","EQUIPMENT WORKSHOP   ·   %d credits" % sim.credits,Rect2(80,705,610,60),PANEL_LIGHT,GOLD,18)
 	if has_resume:
-		_button("resume","RESUME SAVED SHIFT",Rect2(720,705,632,60),TEAL,INK,18)
+		_button("resume","RESUME SAVED SHIFT",Rect2(80,705,610,60),TEAL,INK,18)
 	else:
-		_text("Select an unlocked shift to go on duty.",Vector2(743,743),18,MUTED)
+		_text("Select an unlocked shift to go on duty.",Vector2(80,743),18,MUTED)
 	_text("Progress is saved automatically. A complete campaign contains 33 minutes of active shifts.",Vector2(80,818),15,MUTED)
 	_button("title","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
 
-func _draw_upgrades() -> void:
-	_draw_page_header("Better tools. Brighter outcomes.", "THE WORKSHOP    /    %d CREDITS" % sim.credits)
-	var catalog: Array = BeaconCampaign.upgrades()
-	for i in range(catalog.size()):
-		var item: Dictionary = catalog[i]
-		var rect := Rect2(80+(i%3)*430,217+(i/3)*159,402,146)
-		_panel(rect,PANEL)
-		var level := int(sim.upgrades.get(item.id,0))
-		_text(str(item.get("name",item.id)),rect.position+Vector2(22,35),21,CREAM)
-		_wrap(str(item.get("description","")),rect.position+Vector2(22,66),355,14,MUTED,20)
-		var max_level := int(item.get("max_level",3))
-		var cost := BeaconCampaign.upgrade_cost(str(item.id),level)
-		_text("LEVEL %d / %d"%[level,max_level],rect.position+Vector2(22,125),12,TEAL)
-		_button("buy:"+str(item.id),"%d CREDITS"%cost if level<max_level else "COMPLETE",Rect2(rect.position+Vector2(222,99),Vector2(158,36)),PANEL_LIGHT,GOLD,12)
-	_button("campaign","<  YOUR SHIFTS",Rect2(80,91,190,38),PANEL,CREAM,14)
-
 func _draw_lobby() -> void:
 	_draw_page_header("Play together", "UP TO FOUR PLAYERS")
-	_panel(Rect2(400,240,640,452),PANEL)
+	_panel(Rect2(400,240,640,486) if network.active else Rect2(400,240,640,500),PANEL)
 	if not network.active:
 		_text("Meet at the station",Vector2(451,293),28,CREAM)
 		_text("Join a shared server, or host on your network.",Vector2(452,331),16,MUTED)
 		_text("SERVER ADDRESS",Vector2(452,370),12,TEAL)
-		_button("host","HOST A ROOM",Rect2(452,456,536,54),TEAL,INK)
-		_button("join","JOIN THIS ADDRESS",Rect2(452,524,536,54),PANEL_LIGHT,CREAM)
-		_wrap("Command your departments. Coordinate with the team to cover every call.",Vector2(452,620),526,16,MUTED,24)
+		_text("YOUR NAME (A-Z, 0-9, UP TO 20 CHARACTERS)",Vector2(452,454),12,TEAL)
+		_button("host","HOST A ROOM",Rect2(452,537,536,54),TEAL,INK)
+		_button("join","JOIN THIS ADDRESS",Rect2(452,605,536,54),PANEL_LIGHT,CREAM)
+		_wrap("Command your departments. Coordinate with the team to cover every call.",Vector2(452,696),526,16,MUTED,24)
 	else:
 		_text("%d / 4 CREW CONNECTED" % network.roster.size(),Vector2(452,291),21,TEAL)
 		_text(network.status,Vector2(452,326),15,MUTED)
 		var row := 0
 		for peer_id in network.roster:
-			var r: int = int(network.roster[peer_id])
-			_text("%s%s" %[network.player_label(int(peer_id)), "  (you)" if int(peer_id)==multiplayer.get_unique_id() else ""],Vector2(452,373+row*42),19,CREAM)
-			var dx: float = 640
+			_text("%s%s" %[_short(network.player_label(int(peer_id)),16), "  (you)" if int(peer_id)==multiplayer.get_unique_id() else ""],Vector2(452,373+row*42),17,CREAM)
+			var dx: float = 720
 			for kind in network.departments_for(int(peer_id)):
 				_symbol(kind,Vector2(dx,367+row*42),KIND_COLOR[kind],0.5)
 				_text(str(KIND_SHORT[kind]),Vector2(dx+12,373+row*42),15,KIND_COLOR[kind])
-				dx += 74
+				dx += 66
+			if int(peer_id) != multiplayer.get_unique_id() and network.roster.has(multiplayer.get_unique_id()):
+				_button("change_role:%d" % peer_id, "SWAP", Rect2(908, 350 + row * 42, 80, 32), PANEL_LIGHT, TEAL, 13)
 			row += 1
 		if network.hosting:
-			_button("host_start","START SHIFT TOGETHER",Rect2(452,540,536,54),TEAL,INK)
-			_text("Same network: " + "   ".join(_local_addresses()),Vector2(452,624),16,CREAM)
-			_text(_short(network.internet_status,78),Vector2(452,652),13,TEAL if network.internet_address!="" else MUTED)
-			_text("Port %d (UDP). Allow Beacon Bay through the firewall when Windows asks." % NetworkSession.PORT,Vector2(452,676),12,MUTED)
+			_draw_level_picker(Vector2(452,514))
+			_button("host_start","START LEVEL %02d TOGETHER" % (lobby_level+1),Rect2(452,586,536,54),TEAL,INK)
+			_text("Same network: " + "   ".join(_local_addresses()),Vector2(452,664),16,CREAM)
+			_text(_short(network.internet_status,78),Vector2(452,690),13,TEAL if network.internet_address!="" else MUTED)
+			_text("Port %d (UDP). Allow Beacon Bay through the firewall when Windows asks." % NetworkSession.PORT,Vector2(452,712),12,MUTED)
 		else:
 			if network.can_start_session():
-				_button("host_start","START SHIFT TOGETHER",Rect2(452,540,536,54),TEAL,INK)
+				_draw_level_picker(Vector2(452,514))
+				_button("host_start","START LEVEL %02d TOGETHER" % (lobby_level+1),Rect2(452,586,536,54),TEAL,INK)
 			else:
 				_text("Waiting for the first player to start…" if network.dedicated else "Waiting for the host to begin…",Vector2(452,600),19,GOLD)
 	_button("leave_lobby","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
-	_text("Departments are shared automatically as players join.",Vector2(400,741),16,MUTED)
+	_text("SWAP exchanges your departments with that player before the next level.",Vector2(400,754),16,MUTED)
 	_button("lobby_settings", "VOICE & RECORDINGS", Rect2(400, 780, 300, 45), PANEL_LIGHT, TEAL, 14)
 
+# Co-op level picker: every level is open in co-op, so a team can play any scenario.
+func _draw_level_picker(origin: Vector2) -> void:
+	lobby_level = clampi(lobby_level, 0, 5)
+	var data: Dictionary = BeaconCampaign.shift_data(lobby_level)
+	_text("LEVEL %02d  ·  %s" % [lobby_level+1, str(data.get("title","")).to_upper()], origin, 13, TEAL)
+	for i in range(6):
+		var picked: bool = i == lobby_level
+		_button("lobby_level:%d" % i, "%02d" % (i+1), Rect2(origin + Vector2(i * 91, 12), Vector2(84, 40)), TEAL if picked else PANEL_LIGHT, INK if picked else CREAM, 15)
+
+func _draw_role_picker() -> void:
+	var panel := Rect2(1120, 160, 388, 438)
+	_panel(panel, INK, Color("355966"))
+	_text("CHANGE ROLES", panel.position + Vector2(20, 36), 22, TEAL)
+	_wrap("Swap departments with a teammate for the next level.", panel.position + Vector2(20, 66), 348, 15, MUTED, 22)
+	var row := 0
+	for peer_id in network.roster:
+		var y: float = panel.position.y + 130 + row * 70
+		var mine: bool = int(peer_id) == multiplayer.get_unique_id()
+		_text(_short(network.player_label(int(peer_id)), 18 if mine else 20) + (" (you)" if mine else ""), Vector2(panel.position.x + 20, y), 17, CREAM)
+		var kinds: Array[String] = []
+		for kind in network.departments_for(int(peer_id)): kinds.append(KIND_SHORT[kind])
+		_text(" + ".join(kinds), Vector2(panel.position.x + 20, y + 24), 14, TEAL if mine else MUTED)
+		if not mine and network.roster.has(multiplayer.get_unique_id()):
+			_button("change_role:%d" % peer_id, "SWAP", Rect2(panel.end.x - 100, y + 5, 80, 32), PANEL_LIGHT, TEAL, 13)
+		row += 1
+	if network.roster.size() == 1:
+		_text("You command every department.", panel.position + Vector2(20, 238), 16, MUTED)
+
+func _refresh_voice_mix() -> void:
+	if not is_instance_valid(voice): return
+	voice.peer_playback_gains.clear()
+	for peer in network.roster:
+		if int(peer) == multiplayer.get_unique_id(): continue
+		var key := "voice_player_%d" % (int(network.roster[peer]) + 1)
+		voice.peer_playback_gains[int(peer)] = AudioDirector.slider_gain(audio.sound_level(key))
+
 func _draw_settings() -> void:
-	_draw_page_header("Settings", "SOUND, DISPLAY & LOCAL RECORDINGS")
+	_draw_page_header("", "SOUND, DISPLAY & LOCAL RECORDINGS")
+	_button("settings_back","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
+	_button("settings_tab:settings", "Settings", Rect2(80,143,200,54), TEAL if settings_tab == "settings" else PANEL, INK if settings_tab == "settings" else CREAM, 27)
+	_button("settings_tab:sounds", "Sounds", Rect2(296,143,200,54), TEAL if settings_tab == "sounds" else PANEL, INK if settings_tab == "sounds" else CREAM, 27)
+	if settings_tab == "sounds":
+		_text("Your mix · saved on this computer", Vector2(80,228), 17, CREAM)
+		_text("0 = mute     50 = default     100 = maximum", Vector2(80,826), 17, TEAL)
+		_text("Music and Sound effects switches in Settings still apply.", Vector2(80,855), 15, MUTED)
+		return
 	var rows := [
 		["music", "Music", "Background soundtrack", music_enabled],
 		["sfx", "Sound effects", "Calls, crews and rescue cues", sfx_enabled],
 		["motion", "Reduced motion", "Calmer animation", reduced_motion],
 		["research", "Record my mouse", "My in-game movements and clicks, saved here", research_enabled],
-		["mic", "Microphone", "Hold V to talk · headphones recommended", voice.mic_enabled],
+		["mic", "Voice chat", "Open microphone while enabled · headphones recommended", voice.mic_enabled],
 		["voice_consent", "Allow team recording", "Let teammates include my voice in their files", voice.recording_consent],
 		["voice_record", "Save team voice", "One local audio file with consenting players", voice.recording_enabled]
 	]
@@ -1092,15 +1336,18 @@ func _draw_settings() -> void:
 
 func _draw_pause() -> void:
 	_overlay()
-	_panel(Rect2(490,225,460,510),INK,Color("355966"))
+	# Sized to its buttons (no empty space at the bottom).
+	_panel(Rect2(490,225,460,(520 if tutorial_active else 440)),INK,Color("355966"))
 	_text("Team menu" if network.active else "Paused",Vector2(550,286),36,CREAM)
 	_text("The shared shift is still running." if network.active else "Ready when you are.",Vector2(550,322),17,MUTED)
 	_button("unpause","BACK ON DUTY",Rect2(550,359,340,54),TEAL,INK)
 	_button("pause_settings","SETTINGS",Rect2(550,429,340,48),PANEL_LIGHT,CREAM)
 	_button("help","HOW TO PLAY",Rect2(550,491,340,48),PANEL_LIGHT,CREAM)
-	_button("tutorial_skip" if tutorial_active else "tutorial","LEAVE PRACTICE" if tutorial_active else "MEET THE CREW · TUTORIAL",Rect2(550,553,340,48),PANEL_LIGHT,GOLD,14)
-	_button("save_exit","SAVE & RETURN TO TOWN",Rect2(550,615,340,48),PANEL_LIGHT,CREAM,14)
-	_text("ESC  resume    ·    F11  fullscreen",Vector2(561,705),13,MUTED)
+	# The tutorial is started from the title screen only (playtest 15.10).
+	if tutorial_active:
+		_button("tutorial_skip","LEAVE PRACTICE",Rect2(550,553,340,48),PANEL_LIGHT,GOLD,14)
+	_button("save_exit","SAVE & RETURN TO TOWN",Rect2(550,615 if tutorial_active else 553,340,48),PANEL_LIGHT,CREAM,14)
+	_text("ESC  resume    ·    F11  fullscreen",Vector2(561,(705 if tutorial_active else 643)),13,MUTED)
 
 func _draw_help() -> void:
 	_overlay()
@@ -1108,9 +1355,9 @@ func _draw_help() -> void:
 	_text("On duty",Vector2(365,202),30,CREAM)
 	var tips := [
 		["01", "Send your crews", "Pick a crew, then a call. Or hover a call and press 1–4. Its icons show which departments are still needed."],
-		["02", "Help on scene", "Q scouts a ? call. E supplies an arrived crew. SPACE gives the team a coffee boost."],
-		["03", "Explore the town", "Drag: pan. Wheel: zoom. Minimap: jump. MAP: overview. Right-click: clear. F: close-up."],
-		["04", "Coordinate", "Enable your microphone in Settings, then hold V to talk. Recordings are optional and saved on your computer."]
+		["02", "Help on scene", "Q scouts. E supplies. SPACE boosts. To leave a scene, select the busy crew in the bottom bar, then WITHDRAW or V."],
+		["03", "Explore the town", "Click or scroll up: go there. Scroll down: whole town. Drag: pan. M: minimap. Right-click: clear."],
+		["04", "Coordinate", "Enable Voice chat in Settings to keep your microphone open. Turn it off there to mute. Recordings are optional and local."]
 	]
 	for i in range(tips.size()):
 		var y := 257+i*105
@@ -1124,26 +1371,57 @@ func _draw_results() -> void:
 	_panel(Rect2(337,160,766,590),INK,Color("355966"))
 	_text("SHIFT COMPLETE" if sim.won else "A DIFFICULT SHIFT",Vector2(388,211),13,TEAL if sim.won else CORAL)
 	_text(("A town worth saving." if sim.shift_index==5 else "The light stays on.") if sim.won else "Regroup. You can do this.",Vector2(386,267),38,CREAM)
+	# Stars pop in one at a time with a rising chime; the numbers count up.
+	var shown_for: float = elapsed_ui - results_since if results_since >= 0.0 else 99.0
+	if reduced_motion: shown_for = 99.0
 	for i in range(3):
-		_star(Vector2(947+i*35,205),12,GOLD if i<sim.stars else PANEL_LIGHT)
-	var stats := [[str(sim.rescued),"NEIGHBORS RESCUED"],["+%d" % sim.shift_reward,"WORKSHOP CREDITS"],["%d%%"%sim.reputation,"COMMUNITY CONFIDENCE"]]
+		var appear: float = 0.5 + i * 0.45
+		var earned: bool = i < sim.stars
+		var grow: float = clampf((shown_for - appear) / 0.25, 0.0, 1.0)
+		if earned and grow > 0.0 and results_stars_played <= i:
+			results_stars_played = i + 1
+			audio.play_cue("combo", 1.0 + i * 0.18)
+		var radius: float = 12.0 if not earned else 12.0 * (grow + sin(grow * PI) * 0.5)
+		_star(Vector2(947+i*35,205),12,PANEL_LIGHT)
+		if earned and grow > 0.0: _star(Vector2(947+i*35,205),radius,GOLD)
+	var count_k: float = clampf((shown_for - 0.2) / 1.1, 0.0, 1.0)
+	count_k = 1.0 - pow(1.0 - count_k, 3)
+	var stats := [["%d / %d" % [roundi(sim.rescued * count_k), sim.target],"NEIGHBORS RESCUED / GOAL"],[str(roundi(sim.resolved_count * count_k)),"CALLS RESOLVED"],["%d%%"%roundi(sim.reputation * count_k),"COMMUNITY CONFIDENCE"]]
 	for i in range(3):
 		_text(stats[i][0],Vector2(390+i*226,344),37,GOLD)
 		_text(stats[i][1],Vector2(390+i*226,371),10,MUTED)
-	_text("+%d WORKSHOP CREDITS    ·    BEST CHAIN %d    ·    %d CALLS RESOLVED" % [sim.shift_reward,sim.best_combo,sim.resolved_count],Vector2(390,397),12,TEAL)
-	_text("%d calls resolved · %d missed" % [sim.resolved_count, sim.failed_count], Vector2(390,453),20,MUTED)
+	_text("BEST CHAIN %d    ·    %d ROADS CLEARED" % [sim.best_combo,int(sim.get("roads_cleared"))],Vector2(390,397),12,TEAL)
+	# Say exactly why there are (not) stars (playtest 15.10: 62%, 0 stars, no idea why).
+	var why: String = ""
+	var why_color: Color = MUTED
+	if not sim.won:
+		var reasons: Array[String] = []
+		if sim.rescued < sim.target: reasons.append("rescue %d more neighbors (goal %d)" % [sim.target - sim.rescued, sim.target])
+		if sim.reputation < sim.minimum_confidence: reasons.append("keep confidence at %d%% or more" % roundi(sim.minimum_confidence))
+		why = ("No stars: to win, " + " and ".join(reasons) + ".") if not reasons.is_empty() else "No stars this time."
+		why_color = CORAL
+	elif sim.stars == 1:
+		why = "2 stars: 75%+ confidence and at most 3 missed calls."
+	elif sim.stars == 2:
+		why = "3 stars: 92%%+ confidence, no missed calls and %d+ rescued." % (sim.target + 8)
+	_text("%d calls resolved · %d missed" % [sim.resolved_count, sim.failed_count], Vector2(390,440),18,MUTED)
+	if why != "": _text(why, Vector2(390,466), 15, why_color)
 	if research_enabled or voice.recording_enabled:
 		_button("open_data", "OPEN RECORDINGS", Rect2(390,480,260,40), PANEL_LIGHT, TEAL, 14)
 	if network.active and not network.hosting:
 		if network.can_start_session():
 			_button("host_start", "NEXT SHIFT" if sim.won and sim.shift_index < 5 else "PLAY AGAIN", Rect2(390,558,656,56), TEAL, INK, 17)
+			_text("OR PICK A LEVEL", Vector2(390,512), 12, TEAL)
+			for i in range(6):
+				_button("lobby_start:%d" % i, "%02d" % (i+1), Rect2(Vector2(520 + i * 88, 494), Vector2(80, 34)), PANEL_LIGHT, CREAM, 14)
 		else:
 			_text("Waiting for the session leader.",Vector2(390,585),19,GOLD)
 		_button("leave_lobby","LEAVE THE ROOM",Rect2(390,631,656,46),PANEL_LIGHT,CREAM,15)
 	else:
 		_button("results_continue","NEXT SHIFT  >" if sim.won and sim.shift_index<5 else ("BACK TO YOUR TOWN" if sim.won else "TRY THIS SHIFT AGAIN"),Rect2(390,558,656,56),TEAL,INK,17)
-		_button("results_workshop","VISIT THE WORKSHOP",Rect2(390,631,656,46),PANEL_LIGHT,GOLD,15)
+		_button("results_levels","CHOOSE ANOTHER LEVEL",Rect2(390,631,656,46),PANEL_LIGHT,GOLD,15)
 	_text("Progress saved locally",Vector2(628,716),13,MUTED)
+	if network.active: _draw_role_picker()
 
 func _draw_page_header(title: String, eyebrow: String) -> void:
 	_text(eyebrow,Vector2(80,52),13,TEAL)
@@ -1231,10 +1509,6 @@ func _input(event: InputEvent) -> void:
 		research.set_clock(sim.elapsed, sim.shift_index)
 		if event is InputEventMouseMotion: research.log_pointer(event.position, event.relative)
 		elif event is InputEventMouseButton: research.log_mouse_button(event)
-	if event is InputEventKey and event.keycode == KEY_V and not event.echo and not ip_input.has_focus():
-		voice.set_push_to_talk(event.pressed)
-		get_viewport().set_input_as_handled()
-		return
 	var over_hud_button: bool = false
 	if screen=="game" and event is InputEventMouse:
 		var p: Vector2 = event.position - global_position
@@ -1294,7 +1568,7 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 	if event is InputEventKey and event.pressed and not event.echo:
-		if ip_input.has_focus():
+		if ip_input.has_focus() or name_input.has_focus():
 			if event.keycode == KEY_ENTER: _action("join")
 			return
 		match event.keycode:
@@ -1325,18 +1599,24 @@ func _input(event: InputEvent) -> void:
 				if screen=="game": _action("supply")
 			KEY_R:
 				if screen=="game": _action("ping")
-			KEY_F:
+			KEY_C:
 				if screen=="game": _action("focus")
+			KEY_V:
+				if _withdraw_control_visible(): _action("withdraw:%d" % selected_unit)
 			KEY_SPACE:
 				if screen=="game": _action("special")
 			KEY_TAB:
 				if screen=="game": _cycle_incident()
 			KEY_M:
-				music_enabled = not music_enabled
-				audio.set_music_enabled(music_enabled)
+				# M shows / hides the minimap (music is switched in Settings).
+				if screen=="game": _action("minimap_toggle")
 
 func _action(id: String) -> void:
 	audio.play_cue("click")
+	if id.begins_with("settings_tab:"):
+		settings_tab = id.trim_prefix("settings_tab:")
+		_update_visibility()
+		return
 	if id=="tutorial_skip":
 		_end_tutorial(false)
 		return
@@ -1352,6 +1632,15 @@ func _action(id: String) -> void:
 	if id.begins_with("unit:"):
 		_select_unit(id.trim_prefix("unit:").to_int())
 		return
+	if id.begins_with("withdraw:"):
+		var unit_id := id.trim_prefix("withdraw:").to_int()
+		var unit: Dictionary = sim.get_unit(unit_id)
+		if not unit.is_empty(): _command("withdraw", {"unit_id": unit_id, "kind": str(unit.kind)})
+		return
+	if id.begins_with("change_role:"):
+		if screen in ["lobby", "results"] and not sim.running:
+			network.send_command("change_role", {"target_peer_id": id.trim_prefix("change_role:").to_int()})
+		return
 	if id.begins_with("plan:"):
 		if tutorial_active: _plan_kind(id.trim_prefix("plan:"))
 		else: _pick_department(id.trim_prefix("plan:"))
@@ -1362,18 +1651,18 @@ func _action(id: String) -> void:
 	if id.begins_with("dispatch:"):
 		_plan_kind(id.trim_prefix("dispatch:"))
 		return
+	if id.begins_with("lobby_level:"):
+		lobby_level = clampi(id.trim_prefix("lobby_level:").to_int(), 0, 5)
+		return
+	if id.begins_with("lobby_start:"):
+		lobby_level = clampi(id.trim_prefix("lobby_start:").to_int(), 0, 5)
+		_submit_rating()
+		if network.dedicated: network.send_command("start_shift", {"shift": lobby_level})
+		else: _begin_shift(lobby_level)
+		return
 	if id.begins_with("shift:"):
 		_begin_shift(id.trim_prefix("shift:").to_int())
 		return
-	if id.begins_with("buy:"):
-		if has_resume:
-			_toast("Finish your suspended shift before changing its equipment.")
-			return
-		if sim.buy_upgrade(id.trim_prefix("buy:")):
-			audio.play_cue("upgrade")
-			_save_progress()
-			_toast("Equipment upgraded. Your crews thank you.")
-		else: _toast("More credits needed, or this upgrade is complete.")
 		return
 	if id.begins_with("toggle:"):
 		_toggle(id.trim_prefix("toggle:"))
@@ -1384,6 +1673,7 @@ func _action(id: String) -> void:
 	match id:
 		"lobby_settings": previous_screen="lobby"; screen="settings"
 		"map_overview": _toggle_overview()
+		"minimap_toggle": minimap_hidden = not minimap_hidden
 		"map_in": _zoom_map(1.0, MAP_VIEW.get_center())
 		"map_out": _zoom_map(-1.0, MAP_VIEW.get_center())
 		"game_settings": previous_screen="game"; screen="settings"
@@ -1401,9 +1691,6 @@ func _action(id: String) -> void:
 		"settings": previous_screen=screen; screen="settings"
 		"settings_back": screen=previous_screen; _save_progress(screen=="pause")
 		"pause_settings": previous_screen="pause"; screen="settings"
-		"upgrades":
-			if has_resume: _toast("Resume and finish your saved shift before visiting the workshop.")
-			else: screen="upgrades"
 		"quit":
 			if tutorial_active: _end_tutorial(false,false)
 			_save_progress(screen in ["game","pause"])
@@ -1411,24 +1698,33 @@ func _action(id: String) -> void:
 			voice.shutdown()
 			get_tree().quit()
 		"co_op": screen="lobby"
-		"host": network.host(); _toast(network.status)
+		"host":
+			network.local_player_name = NetworkSession.clean_player_name(name_input.text)
+			name_input.text = network.local_player_name
+			name_input.release_focus()
+			network.host()
+			if network.hosting: sim.running = false
+			_toast(network.status)
 		"join":
+			network.local_player_name = NetworkSession.clean_player_name(name_input.text)
+			name_input.text = network.local_player_name
+			name_input.release_focus()
 			guest_progress=sim.snapshot()
 			network.join(ip_input.text)
 			ip_input.release_focus()
 			_toast(network.status)
 		"host_start":
 			if network.dedicated:
-				network.send_command("start_shift")
+				# From the lobby the chosen level starts; from results: next shift / play again.
+				network.send_command("start_shift", {"shift": lobby_level} if screen == "lobby" else {})
 			else:
-				_begin_shift(unlocked)
+				_begin_shift(lobby_level if screen == "lobby" else unlocked)
 		"leave_lobby":
 			if screen=="results": _submit_rating()
 			_leave_network()
 			screen="title"
 		"pause":
 			screen="pause"
-			voice.set_push_to_talk(false)
 		"unpause":
 			screen="game"
 		"help":
@@ -1448,7 +1744,10 @@ func _action(id: String) -> void:
 			if sim.won and sim.shift_index<5: _begin_shift(sim.shift_index+1)
 			elif sim.won: screen="campaign"
 			else: _begin_shift(sim.shift_index)
-		"results_workshop": _submit_rating(); screen="upgrades"; _leave_network()
+		"results_levels":
+			_submit_rating()
+			# In co-op the host picks the next level in the lobby; solo goes to the shift list.
+			screen = "lobby" if network.active and network.hosting else "campaign"
 		"open_data": OS.shell_open(ProjectSettings.globalize_path("user://"))
 		"locked": _toast("Finish the previous shift to unlock this part of the story.")
 
@@ -1459,6 +1758,7 @@ func _begin_tutorial(auto_start: bool = false) -> void:
 		_toast("Meet the crew from the solo title screen, outside your shared room.")
 		return
 	_stop_capture()
+	audio.reset_session()
 	_tutorial_campaign_sim=sim
 	_tutorial_saved_ui={"screen":screen,"selected":selected,"selected_unit":selected_unit,"role_filter":role_filter,"focused_unit":focused_unit,"focused_unit_left":focused_unit_left,"action_feedback":action_feedback,"action_feedback_left":action_feedback_left,"focus_open":focus_open,"focus_hold_id":focus_hold_id,"focus_hold_left":focus_hold_left,"save_timer":save_timer,"refresh":refresh,"pressure":pressure_display,"ticker":ticker,"result_saved":result_saved,"result_rating_sent":result_rating_sent,"orders":orders.duplicate(true),"has_resume":has_resume,"toast_text":toast_text,"toast_left":toast_left}
 	_tutorial_auto_start=auto_start
@@ -1527,6 +1827,7 @@ func _end_tutorial(completed: bool = false, launch_after: bool = true) -> void:
 	tutorial_completed=tutorial_completed or completed
 	tutorial_seen=true
 	sim=_tutorial_campaign_sim
+	audio.reset_session(sim.incidents)
 	_tutorial_campaign_sim=null
 	town.sim=sim
 	field_focus.sim=sim
@@ -1612,12 +1913,16 @@ func _begin_shift(index: int) -> void:
 	_stop_capture()
 	_route_cache_until = 0
 	sim.start_shift(clampi(index,0,5))
+	if fx != null:
+		fx.reset()
+		fx.displayed_rescued = 0.0
 	if dedicated_server:
 		orders.clear()
 		result_saved = false
 		screen = "game"
 		print("Dedicated server: Shift 1 started.")
 		return
+	audio.reset_session()
 	town.set_theme(index)
 	selected=-1
 	selected_unit=-1
@@ -1660,8 +1965,16 @@ func _finish_shift() -> void:
 func _select_incident(id: int) -> void:
 	focus_hold_left=0
 	if screen != "game": return
-	# A crew is selected: clicking a call sends that crew there.
-	if selected_unit>=0:
+	# A crew is selected: clicking a call sends that crew there. Not to a "?"
+	# call (playtest 15.10): that only opens its card, where it can be scouted,
+	# and the crew stays selected for another call.
+	var clicked: Dictionary = _incident(id)
+	if selected_unit>=0 and not clicked.is_empty() and not bool(clicked.get("discovered", true)) and not tutorial_active:
+		selected=id
+		_toast("Unconfirmed call: scout it first (SCOUT button on its card, or Q). Your crew is still selected.")
+		audio.play_cue("click")
+		return
+	if selected_unit>=0 and sim.get_unit(selected_unit).get("state", "") in ["idle", "return"]:
 		var crew: Dictionary = sim.get_unit(selected_unit)
 		var payload := {"incident_id":id,"kind":str(crew.get("kind","")),"unit_id":selected_unit}
 		if not crew.is_empty() and (not tutorial_active or tutorial.can_action("dispatch",payload)):
@@ -1694,6 +2007,9 @@ func _command(action: String, payload: Dictionary) -> void:
 		_toast("You command %s. Ask %s to send that crew." % [network.departments_text(), network.player_label(owner) if owner>0 else "a teammate"])
 		return
 	network.send_command(action,payload)
+	if action == "withdraw":
+		var withdrawn_id := int(payload.get("unit_id", -1))
+		predicted_dispatches = predicted_dispatches.filter(func(p): return int(p.unit_id) != withdrawn_id)
 	if action == "dispatch" and network.active and not network.hosting and sim.running:
 		var id: int = int(payload.get("incident_id", -1))
 		if sim.dispatch(id, str(payload.get("kind", "")), int(payload.get("unit_id", -1))):
@@ -1706,10 +2022,19 @@ func _command(action: String, payload: Dictionary) -> void:
 			focused_unit_left = 0
 
 func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
+	if action == "change_role":
+		var between_levels := screen in ["lobby", "results"] or (screen == "settings" and previous_screen == "lobby")
+		if between_levels and not sim.running and network._valid_payload(action, payload):
+			if network.swap_role(_peer_id, int(payload.target_peer_id)):
+				selected_unit = -1
+				role_filter = ""
+				predicted_dispatches.clear()
+		return
 	if action == "start_shift":
 		if dedicated_server and screen in ["lobby", "results"] and network.can_start_session(_peer_id) and multiplayer.get_peers().has(_peer_id):
 			_dedicated_shift_started = true
 			var next_shift := sim.shift_index + 1 if screen == "results" and sim.won and sim.shift_index < 5 else (sim.shift_index if screen == "results" and not sim.won else 0)
+			if payload.has("shift"): next_shift = clampi(int(payload.shift), 0, 5)
 			_begin_shift(next_shift)
 		return
 	_route_cache_until = 0
@@ -1725,11 +2050,21 @@ func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
 	match action:
 		"dispatch":
 			success=sim.dispatch(id,str(payload.get("kind","")),int(payload.get("unit_id",-1)))
+		"clear_road":
+			# The crew must really belong to the department the sender commands.
+			var crew: Dictionary = sim.get_unit(int(payload.get("unit_id",-1)))
+			success=not crew.is_empty() and str(crew.kind)==str(payload.get("kind","")) and sim.clear_road(int(payload.get("road_event_id",-1)),int(crew.id))
+		"withdraw":
+			var crew: Dictionary = sim.get_unit(int(payload.get("unit_id", -1)))
+			success = not crew.is_empty() and str(crew.kind) == str(payload.get("kind", "")) and sim.withdraw(int(crew.id))
 		"scout": success=sim.scout(id)
 		"supply": success=sim.supply(id)
 		"special": success=sim.use_special()
 		"ping": network.announce("%s: %s" % [network.player_label(_peer_id) if network.active else "Radio", str(payload.get("text","Help needed"))]); success=true
 	if success:
+		if action=="clear_road" and local_command:
+			selected_unit=-1
+			role_filter=""
 		if action=="dispatch" and local_command:
 			selected_unit=-1
 			selected=id
@@ -1741,7 +2076,8 @@ func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
 			_sync_tutorial()
 		elif action=="ping": research.log_event(action,payload)
 	else:
-		var reason: String = "Crew unavailable or already assigned. Check the call's remaining needs." if action=="dispatch" else "Not available yet. Select an active call or let supplies recharge."
+		var reason: String = "Crew unavailable or already assigned. Check the call's remaining needs." if action=="dispatch" else ("That crew can't clear this road right now." if action=="clear_road" else "Not available yet. Select an active call or let supplies recharge.")
+		if action == "withdraw": reason = "That crew is no longer assigned to a call or road."
 		if local_command: _toast(reason)
 		elif network.has_method("broadcast_event"): network.call("broadcast_event",{"type":"action_denied","text":reason,"actor_peer":_peer_id})
 	_process_events()
@@ -1750,6 +2086,13 @@ func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
 func _process_events() -> void:
 	for event in sim.drain_events():
 		event["actor_peer"] = event_actor
+		if str(event.get("type", "")) == "shift_complete":
+			# Presentation metadata only: simulation already converted these calls.
+			var failed_ids: Array[int] = []
+			for incident: Dictionary in sim.incidents:
+				if incident.status == "failed" and is_equal_approx(float(incident.resolved_at), sim.elapsed):
+					failed_ids.append(int(incident.id))
+			event["failed_incident_ids"] = failed_ids
 		_handle_game_event(event)
 		if network.has_method("broadcast_event"):
 			network.call("broadcast_event",event)
@@ -1775,9 +2118,16 @@ func _handle_game_event(event: Dictionary) -> void:
 		research.log_event("incident_spawned" if type=="incident" else type,event)
 	if type in ["resolved","rescue","incident_resolved"]:
 		audio.play_cue("rescue")
-		_celebrate(Vector2(760,120))
-		if town.has_method("celebrate") and event.get("pos") is Vector2:
-			town.call("celebrate",event.pos,int(event.get("points",0)),int(event.get("people",1)))
+		if fx != null and event.get("pos") is Vector2:
+			fx.rescue(event.pos, int(event.get("people",1)), rescued_anchor)
+			var time_left: float = float(event.get("time_left", 99.0))
+			var chain: int = int(event.get("combo", 0))
+			if time_left <= 5.0:
+				fx.banner("CLUTCH SAVE!  %ds LEFT" % maxi(1, ceili(time_left)), GOLD)
+				audio.play_cue("combo", 1.25)
+			elif chain >= 2:
+				fx.banner("x%d CHAIN!" % chain, TEAL, chain >= 5)
+				audio.play_cue("combo", minf(1.0 + 0.07 * chain, 1.7))
 		if int(event.get("incident_id",-1))==selected:
 			focus_hold_id=selected
 			focus_hold_left=2.2
@@ -1786,7 +2136,48 @@ func _handle_game_event(event: Dictionary) -> void:
 	elif type in ["disruption","warning"]:
 		_toast(message)
 		audio.play_cue("alarm")
-	elif type in ["escalated","critical","urgent"]:
+	elif type=="road_event":
+		_toast(message)
+		audio.play_cue("alarm")
+	elif type=="bridge_flooded":
+		_toast(message)
+		audio.play_cue("alarm")
+		if fx != null: fx.banner("%s FLOODED!" % str(event.get("bridge","Bridge")).to_upper(), Color("9fd3ff"), false)
+	elif type=="bridge_open":
+		_toast(message)
+		audio.play_cue("arrival")
+		if fx != null and event.get("pos") is Vector2: fx.road_open(event.pos, Color("9fd3ff"))
+	elif type=="hazard_warning":
+		var tint: Color = HAZARD_TINT.get(str(event.get("hazard_type","")), GOLD)
+		audio.play_cue("hazard")
+		if fx != null: fx.banner("⚠ %s IN %ds" % [str(event.get("title","Hazard")).to_upper(), int(BeaconCampaign.HAZARD_WARNING_SECONDS)], tint, false)
+	elif type=="hazard_started":
+		_toast(message)
+		var hazard_type: String = str(event.get("hazard_type",""))
+		audio.play_cue("power_down" if hazard_type=="blackout" else "wind")
+		if fx != null:
+			var title: String = {"blackout": "BLACKOUT!", "sandstorm": "SANDSTORM!", "squall": "SQUALL!"}.get(hazard_type, "HAZARD!")
+			fx.banner(title, HAZARD_TINT.get(hazard_type, GOLD), true)
+	elif type=="hazard_ended":
+		_toast(message)
+		audio.play_cue("power_up" if str(event.get("hazard_type",""))=="blackout" else "arrival")
+	elif type=="road_cleared":
+		_toast(message)
+		var blackout: bool = str(sim.get_road_event(int(event.get("road_event_id",-1))).get("type",""))=="blackout"
+		audio.play_cue("power_up" if blackout else "arrival")
+		if blackout and fx != null: fx.banner("LIGHTS BACK ON!", GOLD, false)
+		if fx != null and event.get("pos") is Vector2: fx.road_open(event.pos, KIND_COLOR.get(str(event.get("kind","")), GOLD))
+	elif type=="road_clear_dispatched":
+		audio.play_dispatch(str(event.get("kind", "")))
+		if fx != null: fx.dispatched(sim.get_unit(int(event.get("unit_id",-1))))
+	elif type == "critical":
+		audio.queue_incident_cue("critical_incident", int(event.get("incident_id", -1)))
+		town.alert()
+	elif type in ["escalated","urgent"]:
+		# A stage-3 escalation and its critical event can share the same tick.
+		var call := _incident(int(event.get("incident_id", -1)))
+		if int(event.get("hazard_stage", 0)) >= 3 or (not call.is_empty() and bool(call.get("critical_sent", false))):
+			return
 		if urgency_cooldown<=0:
 			audio.play_cue("urgent")
 			town.alert()
@@ -1795,10 +2186,18 @@ func _handle_game_event(event: Dictionary) -> void:
 		audio.play_cue("arrival")
 	elif type=="rapid_response":
 		audio.play_cue("combo")
-		_celebrate(Vector2(1040,120))
-	elif type in ["failed","incident_failed"]: audio.play_cue("fail")
+		if fx != null: fx.banner("RAPID RESPONSE!", TEAL, false)
+	elif type in ["failed","incident_failed"]:
+		audio.queue_incident_cue("incident_failed", int(event.get("incident_id", -1)))
+		if fx != null and event.get("pos") is Vector2: fx.failed(event.pos)
+	elif type == "shift_complete":
+		var failed_ids: Array[int] = []
+		failed_ids.assign(event.get("failed_incident_ids", []))
+		audio.finish_incident_cues(failed_ids)
 	elif type=="combo": audio.play_cue("combo")
-	elif type=="dispatch": audio.play_cue("dispatch")
+	elif type=="dispatch":
+		audio.play_dispatch(str(event.get("kind", "")))
+		if fx != null: fx.dispatched(sim.get_unit(int(event.get("unit_id",-1))))
 	elif type in ["scout","supply"]:
 		audio.play_cue("upgrade")
 		var effect: Dictionary = sim.last_action_effect
@@ -1808,6 +2207,15 @@ func _handle_game_event(event: Dictionary) -> void:
 	elif type=="dispatch_mismatch":
 		_toast(message)
 		audio.play_cue("fail")
+	elif type == "unit_withdrawn":
+		_route_cache_until = 0
+		var withdrawn_id := int(event.get("unit_id", -1))
+		predicted_dispatches = predicted_dispatches.filter(func(p): return int(p.unit_id) != withdrawn_id)
+		if local_actor:
+			selected_unit = -1
+			role_filter = ""
+			_toast(message)
+			audio.play_cue("select")
 	elif type=="action_denied" and local_actor: _toast(message)
 
 func _receive_snapshot(data: Dictionary) -> void:
@@ -1824,6 +2232,7 @@ func _receive_snapshot(data: Dictionary) -> void:
 	sim.apply_snapshot(data.get("simulation",{}))
 	var restarting := sim.shift_index != previous_shift or sim.elapsed + 1.0 < previous_elapsed
 	if restarting: _stop_capture()
+	if next_screen == "game" and (entering_session or restarting): audio.reset_session(sim.incidents)
 	if next_screen == "game" and sim.running and (entering_session or restarting): _reset_exploration_camera()
 	host_speed = float(data.get("speed", 1.0))
 	var now: int = Time.get_ticks_msec()
@@ -1834,7 +2243,9 @@ func _receive_snapshot(data: Dictionary) -> void:
 		sim.tick(clampf(network.round_trip_ms() * 0.0005, 0.0, 0.15) * host_speed)
 		_reapply_predictions()
 		sim.drain_events()
-	if next_screen in ["game","pause","results","help"]:
+	if next_screen == "lobby" and not sim.running:
+		if not (screen == "settings" and previous_screen == "lobby"): screen = "lobby"
+	elif next_screen in ["game","pause","results","help"]:
 		if next_screen != "game" or not keep_menu: screen=next_screen
 	orders=data.get("orders",{})
 	# Repainting the town backdrop is expensive; only do it when the shift changes.
@@ -1871,6 +2282,7 @@ func _restore_guest_progress() -> void:
 	if not guest_progress.is_empty():
 		sim.apply_snapshot(guest_progress)
 		guest_progress.clear()
+	if is_instance_valid(audio): audio.reset_session(sim.incidents)
 
 func _toggle(id: String) -> void:
 	match id:
@@ -1927,6 +2339,7 @@ func _resume_shift() -> void:
 		var data=JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))
 		if data is Dictionary and data.has("session"):
 			sim.apply_snapshot(data.session)
+			audio.reset_session(sim.incidents)
 			screen="game"
 			_reset_exploration_camera()
 			result_saved=false

@@ -43,7 +43,7 @@ func push(peer_id: int, sequence: int, pcm: PackedByteArray, now_frame: int) -> 
 	return true
 
 
-func render(at_frame: int, local_peer: int, recording_permissions: Dictionary, playback_gains: Dictionary = {}) -> Dictionary:
+func render(at_frame: int, local_peer: int, recording_permissions: Dictionary, playback_gains: Dictionary = {}, playback_gain: float = 1.0) -> Dictionary:
 	var audible := PackedFloat32Array()
 	var recorded := PackedFloat32Array()
 	audible.resize(FRAMES)
@@ -60,7 +60,7 @@ func render(at_frame: int, local_peer: int, recording_permissions: Dictionary, p
 			var pcm: PackedByteArray = packet.pcm
 			for index in range(maxi(0, begins - at_frame), mini(FRAMES, begins + FRAMES - at_frame)):
 				var sample := float(pcm.decode_s16((at_frame + index - begins) * 2)) / 32768.0
-				if int(peer_id) != local_peer: audible[index] += sample * float(playback_gains.get(peer_id, 1.0))
+				if int(peer_id) != local_peer: audible[index] += sample * float(playback_gains.get(peer_id, 1.0)) * playback_gain
 				if save_voice: recorded[index] += sample
 	var stereo := PackedVector2Array()
 	var output := PackedByteArray()

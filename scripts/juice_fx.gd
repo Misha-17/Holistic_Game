@@ -100,7 +100,9 @@ func banner(text: String, color: Color, big := true) -> void:
 func dispatched(unit: Dictionary) -> void:
 	card_pulse[int(unit.get("id", -1))] = 0.7
 	var points: Array = [unit.get("pos", Vector2.ZERO)]
-	for point in unit.get("path", []): points.append(point)
+	var path: Array = unit.get("path", [])
+	# Only the part still ahead of the crew: never redraw a trip it already drove.
+	for i in range(clampi(int(unit.get("path_index", 0)), 0, path.size()), path.size()): points.append(path[i])
 	if points.size() > 1:
 		effects.append({"type": "route", "points": points, "color": KIND_COLOR.get(str(unit.get("kind", "")), CREAM), "t": 0.0, "dur": 1.2})
 

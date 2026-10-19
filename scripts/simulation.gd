@@ -6,11 +6,11 @@ const UNIT_KINDS: Array[String] = ["fire", "medic", "engineer", "police"]
 const INCIDENT_KINDS: Array[String] = ["fire", "medical", "flood", "power", "police"]
 # Countdowns tick in real seconds, so each call's deadline includes the time the crews need to work on scene.
 const WORK_TIME_ALLOWANCE := 1.35
-const CREWS_PER_DEPARTMENT := 3
+const CREWS_PER_DEPARTMENT := 4
 # Every department has the same number of crews, so every player carries the
-# same load (playtest 15.10): 3 each in levels 1-3, 4 each in levels 4-6.
+# same load: 4 each in every level (playtest 19.10; before, levels 1-3 had 3).
 # See Campaign.crews_per_department().
-const CREWS_BY_DEPARTMENT := {"fire": 3, "medic": 3, "engineer": 3, "police": 3}
+const CREWS_BY_DEPARTMENT := {"fire": 4, "medic": 4, "engineer": 4, "police": 4}
 const ROAD_X: Array[float] = [96.0 / 2752, 352.0 / 2752, 608.0 / 2752, 864.0 / 2752, 1120.0 / 2752, 1376.0 / 2752, 1632.0 / 2752, 1888.0 / 2752, 2144.0 / 2752, 2400.0 / 2752, 2656.0 / 2752]
 const ROAD_Y: Array[float] = [192.0 / 1536, 448.0 / 1536, 704.0 / 1536, 928.0 / 1536, 1184.0 / 1536, 1440.0 / 1536]
 # The new navigable world has larger buildings and streets. Use one uniform
@@ -315,7 +315,9 @@ func dispatch(incident_id: int, unit_kind: String, unit_id: int = -1) -> bool:
 	incident.status = "working"
 	incident.last_action = elapsed
 	successful_dispatches += 1
-	_emit("dispatch", "%s %s to %s • %ds arrival" % [selected.get("crew_name", selected.name), "diverting" if diverting else "en route", incident.name, ceili(best_eta)], {"incident_id": incident_id, "unit_id": selected.id, "kind": unit_kind, "pos": incident.pos, "diverted": diverting, "eta": best_eta})
+	_emit("dispatch", "%s %s to %s • %ds arrival" % [selected.get("crew_name", selected.name), "diverting" if diverting else "en route", incident.name, ceili(best_eta)], {"incident_id": incident_id, "unit_id": selected.id, "kind": unit_kind, "pos": incident.pos, "diverted": diverting, "eta": best_eta,
+		# Guests draw a teammate's new route from these before the next snapshot arrives.
+		"from": selected.pos, "path": selected_path.duplicate()})
 	if bool(incident.discovered) and elapsed - float(incident.created_at) <= 8.0 and not bool(incident.get("rapid_response", false)):
 		var all_assigned: bool = true
 		for kind: String in UNIT_KINDS:
@@ -327,6 +329,57 @@ func dispatch(incident_id: int, unit_kind: String, unit_id: int = -1) -> bool:
 			rapid_response_count += 1
 			_emit("rapid_response", "Rapid response • crews can work faster", {"incident_id": incident_id, "pos": incident.pos})
 	return true
+
+func can_withdraw(unit_id: int) -> bool:
+	if not running or finished:
+		return false
+	var unit: Dictionary = get_unit(unit_id)
+	if unit.is_empty() or str(unit.state) not in ["travel", "working", "clearing"]:
+		return false
+	var road_id: int = int(unit.get("clear_target", -1))
+	if road_id >= 0:
+		var road: Dictionary = get_road_event(road_id)
+		return str(unit.state) in ["travel", "clearing"] and not road.is_empty() and str(road.status) in ["active", "clearing"] and int(road.assigned_unit) == unit_id
+	var incident: Dictionary = get_incident(int(unit.target))
+	return str(unit.state) in ["travel", "working"] and not incident.is_empty() and _is_active(incident) and incident.assigned.has(unit_id)
+
+# Cancel the assignment without completing it. Returning crews remain available
+# for a new order under the same radio/dispatch guards as any returning crew.
+func withdraw(unit_id: int) -> bool:
+	if not can_withdraw(unit_id):
+		return false
+	var unit: Dictionary = get_unit(unit_id)
+	var incident_id: int = int(unit.target)
+	var road_id: int = int(unit.get("clear_target", -1))
+	var destination_name: String = ""
+	if road_id >= 0:
+		var road: Dictionary = get_road_event(road_id)
+		destination_name = str(road.street)
+		road.assigned_unit = -1
+		road.status = "active"
+		road.clear_dispatched_at = -1.0
+		road.clear_started_at = -1.0
+		road.clear_progress = 0.0
+	else:
+		var incident: Dictionary = get_incident(incident_id)
+		destination_name = str(incident.name)
+		incident.assigned.erase(unit_id)
+		incident.last_action = elapsed
+		if incident.assigned.is_empty():
+			incident.status = "active"
+			incident.phase = "waiting"
+	_send_home(unit, false)
+	unit.arrival_at = -1.0
+	unit.work_elapsed = 0.0
+	unit.inspection_remaining = 0.0
+	unit.assignment_suitable = true
+	_emit("unit_withdrawn", "%s withdrawn from %s • returning to standby" % [unit.get("crew_name", unit.name), destination_name],
+		{"unit_id": unit_id, "kind": unit.kind, "incident_id": incident_id, "road_event_id": road_id, "pos": unit.pos})
+	return true
+
+# How long the shared field team needs between scouts (8 s; upgrades are gone).
+func scout_cooldown_total() -> float:
+	return maxf(3.0, 8.0 - 2.5 * upgrade_level("scouting"))
 
 func scout(incident_id: int) -> bool:
 	# Scouting only reveals what an unconfirmed report needs. It gives no extra time.
@@ -345,7 +398,7 @@ func scout(incident_id: int) -> bool:
 	incident.scouted = true
 	incident.last_action = elapsed
 	scout_count += 1
-	scout_cooldown = maxf(3.0, 8.0 - 2.5 * upgrade_level("scouting"))
+	scout_cooldown = scout_cooldown_total()
 	last_action_effect = {"action": "scout", "incident_id": incident_id, "time_added": 0.0}
 	var needed: Array[String] = []
 	for kind: String in UNIT_KINDS:
@@ -654,7 +707,8 @@ func clear_road(event_id: int, unit_id: int) -> bool:
 	event.assigned_unit = int(crew.id)
 	event.clear_dispatched_at = elapsed
 	_emit("road_clear_dispatched", "%s heading to %s • %ds" % [crew.get("crew_name", crew.name), event.street, ceili(float(route.eta))],
-		{"road_event_id": event.id, "unit_id": crew.id, "kind": crew.kind, "pos": road_event_center(event), "eta": float(route.eta)})
+		{"road_event_id": event.id, "unit_id": crew.id, "kind": crew.kind, "pos": road_event_center(event), "eta": float(route.eta),
+		"from": crew.pos, "path": Array(route.path).duplicate()})
 	_emit_research("road_event_clear_dispatched", _road_event_record(event))
 	return true
 
@@ -1461,11 +1515,12 @@ func _fail(incident: Dictionary) -> void:
 		_send_home(get_unit(id))
 	_emit("failed", "Backup took over at %s • regroup and keep going" % incident.name, {"incident_id": incident.id, "pos": incident.pos})
 
-func _send_home(unit: Dictionary) -> void:
+func _send_home(unit: Dictionary, count_job: bool = true) -> void:
 	if unit.is_empty():
 		return
-	unit.jobs = int(unit.jobs) + 1
-	unit.fatigue = minf(1.0, float(unit.fatigue) + 0.14 * maxf(0.2, 1.0 - upgrade_level("rest") * 0.35))
+	if count_job:
+		unit.jobs = int(unit.jobs) + 1
+		unit.fatigue = minf(1.0, float(unit.fatigue) + 0.14 * maxf(0.2, 1.0 - upgrade_level("rest") * 0.35))
 	unit.target = -1
 	unit.clear_target = -1
 	unit.state = "return"

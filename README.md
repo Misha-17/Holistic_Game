@@ -4,6 +4,8 @@ A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engi
 
 ## Play
 - Pick a crew, then click a call. Or hover a call and press **1–4** for the nearest available crew in that department.
+- **Withdraw a crew from a scene:** click its crew card in the bottom bar, then **WITHDRAW** (or **V**). It leaves the incident and returns to standby; you can send it to another call while it returns, once the normal dispatch cooldown has passed. This also cancels a crew en route or clearing a road. Other crews keep working, and the incident still needs a replacement for the withdrawn department.
+- **Change roles between levels:** in the co-op lobby or results screen, click **SWAP** beside a teammate to exchange your department assignments. With two or three players, this swaps the entire department bundle. Roles stay fixed during a level; the host/session leader remains the same player. Joining or leaving redistributes departments to keep every role covered. Solo players already command every department.
 - **Q:** scout. **E:** supply a crew on scene. **Space:** coffee boost. **C:** rescue close-up. **R:** ping.
 - **Two views only** (playtest 15.10): every level **starts on the whole town**. Click anywhere, scroll up or press **EXPLORE** to open the **drag view** there (5% closer than the old most-zoomed-out level); scroll down or press **OVERVIEW** to return to the whole town. There is no further zooming in (no +/- buttons, no F shortcut). Switching to the whole town closes an open call card.
 - In the drag view: **left-drag** pans (middle-drag too), **WASD / arrows** pan, the **minimap** (bottom right, drag view only) jumps; **M** or its HIDE button hides it (music is switched in Settings).
@@ -15,7 +17,7 @@ A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engi
 - Enable **Voice chat** in Settings for an open microphone; turn it off there to mute. No key needs to be held. Use headphones.
 - **Esc:** menu. Solo pauses; a shared shift continues while personal menus are open.
 
-Departments split automatically between connected players. The campaign has six 5:30 shifts. The world is **2752 by 1536** (16:9, so the whole-town view fills the screen), with **69 playable locations**. In Oct 2026 (playtest 15.10) one road column with five call sites was added on each side (west: Westwind Farm, Pinecrest Cabins, Old Mill, Heron Marsh Homes, West Beach Huts; east: Summit Lodge, Quarry Works, Seal Point Homes, Cape Clinic, East Beach Cafe); the old town and its stations moved 224 px east unchanged. To keep the balance, crews drive ~8% faster (130 world px/s), every call gets 2 s more decision time, and the finale's rescue goal is 100. Old saves are converted (map version 5); the network protocol is now 9, so everyone in a co-op game needs this version. A click selects or dispatches on release; dragging across a crew or call never dispatches it. Travel is calibrated to keep the more distant districts practical to reach. Original crew rules, joint calls and campaign remain; the upgrade workshop was removed (Oct 2026).
+Departments split automatically between connected players. The campaign has six 5:30 shifts. The world is **2752 by 1536** (16:9, so the whole-town view fills the screen), with **69 playable locations**. In Oct 2026 (playtest 15.10) one road column with five call sites was added on each side (west: Westwind Farm, Pinecrest Cabins, Old Mill, Heron Marsh Homes, West Beach Huts; east: Summit Lodge, Quarry Works, Seal Point Homes, Cape Clinic, East Beach Cafe); the old town and its stations moved 224 px east unchanged. To keep the balance, crews drive ~8% faster (130 world px/s), every call gets 2 s more decision time, and the finale's rescue goal is 100. Old saves are converted (map version 5); the network protocol is now 11 (including role swaps and withdrawal), so everyone in a co-op game needs this version. A click selects or dispatches on release; dragging across a crew or call never dispatches it. Travel is calibrated to keep the more distant districts practical to reach. Original crew rules, joint calls and campaign remain; the upgrade workshop was removed (Oct 2026).
 
 ## Road events (traffic rework, `andrei-traffic-events`)
 
@@ -116,12 +118,17 @@ The game contains no classifier, workload model, adaptive assistance or required
 
 ## Build and verification
 
+Unit withdrawal and role changes use network protocol **11**. All co-op clients and the server must use this updated build.
+
 Run `powershell -ExecutionPolicy Bypass -File tools/package.ps1` on Windows; pass `-GodotConsole` and `-GodotGui` for other engine paths. It builds the Windows portable package, Linux-server resource pack and clean source ZIP under `artifacts/`. The portable build includes the official Godot runtime because export templates were unavailable locally; its license texts are in `licenses/`.
 
 Tests:
 
 ```
 godot --headless --path . --script tests/test_simulation.gd
+godot --headless --path . --script tests/test_withdrawal.gd
+godot --headless --path . --script tests/test_crew_controls.gd
+godot --headless --path . --script tests/test_role_assignment.gd
 godot --headless --path . --script tests/test_road_events.gd
 godot --headless --path . --script tests/test_levels.gd
 godot --headless --path . --script tests/test_two_banks.gd

@@ -1025,7 +1025,7 @@ func _draw_call(item: Dictionary) -> void:
 		line_color = _risk_color(item.estimate) if float(item.estimate.get("finish_eta", -1)) >= 0 else color
 	_btext(_fit(line, rect.size.x - 20, 15), rect.position + Vector2(10, 48), 15, line_color)
 	var hint: String = ""
-	if selected_unit_id >= 0 and hovered and known:
+	if selected_unit_id >= 0 and dispatch_enabled and hovered and known:
 		hint = "CLICK TO SEND"
 	elif known and _missing(incident) > 0:
 		var keys: Array[String] = []
@@ -1107,7 +1107,8 @@ func _draw_crew(item: Dictionary) -> void:
 	if selected or hovered:
 		var name: String = str(unit.get("crew_name", unit.get("name", "Crew")))
 		var state: String = str(unit.get("state", "idle"))
-		var tag: String = name if available else ("%s · busy" % name if state in ["travel", "working"] else "%s · resting" % name)
+		var status: String = {"travel": "en route", "working": "on scene", "clearing": "clearing", "return": "returning", "rest": "resting"}.get(state, "busy")
+		var tag: String = name if available else "%s · %s" % [name, status]
 		var tw: float = ThemeDB.fallback_font.get_string_size(tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
 		var tag_rect := Rect2(center + Vector2(-tw * .5 - 6, 22), Vector2(tw + 12, 18))
 		draw_rect(tag_rect, INK)

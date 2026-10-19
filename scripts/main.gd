@@ -137,6 +137,7 @@ const MINIMAP_HIDE := Rect2(1452, 673, 58, 18)
 const MINIMAP_SHOW := Rect2(1408, 794, 104, 30)
 const DRAG_THRESHOLD := 6.0
 const CREW_BAR := Rect2(-72, 836, 1584, 58)
+const UNIT_CONTROL_RECT := Rect2(440, 758, 620, 68)
 const FOCUS_RECT := Rect2(-64, 612, 464, 210)
 const SURGE_RECT := Rect2(598, 158, 478, 51)
 
@@ -693,7 +694,7 @@ func _process(delta: float) -> void:
 	town.tactical_mode = true
 	if selected_unit >= 0:
 		var chosen: Dictionary = sim.get_unit(selected_unit)
-		if chosen.is_empty() or chosen.state not in ["idle","return"]:
+		if chosen.is_empty() or not network.owns(str(chosen.kind)) or chosen.state == "rest":
 			selected_unit = -1
 			role_filter = ""
 	tactical_map.sim = sim
@@ -702,7 +703,7 @@ func _process(delta: float) -> void:
 	tactical_map.role_filter = role_filter
 	tactical_map.focused_unit_id = focused_unit
 	var planned: Dictionary = sim.get_unit(selected_unit)
-	tactical_map.dispatch_enabled = not planned.is_empty() and network.owns(str(planned.kind))
+	tactical_map.dispatch_enabled = not planned.is_empty() and network.owns(str(planned.kind)) and sim._unit_available(planned)
 	tactical_map.owned_kinds = network.departments_for()
 	var owners: Dictionary = {}
 	if network.active:
@@ -723,6 +724,7 @@ func _process(delta: float) -> void:
 		blocked.append(Rect2(-70, 10, 122, 50))
 		blocked.append(_hud_rect())
 		blocked.append(Rect2(VIEW.position.x, CREW_BAR.position.y - 4, VIEW.size.x, VIEW.end.y - CREW_BAR.position.y + 4))
+		if _withdraw_control_visible(): blocked.append(UNIT_CONTROL_RECT)
 	if field_focus.visible: blocked.append(Rect2(field_focus.position, FOCUS_RECT.size))
 	if tutorial_overlay.visible: blocked.append(Rect2(tutorial_overlay.position,tutorial_overlay.panel_size))
 	tactical_map.occlusions = blocked
@@ -865,6 +867,7 @@ func _draw_game() -> void:
 	_draw_map_tools()
 	_draw_capture_status()
 	_draw_crew_cards()
+	_draw_unit_control()
 
 const HAZARD_TINT := {"blackout": Color("bda6ff"), "sandstorm": Color("f0b36b"), "squall": Color("9fc4e0"), "flood": Color("9fd3ff")}
 
@@ -945,6 +948,7 @@ func _focus_button_rect() -> Rect2:
 	return Rect2(field_focus.position+Vector2(FOCUS_RECT.size.x-65,7),Vector2(57,24)) if field_focus.visible else Rect2(40,724,185,34)
 
 func _map_occluded(point: Vector2) -> bool:
+	if _withdraw_control_visible() and UNIT_CONTROL_RECT.has_point(point): return true
 	if _minimap_shown() and MINIMAP_PANEL.has_point(point): return true
 	if tutorial_overlay.visible and tutorial_overlay.blocks_point(point + global_position): return true
 	if field_focus.visible and Rect2(field_focus.position,FOCUS_RECT.size).has_point(point): return true
@@ -1029,6 +1033,9 @@ func _select_road_event(road_id: int) -> void:
 		return
 	if selected_unit>=0:
 		var crew: Dictionary = sim.get_unit(selected_unit)
+		if not crew.is_empty() and crew.state not in ["idle", "return"]:
+			_toast("Withdraw this crew from its current assignment first.")
+			return
 		if str(crew.get("kind",""))!=kind:
 			_toast("Only %s can clear %s. %s" % [who, road.street, ("Ask %s." % network.player_label(network.owner_of(kind))) if network.active and not network.owns(kind) else "Pick one of their crews."])
 			return
@@ -1083,11 +1090,11 @@ func _select_unit(id: int) -> void:
 	if selected_unit==id:
 		selected_unit=-1
 		return
-	if unit.state not in ["idle","return"]:
-		_toast("%s is busy. Pick a free crew." % unit.get("crew_name",unit.name))
+	if unit.state not in ["idle","return"] and (tutorial_active or not sim.can_withdraw(id)):
+		_toast("%s is resting. Pick another crew." % unit.get("crew_name",unit.name))
 		return
 	var wait_left: float = maxf(float(unit.get("divert_after",0.0)),float(unit.get("dispatch_guard_until",0.0))) - sim.elapsed
-	if wait_left>0:
+	if unit.state in ["idle", "return"] and wait_left>0:
 		_toast("%s can take another call in %ds." % [unit.get("crew_name",unit.name),ceili(wait_left)])
 		return
 	if tutorial_active and not tutorial.can_action("select_unit",{"unit_id":id,"incident_id":selected,"kind":unit.kind}): return
@@ -1133,10 +1140,24 @@ func _locate_unit(id: int) -> void:
 
 func _dispatch_selected() -> void:
 	var unit: Dictionary = sim.get_unit(selected_unit)
+	if not unit.is_empty() and unit.state not in ["idle", "return"]:
+		_toast("Withdraw this crew from its current assignment first.")
+		return
 	if selected<0 or unit.is_empty():
 		_toast("Pick a crew, then click a call.")
 		return
 	_command("dispatch",{"incident_id":selected,"kind":unit.kind,"unit_id":selected_unit})
+
+func _withdraw_control_visible() -> bool:
+	return screen == "game" and not tutorial_active and sim.can_withdraw(selected_unit) and network.owns(str(sim.get_unit(selected_unit).get("kind", "")))
+
+func _draw_unit_control() -> void:
+	if not _withdraw_control_visible(): return
+	var unit: Dictionary = sim.get_unit(selected_unit)
+	_panel(UNIT_CONTROL_RECT, Color(INK, 0.94), KIND_COLOR[unit.kind])
+	_text("%s · %s" % [unit.get("crew_name", unit.name), KIND_SHORT[unit.kind]], UNIT_CONTROL_RECT.position + Vector2(16, 25), 18, CREAM)
+	_text("Leave this assignment and return to standby.", UNIT_CONTROL_RECT.position + Vector2(16, 49), 14, MUTED)
+	_button("withdraw:%d" % unit.id, "WITHDRAW  [V]", Rect2(UNIT_CONTROL_RECT.position + Vector2(438, 14), Vector2(166, 40)), CORAL, INK, 15)
 
 func _draw_crew_cards() -> void:
 	var gap: float = 8.0
@@ -1217,13 +1238,14 @@ func _draw_lobby() -> void:
 		_text(network.status,Vector2(452,326),15,MUTED)
 		var row := 0
 		for peer_id in network.roster:
-			var r: int = int(network.roster[peer_id])
 			_text("%s%s" %[_short(network.player_label(int(peer_id)),16), "  (you)" if int(peer_id)==multiplayer.get_unique_id() else ""],Vector2(452,373+row*42),17,CREAM)
 			var dx: float = 720
 			for kind in network.departments_for(int(peer_id)):
 				_symbol(kind,Vector2(dx,367+row*42),KIND_COLOR[kind],0.5)
 				_text(str(KIND_SHORT[kind]),Vector2(dx+12,373+row*42),15,KIND_COLOR[kind])
 				dx += 66
+			if int(peer_id) != multiplayer.get_unique_id() and network.roster.has(multiplayer.get_unique_id()):
+				_button("change_role:%d" % peer_id, "SWAP", Rect2(908, 350 + row * 42, 80, 32), PANEL_LIGHT, TEAL, 13)
 			row += 1
 		if network.hosting:
 			_draw_level_picker(Vector2(452,514))
@@ -1238,7 +1260,7 @@ func _draw_lobby() -> void:
 			else:
 				_text("Waiting for the first player to start…" if network.dedicated else "Waiting for the host to begin…",Vector2(452,600),19,GOLD)
 	_button("leave_lobby","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
-	_text("Departments are shared automatically as players join.",Vector2(400,754),16,MUTED)
+	_text("SWAP exchanges your departments with that player before the next level.",Vector2(400,754),16,MUTED)
 	_button("lobby_settings", "VOICE & RECORDINGS", Rect2(400, 780, 300, 45), PANEL_LIGHT, TEAL, 14)
 
 # Co-op level picker: every level is open in co-op, so a team can play any scenario.
@@ -1249,6 +1271,25 @@ func _draw_level_picker(origin: Vector2) -> void:
 	for i in range(6):
 		var picked: bool = i == lobby_level
 		_button("lobby_level:%d" % i, "%02d" % (i+1), Rect2(origin + Vector2(i * 91, 12), Vector2(84, 40)), TEAL if picked else PANEL_LIGHT, INK if picked else CREAM, 15)
+
+func _draw_role_picker() -> void:
+	var panel := Rect2(1120, 160, 388, 438)
+	_panel(panel, INK, Color("355966"))
+	_text("CHANGE ROLES", panel.position + Vector2(20, 36), 22, TEAL)
+	_wrap("Swap departments with a teammate for the next level.", panel.position + Vector2(20, 66), 348, 15, MUTED, 22)
+	var row := 0
+	for peer_id in network.roster:
+		var y: float = panel.position.y + 130 + row * 70
+		var mine: bool = int(peer_id) == multiplayer.get_unique_id()
+		_text(_short(network.player_label(int(peer_id)), 18 if mine else 20) + (" (you)" if mine else ""), Vector2(panel.position.x + 20, y), 17, CREAM)
+		var kinds: Array[String] = []
+		for kind in network.departments_for(int(peer_id)): kinds.append(KIND_SHORT[kind])
+		_text(" + ".join(kinds), Vector2(panel.position.x + 20, y + 24), 14, TEAL if mine else MUTED)
+		if not mine and network.roster.has(multiplayer.get_unique_id()):
+			_button("change_role:%d" % peer_id, "SWAP", Rect2(panel.end.x - 100, y + 5, 80, 32), PANEL_LIGHT, TEAL, 13)
+		row += 1
+	if network.roster.size() == 1:
+		_text("You command every department.", panel.position + Vector2(20, 238), 16, MUTED)
 
 func _refresh_voice_mix() -> void:
 	if not is_instance_valid(voice): return
@@ -1314,7 +1355,7 @@ func _draw_help() -> void:
 	_text("On duty",Vector2(365,202),30,CREAM)
 	var tips := [
 		["01", "Send your crews", "Pick a crew, then a call. Or hover a call and press 1–4. Its icons show which departments are still needed."],
-		["02", "Help on scene", "Q scouts a ? call. E supplies an arrived crew. SPACE gives the team a coffee boost."],
+		["02", "Help on scene", "Q scouts. E supplies. SPACE boosts. To leave a scene, select the busy crew in the bottom bar, then WITHDRAW or V."],
 		["03", "Explore the town", "Click or scroll up: go there. Scroll down: whole town. Drag: pan. M: minimap. Right-click: clear."],
 		["04", "Coordinate", "Enable Voice chat in Settings to keep your microphone open. Turn it off there to mute. Recordings are optional and local."]
 	]
@@ -1380,6 +1421,7 @@ func _draw_results() -> void:
 		_button("results_continue","NEXT SHIFT  >" if sim.won and sim.shift_index<5 else ("BACK TO YOUR TOWN" if sim.won else "TRY THIS SHIFT AGAIN"),Rect2(390,558,656,56),TEAL,INK,17)
 		_button("results_levels","CHOOSE ANOTHER LEVEL",Rect2(390,631,656,46),PANEL_LIGHT,GOLD,15)
 	_text("Progress saved locally",Vector2(628,716),13,MUTED)
+	if network.active: _draw_role_picker()
 
 func _draw_page_header(title: String, eyebrow: String) -> void:
 	_text(eyebrow,Vector2(80,52),13,TEAL)
@@ -1559,6 +1601,8 @@ func _input(event: InputEvent) -> void:
 				if screen=="game": _action("ping")
 			KEY_C:
 				if screen=="game": _action("focus")
+			KEY_V:
+				if _withdraw_control_visible(): _action("withdraw:%d" % selected_unit)
 			KEY_SPACE:
 				if screen=="game": _action("special")
 			KEY_TAB:
@@ -1587,6 +1631,15 @@ func _action(id: String) -> void:
 		return
 	if id.begins_with("unit:"):
 		_select_unit(id.trim_prefix("unit:").to_int())
+		return
+	if id.begins_with("withdraw:"):
+		var unit_id := id.trim_prefix("withdraw:").to_int()
+		var unit: Dictionary = sim.get_unit(unit_id)
+		if not unit.is_empty(): _command("withdraw", {"unit_id": unit_id, "kind": str(unit.kind)})
+		return
+	if id.begins_with("change_role:"):
+		if screen in ["lobby", "results"] and not sim.running:
+			network.send_command("change_role", {"target_peer_id": id.trim_prefix("change_role:").to_int()})
 		return
 	if id.begins_with("plan:"):
 		if tutorial_active: _plan_kind(id.trim_prefix("plan:"))
@@ -1650,6 +1703,7 @@ func _action(id: String) -> void:
 			name_input.text = network.local_player_name
 			name_input.release_focus()
 			network.host()
+			if network.hosting: sim.running = false
 			_toast(network.status)
 		"join":
 			network.local_player_name = NetworkSession.clean_player_name(name_input.text)
@@ -1920,7 +1974,7 @@ func _select_incident(id: int) -> void:
 		_toast("Unconfirmed call: scout it first (SCOUT button on its card, or Q). Your crew is still selected.")
 		audio.play_cue("click")
 		return
-	if selected_unit>=0:
+	if selected_unit>=0 and sim.get_unit(selected_unit).get("state", "") in ["idle", "return"]:
 		var crew: Dictionary = sim.get_unit(selected_unit)
 		var payload := {"incident_id":id,"kind":str(crew.get("kind","")),"unit_id":selected_unit}
 		if not crew.is_empty() and (not tutorial_active or tutorial.can_action("dispatch",payload)):
@@ -1953,6 +2007,9 @@ func _command(action: String, payload: Dictionary) -> void:
 		_toast("You command %s. Ask %s to send that crew." % [network.departments_text(), network.player_label(owner) if owner>0 else "a teammate"])
 		return
 	network.send_command(action,payload)
+	if action == "withdraw":
+		var withdrawn_id := int(payload.get("unit_id", -1))
+		predicted_dispatches = predicted_dispatches.filter(func(p): return int(p.unit_id) != withdrawn_id)
 	if action == "dispatch" and network.active and not network.hosting and sim.running:
 		var id: int = int(payload.get("incident_id", -1))
 		if sim.dispatch(id, str(payload.get("kind", "")), int(payload.get("unit_id", -1))):
@@ -1965,6 +2022,14 @@ func _command(action: String, payload: Dictionary) -> void:
 			focused_unit_left = 0
 
 func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
+	if action == "change_role":
+		var between_levels := screen in ["lobby", "results"] or (screen == "settings" and previous_screen == "lobby")
+		if between_levels and not sim.running and network._valid_payload(action, payload):
+			if network.swap_role(_peer_id, int(payload.target_peer_id)):
+				selected_unit = -1
+				role_filter = ""
+				predicted_dispatches.clear()
+		return
 	if action == "start_shift":
 		if dedicated_server and screen in ["lobby", "results"] and network.can_start_session(_peer_id) and multiplayer.get_peers().has(_peer_id):
 			_dedicated_shift_started = true
@@ -1989,6 +2054,9 @@ func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
 			# The crew must really belong to the department the sender commands.
 			var crew: Dictionary = sim.get_unit(int(payload.get("unit_id",-1)))
 			success=not crew.is_empty() and str(crew.kind)==str(payload.get("kind","")) and sim.clear_road(int(payload.get("road_event_id",-1)),int(crew.id))
+		"withdraw":
+			var crew: Dictionary = sim.get_unit(int(payload.get("unit_id", -1)))
+			success = not crew.is_empty() and str(crew.kind) == str(payload.get("kind", "")) and sim.withdraw(int(crew.id))
 		"scout": success=sim.scout(id)
 		"supply": success=sim.supply(id)
 		"special": success=sim.use_special()
@@ -2009,6 +2077,7 @@ func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
 		elif action=="ping": research.log_event(action,payload)
 	else:
 		var reason: String = "Crew unavailable or already assigned. Check the call's remaining needs." if action=="dispatch" else ("That crew can't clear this road right now." if action=="clear_road" else "Not available yet. Select an active call or let supplies recharge.")
+		if action == "withdraw": reason = "That crew is no longer assigned to a call or road."
 		if local_command: _toast(reason)
 		elif network.has_method("broadcast_event"): network.call("broadcast_event",{"type":"action_denied","text":reason,"actor_peer":_peer_id})
 	_process_events()
@@ -2138,6 +2207,15 @@ func _handle_game_event(event: Dictionary) -> void:
 	elif type=="dispatch_mismatch":
 		_toast(message)
 		audio.play_cue("fail")
+	elif type == "unit_withdrawn":
+		_route_cache_until = 0
+		var withdrawn_id := int(event.get("unit_id", -1))
+		predicted_dispatches = predicted_dispatches.filter(func(p): return int(p.unit_id) != withdrawn_id)
+		if local_actor:
+			selected_unit = -1
+			role_filter = ""
+			_toast(message)
+			audio.play_cue("select")
 	elif type=="action_denied" and local_actor: _toast(message)
 
 func _receive_snapshot(data: Dictionary) -> void:
@@ -2165,7 +2243,9 @@ func _receive_snapshot(data: Dictionary) -> void:
 		sim.tick(clampf(network.round_trip_ms() * 0.0005, 0.0, 0.15) * host_speed)
 		_reapply_predictions()
 		sim.drain_events()
-	if next_screen in ["game","pause","results","help"]:
+	if next_screen == "lobby" and not sim.running:
+		if not (screen == "settings" and previous_screen == "lobby"): screen = "lobby"
+	elif next_screen in ["game","pause","results","help"]:
 		if next_screen != "game" or not keep_menu: screen=next_screen
 	orders=data.get("orders",{})
 	# Repainting the town backdrop is expensive; only do it when the shift changes.

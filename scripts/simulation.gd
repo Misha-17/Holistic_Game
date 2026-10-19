@@ -328,6 +328,53 @@ func dispatch(incident_id: int, unit_kind: String, unit_id: int = -1) -> bool:
 			_emit("rapid_response", "Rapid response • crews can work faster", {"incident_id": incident_id, "pos": incident.pos})
 	return true
 
+func can_withdraw(unit_id: int) -> bool:
+	if not running or finished:
+		return false
+	var unit: Dictionary = get_unit(unit_id)
+	if unit.is_empty() or str(unit.state) not in ["travel", "working", "clearing"]:
+		return false
+	var road_id: int = int(unit.get("clear_target", -1))
+	if road_id >= 0:
+		var road: Dictionary = get_road_event(road_id)
+		return str(unit.state) in ["travel", "clearing"] and not road.is_empty() and str(road.status) in ["active", "clearing"] and int(road.assigned_unit) == unit_id
+	var incident: Dictionary = get_incident(int(unit.target))
+	return str(unit.state) in ["travel", "working"] and not incident.is_empty() and _is_active(incident) and incident.assigned.has(unit_id)
+
+# Cancel the assignment without completing it. Returning crews remain available
+# for a new order under the same radio/dispatch guards as any returning crew.
+func withdraw(unit_id: int) -> bool:
+	if not can_withdraw(unit_id):
+		return false
+	var unit: Dictionary = get_unit(unit_id)
+	var incident_id: int = int(unit.target)
+	var road_id: int = int(unit.get("clear_target", -1))
+	var destination_name: String = ""
+	if road_id >= 0:
+		var road: Dictionary = get_road_event(road_id)
+		destination_name = str(road.street)
+		road.assigned_unit = -1
+		road.status = "active"
+		road.clear_dispatched_at = -1.0
+		road.clear_started_at = -1.0
+		road.clear_progress = 0.0
+	else:
+		var incident: Dictionary = get_incident(incident_id)
+		destination_name = str(incident.name)
+		incident.assigned.erase(unit_id)
+		incident.last_action = elapsed
+		if incident.assigned.is_empty():
+			incident.status = "active"
+			incident.phase = "waiting"
+	_send_home(unit, false)
+	unit.arrival_at = -1.0
+	unit.work_elapsed = 0.0
+	unit.inspection_remaining = 0.0
+	unit.assignment_suitable = true
+	_emit("unit_withdrawn", "%s withdrawn from %s • returning to standby" % [unit.get("crew_name", unit.name), destination_name],
+		{"unit_id": unit_id, "kind": unit.kind, "incident_id": incident_id, "road_event_id": road_id, "pos": unit.pos})
+	return true
+
 func scout(incident_id: int) -> bool:
 	# Scouting only reveals what an unconfirmed report needs. It gives no extra time.
 	if not running:
@@ -1461,11 +1508,12 @@ func _fail(incident: Dictionary) -> void:
 		_send_home(get_unit(id))
 	_emit("failed", "Backup took over at %s • regroup and keep going" % incident.name, {"incident_id": incident.id, "pos": incident.pos})
 
-func _send_home(unit: Dictionary) -> void:
+func _send_home(unit: Dictionary, count_job: bool = true) -> void:
 	if unit.is_empty():
 		return
-	unit.jobs = int(unit.jobs) + 1
-	unit.fatigue = minf(1.0, float(unit.fatigue) + 0.14 * maxf(0.2, 1.0 - upgrade_level("rest") * 0.35))
+	if count_job:
+		unit.jobs = int(unit.jobs) + 1
+		unit.fatigue = minf(1.0, float(unit.fatigue) + 0.14 * maxf(0.2, 1.0 - upgrade_level("rest") * 0.35))
 	unit.target = -1
 	unit.clear_target = -1
 	unit.state = "return"

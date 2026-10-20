@@ -182,15 +182,18 @@ func broadcast(data: Dictionary) -> void:
 	if active and hosting:
 		_snapshot_sequence += 1
 		_last_snapshot = data.duplicate(true)
-		if multiplayer.get_peers().size() > 0:
+		var recipients := _connected_recipients()
+		if not recipients.is_empty():
 			var raw := var_to_bytes(data)
 			var packed := raw.compress(FileAccess.COMPRESSION_ZSTD)
 			if packed.size() <= UNRELIABLE_SNAPSHOT_LIMIT:
-				_state.rpc(_snapshot_sequence, packed, raw.size())
+				for recipient in recipients:
+					_state.rpc_id(recipient, _snapshot_sequence, packed, raw.size())
 			else:
 				# Expanded-map snapshots can exceed the MTU. ENet's reliable path
 				# handles fragmentation, isolated from voice and control channels.
-				_large_state.rpc(_snapshot_sequence, packed, raw.size())
+				for recipient in recipients:
+					_large_state.rpc_id(recipient, _snapshot_sequence, packed, raw.size())
 
 static func _unpack(packed: PackedByteArray, size: int) -> Dictionary:
 	if size <= 0 or size > 8 * 1024 * 1024:
@@ -201,11 +204,24 @@ static func _unpack(packed: PackedByteArray, size: int) -> Dictionary:
 	var value: Variant = bytes_to_var(raw)
 	return value if value is Dictionary else {}
 
+func _connected_recipients() -> Array[int]:
+	var result: Array[int] = []
+	if not active or not hosting: return result
+	var enet := multiplayer.multiplayer_peer as ENetMultiplayerPeer
+	if enet == null: return result
+	# SceneMultiplayer can still list a transport whose channels have closed.
+	for id in multiplayer.get_peers():
+		if not roster.has(id): continue
+		var peer := enet.get_peer(id)
+		if peer != null and peer.get_state() == ENetPacketPeer.STATE_CONNECTED:
+			result.append(id)
+	return result
+
 func broadcast_event(data: Dictionary) -> void:
 	
 	
-	if active and hosting and multiplayer.get_peers().size() > 0:
-		_event.rpc(data)
+	for recipient in _connected_recipients():
+		_event.rpc_id(recipient, data)
 
 func can_do(action: String, peer_id: int = -1, payload: Dictionary = {}) -> bool:
 	if action == "start_shift": return can_start_session(peer_id)
@@ -339,6 +355,8 @@ func _peer_connected(_id: int) -> void:
 	pass
 
 func _peer_disconnected(id: int) -> void:
+	# Duplicate or unregistered departures do not change the team.
+	if not roster.has(id): return
 	var label := player_label(id)
 	if hosting and roster.has(id): print(player_log_label(id) + " disconnected")
 	roster.erase(id)
@@ -351,19 +369,16 @@ func _peer_disconnected(id: int) -> void:
 	_voice_state_windows.erase(id)
 	voice_participants_changed.emit()
 	if hosting: _broadcast_voice_states.call_deferred()
-	if hosting:
-		if dedicated: _broadcast_roster.call_deferred()
-		else: _broadcast_roster()
+	if hosting: _broadcast_roster.call_deferred()
 	roster_changed.emit()
 	if hosting:
 		var text := "%s left. Departments reshuffled. %s" % [label, assignment_summary()]
-		if dedicated: announce.call_deferred(text)
-		else: announce(text)
+		announce.call_deferred(text)
 
 func _broadcast_roster() -> void:
 	# Wait until ENet finishes removing disconnected peers before sending.
-	if active and hosting and multiplayer.get_peers().size() > 0:
-		_roster.rpc(roster, dedicated, player_names, role_assignments)
+	for recipient in _connected_recipients():
+		_roster.rpc_id(recipient, roster, dedicated, player_names, role_assignments)
 
 func _connected() -> void:
 	# Keep the timeout active until the versioned roster handshake succeeds.
@@ -476,8 +491,8 @@ func _event(data: Dictionary) -> void:
 
 func announce(text: String) -> void:
 	message_received.emit(text)
-	if active and hosting and multiplayer.get_peers().size() > 0:
-		_message.rpc(text)
+	for recipient in _connected_recipients():
+		_message.rpc_id(recipient, text)
 
 @rpc("authority", "call_remote", "reliable")
 func _message(text: String) -> void:
@@ -664,7 +679,8 @@ func _voice_state_request(mic: bool, consent: bool, recording: bool) -> void:
 func _broadcast_voice_states() -> void:
 	if not active or not hosting: return
 	voice_participants_changed.emit()
-	if multiplayer.get_peers().size() > 0: _voice_states.rpc(voice_participants)
+	for recipient in _connected_recipients():
+		_voice_states.rpc_id(recipient, voice_participants)
 
 
 @rpc("authority", "call_remote", "reliable", 2)
@@ -699,8 +715,8 @@ func _voice_upload(sequence: int, pcm: PackedByteArray) -> void:
 
 func _forward_voice(sender: int, sequence: int, pcm: PackedByteArray) -> void:
 	if not dedicated and sender != 1: voice_packet_received.emit(sender, sequence, pcm)
-	for recipient in roster:
-		if int(recipient) > 1 and int(recipient) != sender and multiplayer.get_peers().has(int(recipient)):
+	for recipient in _connected_recipients():
+		if int(recipient) != sender:
 			_voice_delivery.rpc_id(int(recipient), sender, sequence, pcm)
 
 

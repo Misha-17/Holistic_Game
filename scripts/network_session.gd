@@ -11,7 +11,7 @@ signal voice_packet_received(peer_id: int, sequence: int, pcm: PackedByteArray)
 signal voice_participants_changed
 
 const PORT := 24680
-const PROTOCOL_VERSION := 11 # Department assignments are synchronized separately from player seats.
+const PROTOCOL_VERSION := 12 # 19.10: four crews in every level; dispatch events carry the route.
 const MAX_PLAYER_NAME_LENGTH := 20
 const UNRELIABLE_SNAPSHOT_LIMIT := 1100 # Leave room for RPC/ENet headers below the path MTU.
 # Every player has the same job: command one (or more) emergency departments.
@@ -369,7 +369,9 @@ func _peer_disconnected(id: int) -> void:
 	_voice_state_windows.erase(id)
 	voice_participants_changed.emit()
 	if hosting: _broadcast_voice_states.call_deferred()
-	if hosting: _broadcast_roster.call_deferred()
+	if hosting:
+		if dedicated: _broadcast_roster.call_deferred()
+		else: _broadcast_roster()
 	roster_changed.emit()
 	if hosting:
 		var text := "%s left. Departments reshuffled. %s" % [label, assignment_summary()]
@@ -377,8 +379,8 @@ func _peer_disconnected(id: int) -> void:
 
 func _broadcast_roster() -> void:
 	# Wait until ENet finishes removing disconnected peers before sending.
-	for recipient in _connected_recipients():
-		_roster.rpc_id(recipient, roster, dedicated, player_names, role_assignments)
+	if active and hosting and multiplayer.get_peers().size() > 0:
+		_roster.rpc(roster, dedicated, player_names, role_assignments)
 
 func _connected() -> void:
 	# Keep the timeout active until the versioned roster handshake succeeds.

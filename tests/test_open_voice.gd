@@ -9,7 +9,7 @@ class FakeVoice extends TeamVoice:
 	func _create_microphone() -> bool:
 		if _microphone == null:
 			_microphone = AudioStreamPlayer.new()
-			# Packets are injected directly; no audio playback resource is needed.
+			_microphone.stream = AudioStreamGenerator.new()
 			add_child(_microphone)
 			_capture = AudioEffectCapture.new()
 		return true
@@ -53,7 +53,7 @@ func run() -> void:
 	var mixer = TeamVoice.Mixer.new()
 	mixer.push(2, 0, pcm, 0)
 	mixer.push(3, 0, pcm, 0)
-	var result: Dictionary = mixer.render(TeamVoice.Mixer.JITTER, 1, {2: true, 3: true}, {2: AudioDirector.slider_gain(50), 3: AudioDirector.slider_gain(0)}, TeamVoice.RECEIVED_VOICE_GAIN)
+	var result: Dictionary = mixer.render(960, 1, {2: true, 3: true}, {2: AudioDirector.slider_gain(50), 3: AudioDirector.slider_gain(0)}, TeamVoice.RECEIVED_VOICE_GAIN)
 	check(is_equal_approx(result.playback[0].x, 0.25), "default 50 doubles playback; teammate mute remains effective")
 	check(result.recording.decode_s16(0) == 8192, "recording levels stay unchanged")
 	voice.shutdown()

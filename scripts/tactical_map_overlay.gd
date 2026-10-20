@@ -1038,8 +1038,17 @@ func _draw_call(item: Dictionary) -> void:
 	if not known:
 		var button: Rect2 = _scout_button_rect(rect)
 		var over: bool = button.has_point(_pointer) and _pointer_valid
-		_panel(button, Color(GOLD, .95) if over else Color(INK, .95), GOLD, 2)
-		_btext("SCOUT  (Q)", button.position + Vector2(button.size.x * .5, 16), 13, INK if over else GOLD, true)
+		var wait: float = maxf(0.0, float(sim.get("scout_cooldown"))) if sim.get("scout_cooldown") != null else 0.0
+		if wait > 0.0:
+			# Field team busy: show the countdown on the button itself (playtest 19.10).
+			_panel(button, Color(INK, .95), Color(GOLD, .45), 2)
+			var total: float = float(sim.scout_cooldown_total()) if sim.has_method("scout_cooldown_total") else 8.0
+			var fill: float = clampf(1.0 - wait / maxf(0.1, total), 0.0, 1.0)
+			draw_rect(Rect2(button.position + Vector2(2, button.size.y - 4), Vector2((button.size.x - 4) * fill, 2)), Color(GOLD, .8))
+			_btext("SCOUT IN %ds" % ceili(wait), button.position + Vector2(button.size.x * .5, 16), 13, Color(GOLD, .6), true)
+		else:
+			_panel(button, Color(GOLD, .95) if over else Color(INK, .95), GOLD, 2)
+			_btext("SCOUT  (Q)", button.position + Vector2(button.size.x * .5, 16), 13, INK if over else GOLD, true)
 		hint = ""
 	if hint != "":
 		_btext(hint, rect.position + Vector2(10, 71), 12, GOLD)

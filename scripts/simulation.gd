@@ -6,11 +6,11 @@ const UNIT_KINDS: Array[String] = ["fire", "medic", "engineer", "police"]
 const INCIDENT_KINDS: Array[String] = ["fire", "medical", "flood", "power", "police"]
 # Countdowns tick in real seconds, so each call's deadline includes the time the crews need to work on scene.
 const WORK_TIME_ALLOWANCE := 1.35
-const CREWS_PER_DEPARTMENT := 3
+const CREWS_PER_DEPARTMENT := 4
 # Every department has the same number of crews, so every player carries the
-# same load (playtest 15.10): 3 each in levels 1-3, 4 each in levels 4-6.
+# same load: 4 each in every level (playtest 19.10; before, levels 1-3 had 3).
 # See Campaign.crews_per_department().
-const CREWS_BY_DEPARTMENT := {"fire": 3, "medic": 3, "engineer": 3, "police": 3}
+const CREWS_BY_DEPARTMENT := {"fire": 4, "medic": 4, "engineer": 4, "police": 4}
 const ROAD_X: Array[float] = [96.0 / 2752, 352.0 / 2752, 608.0 / 2752, 864.0 / 2752, 1120.0 / 2752, 1376.0 / 2752, 1632.0 / 2752, 1888.0 / 2752, 2144.0 / 2752, 2400.0 / 2752, 2656.0 / 2752]
 const ROAD_Y: Array[float] = [192.0 / 1536, 448.0 / 1536, 704.0 / 1536, 928.0 / 1536, 1184.0 / 1536, 1440.0 / 1536]
 # The new navigable world has larger buildings and streets. Use one uniform
@@ -315,7 +315,9 @@ func dispatch(incident_id: int, unit_kind: String, unit_id: int = -1) -> bool:
 	incident.status = "working"
 	incident.last_action = elapsed
 	successful_dispatches += 1
-	_emit("dispatch", "%s %s to %s • %ds arrival" % [selected.get("crew_name", selected.name), "diverting" if diverting else "en route", incident.name, ceili(best_eta)], {"incident_id": incident_id, "unit_id": selected.id, "kind": unit_kind, "pos": incident.pos, "diverted": diverting, "eta": best_eta})
+	_emit("dispatch", "%s %s to %s • %ds arrival" % [selected.get("crew_name", selected.name), "diverting" if diverting else "en route", incident.name, ceili(best_eta)], {"incident_id": incident_id, "unit_id": selected.id, "kind": unit_kind, "pos": incident.pos, "diverted": diverting, "eta": best_eta,
+		# Guests draw a teammate's new route from these before the next snapshot arrives.
+		"from": selected.pos, "path": selected_path.duplicate()})
 	if bool(incident.discovered) and elapsed - float(incident.created_at) <= 8.0 and not bool(incident.get("rapid_response", false)):
 		var all_assigned: bool = true
 		for kind: String in UNIT_KINDS:
@@ -375,6 +377,10 @@ func withdraw(unit_id: int) -> bool:
 		{"unit_id": unit_id, "kind": unit.kind, "incident_id": incident_id, "road_event_id": road_id, "pos": unit.pos})
 	return true
 
+# How long the shared field team needs between scouts (8 s; upgrades are gone).
+func scout_cooldown_total() -> float:
+	return maxf(3.0, 8.0 - 2.5 * upgrade_level("scouting"))
+
 func scout(incident_id: int) -> bool:
 	# Scouting only reveals what an unconfirmed report needs. It gives no extra time.
 	if not running:
@@ -392,7 +398,7 @@ func scout(incident_id: int) -> bool:
 	incident.scouted = true
 	incident.last_action = elapsed
 	scout_count += 1
-	scout_cooldown = maxf(3.0, 8.0 - 2.5 * upgrade_level("scouting"))
+	scout_cooldown = scout_cooldown_total()
 	last_action_effect = {"action": "scout", "incident_id": incident_id, "time_added": 0.0}
 	var needed: Array[String] = []
 	for kind: String in UNIT_KINDS:
@@ -701,7 +707,8 @@ func clear_road(event_id: int, unit_id: int) -> bool:
 	event.assigned_unit = int(crew.id)
 	event.clear_dispatched_at = elapsed
 	_emit("road_clear_dispatched", "%s heading to %s • %ds" % [crew.get("crew_name", crew.name), event.street, ceili(float(route.eta))],
-		{"road_event_id": event.id, "unit_id": crew.id, "kind": crew.kind, "pos": road_event_center(event), "eta": float(route.eta)})
+		{"road_event_id": event.id, "unit_id": crew.id, "kind": crew.kind, "pos": road_event_center(event), "eta": float(route.eta),
+		"from": crew.pos, "path": Array(route.path).duplicate()})
 	_emit_research("road_event_clear_dispatched", _road_event_record(event))
 	return true
 

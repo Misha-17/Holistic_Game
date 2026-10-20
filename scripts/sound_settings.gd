@@ -1,5 +1,6 @@
 extends Control
 
+const ROW_STEP := 98.0
 var sliders: Dictionary = {}
 var _director: AudioDirector
 var _network: NetworkSession
@@ -7,8 +8,9 @@ var _network: NetworkSession
 func build(director: AudioDirector, network: NetworkSession = null) -> void:
 	_director = director
 	_network = network
-	position = Vector2(80, 244)
-	size = Vector2(1290, 550)
+	# Right column of the Sounds tab (main.gd SETTINGS_COL[1], SETTINGS_TOP).
+	position = Vector2(740, 258)
+	size = Vector2(620, 400)
 	z_index = 20
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	if _network != null: _network.roster_changed.connect(refresh)
@@ -31,15 +33,15 @@ func refresh() -> void:
 			row += 1
 	if row == 1:
 		var hint := Label.new()
-		hint.position = Vector2(0, 112)
+		hint.position = Vector2(20, ROW_STEP + 8)
 		hint.text = "Join a team to adjust each teammate's voice."
 		hint.add_theme_color_override("font_color", Color("90afb2"))
 		add_child(hint)
 
 func _add_slider(key: String, caption: String, index: int) -> void:
 	var row := PanelContainer.new()
-	row.position = Vector2(0, index * 106)
-	row.size = Vector2(900, 86)
+	row.position = Vector2(0, index * ROW_STEP)
+	row.size = Vector2(620, 88)
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color("193944")
 	style.set_corner_radius_all(8)

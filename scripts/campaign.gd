@@ -354,10 +354,11 @@ static func upgrade_cost(id: String, level: int) -> int:
 	var entry := upgrade_data(id)
 	return int(round(float(entry.get("cost", 0)) * (1.0 + 0.65 * level)))
 
-# Crews per department, the same for every department (playtest 15.10):
-# 3 in the first three levels, 4 in the last three.
-static func crews_per_department(index: int) -> int:
-	return 3 if clampi(index, 0, 5) < 3 else 4
+# Crews per department, the same for every department and every level
+# (playtest 19.10: four crews for each department in all six levels;
+# before that it was 3 in levels 1-3 and 4 in levels 4-6).
+static func crews_per_department(_index: int) -> int:
+	return 4
 
 static func responder_profile(kind: String, crew_index: int) -> Dictionary:
 	var profiles: Dictionary = {

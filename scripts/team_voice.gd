@@ -196,7 +196,7 @@ func _open_recording() -> bool:
 	var info := _timing()
 	info.merge({"session_id": session_id.left(128), "sample_rate": RATE, "channels": 1,
 		"format": "PCM16", "local_only": true, "capture": "in_game_team_voice",
-		"jitter_buffer_ms": 60, "peer_id": _local_peer,
+		"jitter_buffer_ms": int(Mixer.JITTER * 1000 / RATE), "peer_id": _local_peer,
 		"permissions": get_participants(), "utc": Time.get_datetime_string_from_system(true)})
 	if not _writer.open_file(recording_path, info):
 		_recording_failed(str(_writer.error))

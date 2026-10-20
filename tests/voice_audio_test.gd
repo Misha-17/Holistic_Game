@@ -24,6 +24,12 @@ func packet(sample: int) -> PackedByteArray:
 	return pcm
 
 
+func wait_wall_ms(milliseconds: int) -> void:
+	var deadline := Time.get_ticks_msec() + milliseconds
+	while Time.get_ticks_msec() < deadline:
+		await process_frame
+
+
 func _run() -> void:
 	var mixer = Mixer.new()
 	mixer.reset(0)
@@ -34,15 +40,15 @@ func _run() -> void:
 	check(not mixer.push(2, -1, packet(2000), 0), "negative sequence is dropped")
 	var early: Dictionary = mixer.render(0, 1, {1: true, 2: true})
 	check(early.recording.decode_s16(0) == 0, "jitter starts with silence")
-	var result: Dictionary = mixer.render(960, 1, {1: true, 2: true, 3: false})
+	var result: Dictionary = mixer.render(Mixer.JITTER, 1, {1: true, 2: true, 3: false})
 	check(result.recording.decode_s16(0) == 10000, "recording combines own and consented remote voice once")
 	check(is_equal_approx(result.playback[0].x, 14000.0 / 32768.0), "playback excludes own microphone, includes all teammates")
-	result = mixer.render(1280, 1, {1: true, 2: true, 3: true})
+	result = mixer.render(Mixer.JITTER + Mixer.FRAMES, 1, {1: true, 2: true, 3: true})
 	check(result.recording.decode_s16(0) == 0, "missing packets and silence are not repeated speech")
 	mixer.reset(0)
 	mixer.push(2, 0, packet(24000), 0)
 	mixer.push(3, 0, packet(24000), 0)
-	result = mixer.render(960, 1, {2: true, 3: true})
+	result = mixer.render(Mixer.JITTER, 1, {2: true, 3: true})
 	check(result.recording.decode_s16(0) == 32767, "simultaneous loud voices saturate safely")
 	mixer.reset(0)
 	for sequence in range(10000): mixer.push(2, sequence, packet(1), 0)
@@ -84,20 +90,22 @@ func _run() -> void:
 	check(voice.start("synthetic_" + unique), "session starts with recording off")
 	check(voice.recording_path == "", "recording off creates no audio file")
 	voice.set_session_time(15.0)
+	var recording_requested_ms := Time.get_ticks_msec()
 	voice.set_recording_enabled(true)
 	check(voice.recording_active, "saving can start mid-session")
 	var saved_path: String = voice.recording_path
 	var began := Time.get_ticks_msec()
-	await create_timer(0.08).timeout
+	await wait_wall_ms(80)
 	voice.set_recording_enabled(false)
-	await create_timer(0.08).timeout
+	await wait_wall_ms(80)
 	voice.set_recording_enabled(true)
 	check(voice.recording_path == saved_path, "resume retains one WAV without overwrite")
-	await create_timer(0.08).timeout
+	await wait_wall_ms(80)
 	voice.stop()
 	data = FileAccess.get_file_as_bytes(saved_path)
 	var duration := float(data.size() - 44) / 32000.0
 	var wall_seconds := (Time.get_ticks_msec() - began) / 1000.0
+	print("VOICE TIMING: wav_seconds=", duration, " measured_seconds=", wall_seconds, " recording_open_ms=", began - recording_requested_ms, " header_bytes=", data.decode_u32(40), " actual_bytes=", data.size() - 44)
 	check(duration >= 0.1 and absf(duration - wall_seconds) < 0.04 and data.decode_u32(40) == data.size() - 44, "session WAV includes silent interval and final header on the wall clock")
 	voice.start("tail_" + unique)
 	voice._mixer.push(1, 0, packet(2345), voice._clock_frame())

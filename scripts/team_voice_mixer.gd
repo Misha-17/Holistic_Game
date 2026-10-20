@@ -4,7 +4,7 @@ extends RefCounted
 # Missing packets remain silence; packets are never replayed to fill a gap.
 const RATE := 16000
 const FRAMES := 320
-const JITTER := 960 # 60 ms
+const JITTER := 1920 # 120 ms: tolerate short delivery stalls before speech runs dry.
 const MAX_AHEAD := 6400 # 400 ms
 const MAX_PACKETS := 24
 

@@ -5,8 +5,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $artifactRoot = Join-Path $projectRoot 'artifacts'
-$desktopRoot = Join-Path $artifactRoot 'BeaconBay-0.8.0'
-$serverRoot = Join-Path $artifactRoot 'AzureServer-0.8.0'
+$desktopRoot = Join-Path $artifactRoot 'BeaconBay-0.9.1'
+$serverRoot = Join-Path $artifactRoot 'AzureServer-0.9.1'
 New-Item -ItemType Directory -Force -Path $desktopRoot,$serverRoot | Out-Null
 Set-Content -LiteralPath (Join-Path $artifactRoot '.gdignore') -Value ''
 $env:APPDATA = Join-Path $projectRoot '.test-user'
@@ -33,22 +33,34 @@ start "Beacon Bay" "%~dp0BeaconBay.exe" --main-pack "%~dp0BeaconBay.pck"
 '@ | Set-Content -LiteralPath (Join-Path $desktopRoot 'Play.cmd') -Encoding ascii
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $desktopRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'ASSET_CREDITS.md') -Destination $desktopRoot
+Copy-Item -LiteralPath (Join-Path $projectRoot 'docs') -Destination $desktopRoot -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'licenses') -Destination $desktopRoot -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'azure-connect.md') -Destination $serverRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment/beacon-bay.service') -Destination $serverRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment/start-server.sh') -Destination $serverRoot
-Compress-Archive -LiteralPath $desktopRoot -DestinationPath (Join-Path $artifactRoot 'BeaconBay-Windows-0.8.0.zip') -Force
-Compress-Archive -LiteralPath $serverRoot -DestinationPath (Join-Path $artifactRoot 'BeaconBay-AzureServer-0.8.0.zip') -Force
+Compress-Archive -LiteralPath $desktopRoot -DestinationPath (Join-Path $artifactRoot 'BeaconBay-Windows-0.9.1.zip') -Force
+Compress-Archive -LiteralPath $serverRoot -DestinationPath (Join-Path $artifactRoot 'BeaconBay-AzureServer-0.9.1.zip') -Force
 # Source archive only includes source-controlled and eligible new files, never
 # recordings, editor cache, credentials, old builds or .git metadata.
 Add-Type -AssemblyName System.IO.Compression
-$sourceZip = Join-Path $artifactRoot 'BeaconBay-Source-0.8.0.zip'
+$sourceZip = Join-Path $artifactRoot 'BeaconBay-Source-0.9.1.zip'
 $stream = [IO.File]::Open($sourceZip, [IO.FileMode]::Create)
 $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create)
 try {
-    $files = & git -C $projectRoot ls-files --cached --others --exclude-standard
+    if (Test-Path -LiteralPath (Join-Path $projectRoot '.git')) {
+        $files = & git -C $projectRoot ls-files --cached --others --exclude-standard
+    } else {
+        # Downloaded source ZIPs have no .git directory. Explicit source folders
+        # keep local recordings, test-user folders and generated packages out.
+        $files = @('project.godot','export_presets.cfg','README.md','ASSET_CREDITS.md','azure-connect.md','.gitignore','.gitattributes')
+        foreach ($sourceFolder in @('scripts','scenes','assets','tests','docs','tools','deployment','licenses')) {
+            $files += Get-ChildItem -LiteralPath (Join-Path $projectRoot $sourceFolder) -File -Recurse | ForEach-Object {
+                $_.FullName.Substring($projectRoot.Length + 1).Replace('\', '/')
+            }
+        }
+    }
     foreach ($relative in $files | Sort-Object -Unique) {
-        if ($relative -match '(^|/)\.git(/|$)|\.import$|^\.test-user/|^test_output/|^artifacts/') { continue }
+        if ($relative -match '(^|/)\.git(/|$)|\.import$|^\.test-user[^/]*/|^\.tools/|^test_output/|^artifacts/|__pycache__|\.(pyc|jsonl|log|tmp)$') { continue }
         $source = Join-Path $projectRoot $relative
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { continue }
         $entry = $archive.CreateEntry('BeaconBay-Source/' + $relative, [IO.Compression.CompressionLevel]::Optimal)

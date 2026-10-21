@@ -37,6 +37,7 @@ func run() -> void:
 	game._begin_shift(0)
 	var initial_run: String = game.capture_run_id
 	var initial_events: String = game.research.log_path
+	var initial_level_events: String = game.research.get_level_context().log_path
 	var initial_audio: String = game.voice.recording_path
 	game._begin_tutorial(false)
 	check(not game.tutorial_active, "A shared session cannot enter solo tutorial")
@@ -58,7 +59,7 @@ func run() -> void:
 		check(game.screen == menu, "Host snapshots preserve guest " + menu)
 		check(game.map_zoom == 2.0 and game.map_pan == menu_pan, "Routine snapshots preserve the player's camera")
 		check(game.capture_run_id == initial_run and game.research.log_path == initial_events and game.voice.recording_path == initial_audio, "Menu does not split recording files: " + menu)
-	# Replaying the same shift has the same timeline but fresh local files.
+	# Replays have a distinct level run within the same whole-session recording.
 	game.sim.elapsed = 120.0
 	game.map_zoom = game._fit_map_zoom()
 	game._center_map(Vector2(.5, .5))
@@ -68,7 +69,8 @@ func run() -> void:
 	game._sync_capture()
 	check(game._is_map_overview(), "A replay starts the guest on the whole town")
 	check(game.capture_run_id != initial_run, "Same-shift replay creates a fresh capture run")
-	check(game.research.log_path != initial_events and game.voice.recording_path != initial_audio, "Replay cannot overwrite previous local files")
+	check(game.research.log_path == initial_events and game.voice.recording_path == initial_audio, "Replay preserves whole-session timeline and speaker tracks")
+	check(game.research.get_level_context().log_path != initial_level_events, "Replay gets a separate level file")
 	check(FileAccess.get_file_as_string(initial_events).contains("capture_stopped"), "Previous input file finalized on replay")
 	var second_events: String = game.research.log_path
 	var second_audio: String = game.voice.recording_path

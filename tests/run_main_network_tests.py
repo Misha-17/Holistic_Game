@@ -16,6 +16,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--godot", required=True)
     parser.add_argument("--port", type=int, default=25917)
+    parser.add_argument("--briefings", action="store_true", help="Exercise actual first-entry consent and network ready barrier")
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
         parser.error("port must be between 1024 and 65535")
@@ -36,6 +37,8 @@ def main() -> int:
         command = [args.godot, "--headless", "--path", str(root), "--script",
                    "res://tests/test_main_network_peer.gd", "--",
                    f"--port={args.port}", f"--qa-dir={output}", *extra]
+        if args.briefings:
+            command.append("--qa-briefings")
         process = subprocess.Popen(command, cwd=root, env=env, stdout=log,
                                    stderr=subprocess.STDOUT, creationflags=hidden)
         processes.append((label, process, log))

@@ -8,6 +8,7 @@ signal participants_changed
 
 const Mixer = preload("res://scripts/team_voice_mixer.gd")
 const Wav = preload("res://scripts/team_voice_wav.gd")
+const Session = preload("res://scripts/team_voice_session.gd")
 const DIRECTORY := "user://research/voice"
 const RATE := 16000
 const FRAMES := 320
@@ -34,6 +35,9 @@ var _session_active := false
 var _session_time := 0.0
 var _session_sync_ms := 0
 var _session_start_ms := 0
+var _session_start_frame := 0
+var _capture_active := true
+var _research_context: Dictionary = {}
 var _last_metadata_ms := 0
 var _local_peer := 1
 var _mixer = Mixer.new()
@@ -47,6 +51,7 @@ var _playback: AudioStreamGeneratorPlayback
 var _capture_bus := ""
 var _source := PackedVector2Array()
 var _resample_position := 0.0
+var _recording_source_cutoff := 0
 var _last_capture_ms := 0
 var _warned_no_capture := false
 
@@ -68,7 +73,7 @@ func configure(network: NetworkSession, server_only: bool = false) -> void:
 	network.voice_participants_changed.connect(_participants_updated)
 	network.roster_changed.connect(_roster_updated)
 	network.disconnected.connect(_disconnected)
-	var recovered: int = Wav.recover_pending(DIRECTORY)
+	var recovered: int = Session.recover_pending(DIRECTORY)
 	if recovered > 0: _set_status("Recovered %d local voice recording(s)" % recovered)
 	_roster_updated()
 
@@ -79,22 +84,29 @@ func start(id: String) -> bool:
 	if _server_only or not _configured: return false
 	if _session_active and session_id == id: return true
 	stop()
+	_render_audio()
 	session_id = id
+	recording_path = ""
 	_session_active = true
 	_session_start_ms = Time.get_ticks_msec()
+	_session_start_frame = _cursor
 	_session_sync_ms = _session_start_ms
-	if recording_enabled: return _open_recording()
+	_mixer.clear_recording_permission()
+	if recording_enabled and _capture_active: return _open_recording()
 	return true
 
 
 func stop() -> void:
+	_seal_microphone_capture()
 	if _writer != null:
 		_render_audio()
 		_flush_recorded_tail()
 		if _writer != null:
 			_writer.log_metadata("session_stopped", _timing())
 			_writer.close_file()
+			var close_error := str(_writer.error)
 			_writer = null
+			if not close_error.is_empty(): voice_error.emit(close_error)
 	_session_active = false
 	recording_active = false
 	_publish_state()
@@ -105,6 +117,30 @@ func stop() -> void:
 func set_session_time(seconds: float) -> void:
 	_session_time = maxf(0.0, seconds)
 	_session_sync_ms = Time.get_ticks_msec()
+
+
+func set_research_context(context: Dictionary) -> void:
+	var changed_level := str(context.get("level_run_id", "")) != str(_research_context.get("level_run_id", ""))
+	if changed_level: _render_audio()
+	_research_context = context.duplicate(true)
+	if changed_level: _log("level_context", _timing())
+
+
+func set_capture_active(value: bool) -> void:
+	if _server_only or _capture_active == value: return
+	_seal_microphone_capture()
+	_render_audio()
+	# Finishing a level retains consented speech already captured into the short
+	# jitter buffer. User opt-out uses set_recording_enabled, which discards it.
+	if not value: _flush_recorded_tail()
+	_capture_active = value
+	_mixer.clear_recording_permission()
+	recording_active = value and recording_enabled and _session_active and _writer != null
+	if value and recording_enabled and _session_active and _writer == null: _open_recording()
+	_log("capture_resumed" if value else "capture_suspended", _timing())
+	_publish_state()
+	recording_changed.emit(recording_active, recording_path)
+	_refresh_status()
 
 
 func set_mic_enabled(value: bool) -> void:
@@ -120,6 +156,7 @@ func set_mic_enabled(value: bool) -> void:
 		if _capture != null: _capture.clear_buffer()
 		_source.clear()
 		_resample_position = 0.0
+		_recording_source_cutoff = 0
 		_mixer.remove_peer(_local_peer)
 	mic_enabled = value
 	_publish_state()
@@ -130,6 +167,7 @@ func set_mic_enabled(value: bool) -> void:
 func set_recording_consent(value: bool) -> void:
 	if _server_only or recording_consent == value: return
 	recording_consent = value
+	if not value: _mixer.clear_recording_permission(_local_peer)
 	_publish_state()
 	_log("sharing_consent", {"allowed": value})
 	_refresh_status()
@@ -137,9 +175,11 @@ func set_recording_consent(value: bool) -> void:
 
 func set_recording_enabled(value: bool) -> void:
 	if _server_only or recording_enabled == value: return
+	_seal_microphone_capture()
 	_render_audio()
 	recording_enabled = value
-	if value and _session_active:
+	_mixer.clear_recording_permission()
+	if value and _session_active and _capture_active:
 		if _writer == null:
 			_open_recording()
 		else:
@@ -159,7 +199,7 @@ func get_participants() -> Dictionary:
 
 func get_recording_info() -> Dictionary:
 	return {"active": recording_active, "path": ProjectSettings.globalize_path(recording_path) if recording_path != "" else "",
-		"session_id": session_id, "sample_rate": RATE, "channels": 1,
+		"session_id": session_id, "sample_rate": RATE, "channels_per_track": 1, "format": Session.FORMAT,
 		"frames": int(_writer.bytes_written) / 2 if _writer != null else 0,
 		"session_seconds": _session_time, "microphone_enabled": mic_enabled}
 
@@ -184,24 +224,31 @@ func _process(_delta: float) -> void:
 
 
 func _open_recording() -> bool:
-	if _server_only or not _session_active or not recording_enabled: return false
+	if _server_only or not _session_active or not recording_enabled or not _capture_active: return false
 	_render_audio()
 	var safe_id := ""
 	for character in session_id.left(64):
 		if character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-": safe_id += character
 	if safe_id == "": safe_id = "session"
 	var suffix := Crypto.new().generate_random_bytes(6).hex_encode()
-	recording_path = DIRECTORY.path_join("team_%s_%s.wav" % [safe_id, suffix])
-	_writer = Wav.new()
+	recording_path = DIRECTORY.path_join("team_%s_%s" % [safe_id, suffix]).path_join("session.json")
+	_writer = Session.new()
 	var info := _timing()
-	info.merge({"session_id": session_id.left(128), "sample_rate": RATE, "channels": 1,
+	info.merge({"session_id": session_id.left(128), "sample_rate": RATE, "channels_per_track": 1,
 		"format": "PCM16", "local_only": true, "capture": "in_game_team_voice",
 		"jitter_buffer_ms": int(Mixer.JITTER * 1000 / RATE), "peer_id": _local_peer,
 		"permissions": get_participants(), "utc": Time.get_datetime_string_from_system(true)})
 	if not _writer.open_file(recording_path, info):
 		_recording_failed(str(_writer.error))
 		return false
+	if not _writer.append_silence(maxi(0, _cursor - _session_start_frame)):
+		_recording_failed(str(_writer.error))
+		return false
+	if not _writer.update_speaker(_local_peer, _speaker_identity(_local_peer)):
+		_recording_failed(str(_writer.error))
+		return false
 	recording_active = true
+	_log("recording_resumed", _timing())
 	_last_metadata_ms = Time.get_ticks_msec()
 	_publish_state()
 	recording_changed.emit(true, recording_path)
@@ -218,7 +265,7 @@ func _render_audio(until_frame: int = -1) -> void:
 		var skipped := now - _cursor
 		if _writer != null:
 			_log("audio_gap", {"frames": skipped, "reason": "client_stall"})
-			if not _writer.append_silence(skipped): _recording_failed(str(_writer.error))
+			if _writer != null and not _writer.append_silence(skipped): _recording_failed(str(_writer.error))
 		_cursor = now
 		_mixer.reset(_cursor)
 	var permissions: Dictionary = {}
@@ -233,7 +280,9 @@ func _render_audio(until_frame: int = -1) -> void:
 		_cursor += FRAMES
 		if _playback != null and _playback.can_push_buffer(FRAMES):
 			_playback.push_buffer(mixed.playback)
-		if _writer != null and not _writer.append(mixed.recording):
+		var identities: Dictionary = {}
+		for peer_id in mixed.speakers: identities[peer_id] = _speaker_identity(int(peer_id))
+		if _writer != null and not _writer.append_speakers(mixed.speakers, identities):
 			_recording_failed(str(_writer.error))
 
 
@@ -259,10 +308,13 @@ func _capture_microphone() -> void:
 	var input_rate := AudioServer.get_mix_rate()
 	var step := input_rate / float(RATE)
 	if _source.size() > int(input_rate * 0.2):
-		_source = _source.slice(_source.size() - int(input_rate * 0.1))
+		var skipped := _source.size() - int(input_rate * 0.1)
+		_source = _source.slice(skipped)
+		_recording_source_cutoff = maxi(0, _recording_source_cutoff - skipped)
 		_resample_position = 0.0
 	var packets := 0
 	while _resample_position + FRAMES * step < _source.size() and packets < 8:
+		var source_recordable := _resample_position >= _recording_source_cutoff
 		var pcm := PackedByteArray()
 		pcm.resize(FRAMES * 2)
 		for index in range(FRAMES):
@@ -272,17 +324,25 @@ func _capture_microphone() -> void:
 			pcm.encode_s16(index * 2, clampi(roundi((stereo.x + stereo.y) * 0.5 * 32768.0), -32768, 32767))
 		_resample_position += FRAMES * step
 		_sequence += 1
-		_send_microphone_packet(pcm)
+		_send_microphone_packet(pcm, source_recordable)
 		packets += 1
 	var consumed := int(_resample_position)
 	if consumed > 0:
 		_source = _source.slice(consumed)
 		_resample_position -= consumed
+		_recording_source_cutoff = maxi(0, _recording_source_cutoff - consumed)
 
 
-func _send_microphone_packet(pcm: PackedByteArray) -> void:
+func _seal_microphone_capture() -> void:
+	# Drain queued microphone samples using the old permission. A packet that
+	# straddles the next opt-in boundary remains playable, but is not saved.
+	if mic_enabled: _capture_microphone()
+	_recording_source_cutoff = _source.size()
+
+
+func _send_microphone_packet(pcm: PackedByteArray, source_recordable: bool = true) -> void:
 	if not mic_enabled or _server_only: return
-	_mixer.push(_local_peer, _sequence, pcm, _clock_frame())
+	_mixer.push(_local_peer, _sequence, pcm, _clock_frame(), recording_active and source_recordable)
 	if _network != null: _network.send_voice(_sequence, pcm)
 
 func _create_microphone() -> bool:
@@ -326,7 +386,8 @@ func _ensure_speaker() -> void:
 func _receive_voice(peer_id: int, sequence: int, pcm: PackedByteArray) -> void:
 	if _server_only or peer_id == _local_peer: return
 	_ensure_speaker()
-	_mixer.push(peer_id, sequence, pcm, _clock_frame())
+	var allowed := recording_active and _network != null and bool(_network.voice_participants.get(peer_id, {}).get("consent", false))
+	_mixer.push(peer_id, sequence, pcm, _clock_frame(), allowed)
 
 
 func _publish_state() -> void:
@@ -348,6 +409,8 @@ func _participants_updated() -> void:
 	for peer_id in _mixer.streams.keys():
 		if int(peer_id) != _local_peer and not _network.roster.has(peer_id):
 			_mixer.remove_peer(int(peer_id))
+		elif int(peer_id) != _local_peer and not bool(_network.voice_participants.get(peer_id, {}).get("consent", false)):
+			_mixer.clear_recording_permission(int(peer_id))
 	_log("participants", {"states": get_participants()})
 	participants_changed.emit()
 	_refresh_status()
@@ -371,12 +434,26 @@ func _recording_failed(message: String) -> void:
 
 
 func _timing() -> Dictionary:
-	return {"local_elapsed_ms": Time.get_ticks_msec() - _session_start_ms,
-		"session_seconds": _session_time, "context_age_ms": Time.get_ticks_msec() - _session_sync_ms}
+	var context := _research_context.duplicate(true)
+	context.merge({"local_elapsed_ms": Time.get_ticks_msec() - _session_start_ms,
+		"session_seconds": _session_time, "context_age_ms": Time.get_ticks_msec() - _session_sync_ms,
+		"capture_session_id": session_id}, true)
+	return context
+
+
+func _speaker_identity(peer_id: int) -> Dictionary:
+	return {"peer_id": peer_id, "speaker_id": "peer_%d" % peer_id,
+		"display_name": _network.player_log_label(peer_id) if _network != null else "Player %d" % peer_id,
+		"departments": _network.departments_for(peer_id) if _network != null else [],
+		"local": peer_id == _local_peer}
 
 
 func _log(event: String, data: Dictionary) -> void:
-	if _writer != null: _writer.log_metadata(event, data)
+	if _writer != null:
+		var context := _timing()
+		context.merge(data, true)
+		_writer.log_metadata(event, context)
+		if not str(_writer.error).is_empty(): _recording_failed(str(_writer.error))
 
 
 func _refresh_status() -> void:

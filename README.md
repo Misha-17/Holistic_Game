@@ -2,12 +2,26 @@
 
 A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engineering and Police each have four crews in every level; calls need several departments working together.
 
+## Menu and camera update (0.9.1)
+
+The level menu now shows illustrated cards in play order, **00–06**, with Level 0 first, clear completion/lock badges and a separate saved-shift panel. The Training Harbor title and subtitle no longer cover the practice map.
+
+Your camera stays where you leave it when selecting a call, crew or station, scouting, dispatching or cycling through calls. Use the wheel or **EXPLORE / OVERVIEW** to change views. Dragging and arrow keys keep your chosen zoom.
+
+## Level 0 and getting started (0.9.0)
+
+New solo players start in **Level 0: Training Harbor**, a new compact island map with two bridges and a fixed **2:30** practice session. It is also available at the top of the level list and as **00** in co-op. It introduces calls, each department's road task, a blackout, a bridge flood, sand and rain. Travel penalties are gentle, calls need one crew and three seconds of work, and helpers finish unattended calls. There is no failure, urgent countdown, lost confidence or campaign unlock reward.
+
+On the first level entry each launch, choose **Play without collection** or **Enable collection**. Both allow the full game. A compact role briefing then shows four instructions for each department you command; use its tabs when you have multiple roles. Solo pauses and a new co-op level waits until every connected player is ready. Collection settings can be changed independently in Settings > Research. Enabling collection does not enable the microphone.
+
+The six existing campaign levels keep their saved indices and difficulty. **Start Level 1** follows practice. Build 0.9.0 uses network protocol **13**, so co-op clients and servers need the same updated build.
+
 ## Play
 - Pick a crew, then click a call. Or hover a call and press **1–4** for the nearest available crew in that department.
 - **Withdraw a crew from a scene:** click its crew card in the bottom bar, then **WITHDRAW** (or **V**). It leaves the incident and returns to standby; you can send it to another call while it returns, once the normal dispatch cooldown has passed. This also cancels a crew en route or clearing a road. Other crews keep working, and the incident still needs a replacement for the withdrawn department.
 - **Change roles between levels:** in the co-op lobby or results screen, click **SWAP** beside a teammate to exchange your department assignments. With two or three players, this swaps the entire department bundle. Roles stay fixed during a level; the host/session leader remains the same player. Joining or leaving redistributes departments to keep every role covered. Solo players already command every department.
 - **Q:** scout. The shared field team needs 8 s between scouts: the **SCOUT** counter in the top bar and the SCOUT button on a ? call show the seconds left (playtest 19.10). **E:** supply a crew on scene. **Space:** coffee boost. **C:** rescue close-up. **R:** ping.
-- **Two views only** (playtest 15.10): every level **starts on the whole town**. Click anywhere, scroll up or press **EXPLORE** to open the **drag view** there (5% closer than the old most-zoomed-out level); scroll down or press **OVERVIEW** to return to the whole town. There is no further zooming in (no +/- buttons, no F shortcut). Switching to the whole town closes an open call card.
+- **Two views only:** every level **starts on the whole town**. Scroll up or press **EXPLORE** to open the **drag view**; scroll down or press **OVERVIEW** to return to the whole town. Clicking calls, crews or stations preserves your chosen zoom and camera position. There is no further zooming in (no +/- buttons, no F shortcut). Switching to the whole town closes an open call card.
 - In the drag view: **left-drag** pans (middle-drag too), **WASD / arrows** pan, the **minimap** (bottom right, drag view only) jumps; **M** or its HIDE button hides it (music is switched in Settings).
 - The map fills the whole screen; the top bar and crew cards float over it, see-through. Markers are kept out from under them.
 - Crews and stations are picked the moment you press on them, so a press that turns into a drag still selects the crew. Moving vehicles never steal a click meant for a call or station under them. Station buttons are 20% bigger. A crew's route preview is drawn in its department's colour.
@@ -103,12 +117,14 @@ Use **Settings → Research** (voice chat itself is under Settings → Sounds). 
 | --- | --- |
 | Voice chat | Keeps the microphone open until disabled, including in menus. Starts off each launch. |
 | Allow team recording | Allows teammates to include your transmitted voice in their local files. |
-| Save team voice | Saves your own voice plus consenting teammates in one mixed WAV per shift on your computer. |
+| Save team voice | Saves one aligned WAV per speaker, with consenting teammates, in a single session folder across levels and retries. |
 | Record my mouse | Saves your own in-game movements, every mouse button press/release and wheel input in a local JSONL file. |
 
 **Open recordings** opens the game data folder. Mouse/game logs are under `research/`; audio and its timing sidecar are under `research/voice/`. No recordings upload to Azure. The server relays voice but does not record. Only speech sent using in-game voice is captured; Discord/Teams calls and system audio are not included. Teammates' mouse input is never collected on your computer.
 
-Files begin when a shift starts, including when joining late; tutorials are excluded. Turning saving off pauses capture; turning it back on during the same shift keeps one WAV and inserts silence in the paused interval. End-of-shift, disconnect and normal exit finalize files. WAV headers checkpoint every second and interrupted files can recover on the next launch. Disk failures stop saving without stopping play.
+Level 0 can be recorded with consent; the separate legacy guided tutorial is excluded. Every level attempt has a unique ID and a separate mouse/event JSONL file, plus one authoritative session timeline. Events include scheduled/actual starts, ends, responsible crew, and resolved, expired, handed-off or unfinished outcomes. Abandoned or partially observed events are marked explicitly. Consent gaps and late joins are recorded without inventing missing outcomes. See [recording format and playback](docs/RECORDING_FORMAT.md).
+
+Voice tracks share frame zero and a common sample clock, so overlapping speech stays separate while the conversation stays synchronized. Open **listen.html** in the voice session folder for one Play/Pause/Seek control, speaker labels, mute/solo and level jumps. **session.json** maps player IDs/names and departments to WAVs. Saving off and between-level pauses insert silence; voice capture during a level also continues in personal menus. Disconnect and normal exit finalize the session. WAV headers checkpoint every second and interrupted files recover on the next launch. Disk failures stop saving without stopping play.
 
 ## Repeatable emergency waves
 
@@ -120,7 +136,7 @@ The game contains no classifier, workload model, adaptive assistance or required
 
 ## Build and verification
 
-This build uses network protocol **12** (playtest 19.10 changes). All co-op clients and the server must use the same build; redeploy the Azure server.
+This build uses network protocol **13** (Level 0 and the shared ready step). All co-op clients and the server must use the same build; redeploy the Azure server.
 
 Run `powershell -ExecutionPolicy Bypass -File tools/package.ps1` on Windows; pass `-GodotConsole` and `-GodotGui` for other engine paths. It builds the Windows portable package, Linux-server resource pack and clean source ZIP under `artifacts/`. The portable build includes the official Godot runtime because export templates were unavailable locally; its license texts are in `licenses/`.
 
@@ -128,6 +144,10 @@ Tests:
 
 ```
 godot --headless --path . --script tests/test_simulation.gd
+godot --headless --path . --script tests/test_practice_level.gd
+godot --headless --path . --script tests/test_level_entry.gd
+godot --headless --path . --script tests/test_research_lifecycle.gd
+godot --headless --path . --script tests/test_capture_event_order.gd
 godot --headless --path . --script tests/test_withdrawal.gd
 godot --headless --path . --script tests/test_remote_route.gd
 godot --headless --path . --script tests/test_playtest_19_10.gd
@@ -144,6 +164,7 @@ godot --headless --path . --script tests/test_session_lifecycle.gd
 godot --headless --path . --script tests/test_snapshot_transport.gd
 python tests/run_voice_tests.py --godot /path/to/godot
 python tests/run_main_network_tests.py --godot /path/to/godot
+python tests/run_main_network_tests.py --briefings --godot /path/to/godot
 ```
 
 Simulation tests cover all six shifts, tutorial progression, map routes, hidden phases under divergent player decisions, arrival caps and save/network continuity. Voice tests use synthetic PCM and real loopback ENet sessions with four clients. Physical microphones, separate computers and the live Azure subscription still require a real-team smoke test.

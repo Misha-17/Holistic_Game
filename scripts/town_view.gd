@@ -79,9 +79,9 @@ func _unit_position(unit: Dictionary) -> Vector2:
 	return pos * MAP_SIZE
 
 func set_theme(index: int) -> void:
-	shift_theme = clampi(index, 0, 5)
+	shift_theme = index if BeaconCampaign.is_practice(index) else clampi(index, 0, 5)
 	# 0 day, 1 night, 2 golden, 3 rain, 4 desert
-	theme_index = [0,2,3,1,4,2][shift_theme]
+	theme_index = 0 if BeaconCampaign.is_practice(shift_theme) else [0,2,3,1,4,2][shift_theme]
 	if is_instance_valid(_backdrop):
 		_backdrop.queue_redraw()
 	queue_redraw()
@@ -122,6 +122,9 @@ func _paint_static(canvas: Node2D) -> void:
 	var art := PixelArt.new(canvas)
 	art.theme_index = theme_index
 	var layout: Dictionary = BeaconCampaign.layout(shift_theme)
+	if BeaconCampaign.is_practice(shift_theme):
+		_paint_practice_harbor(canvas, art, layout)
+		return
 	var desert: bool = str(layout.get("theme","")) == "desert"
 	var grass := Color("9fbd87") if theme_index != 2 else Color("b7bc88")
 	if desert: grass = Color("dcc58f")
@@ -216,6 +219,41 @@ func _paint_static(canvas: Node2D) -> void:
 	elif theme_index == 4:
 		canvas.draw_rect(OUTSKIRTS,Color(1.0,0.78,0.45,0.07))
 	_shade_outskirts(canvas)
+
+# A small training island, with two short banks and two easy river crossings.
+# Its visible streets use exactly the same graph as the simulation.
+func _paint_practice_harbor(canvas: Node2D, art, layout: Dictionary) -> void:
+	var bounds: Rect2 = layout.bounds
+	canvas.draw_rect(OUTSKIRTS, Color("71a9b0"))
+	for y: int in range(-50, 1600, 48):
+		for x: int in range(-400, 3200, 90):
+			canvas.draw_rect(Rect2(x + (y % 3) * 15, y, 22, 3), Color("95c1be"))
+	canvas.draw_rect(bounds.grow(20), Color("d7d2a9"))
+	canvas.draw_rect(bounds.grow(8), Color("bfd1a2"))
+	canvas.draw_rect(bounds, Color("a9c890"))
+	for layer: int in range(3):
+		var width: float = [54.0, 46.0, 34.0][layer]
+		var color: Color = [Color("879d7e"), Color("e2d9b8"), Color("90a4a0")][layer]
+		for iy: int in range(ROAD_Y.size()):
+			for ix: int in range(ROAD_X.size()):
+				var point := Vector2(ROAD_X[ix], ROAD_Y[iy])
+				if ix + 1 < ROAD_X.size() and not BeaconCampaign.edge_blocked(layout, true, ix, iy):
+					canvas.draw_line(point, Vector2(ROAD_X[ix + 1], point.y), color, width)
+				if iy + 1 < ROAD_Y.size() and not BeaconCampaign.edge_blocked(layout, false, ix, iy):
+					canvas.draw_line(point, Vector2(point.x, ROAD_Y[iy + 1]), color, width)
+	_draw_river(canvas, art, layout)
+	var sites: Array[Dictionary] = BeaconCampaign.locations()
+	for i: int in range(sites.size()):
+		if not BeaconCampaign.site_open(shift_theme, sites[i].pos): continue
+		var foot: Vector2 = sites[i].pos * MAP_SIZE
+		var lane_y: float = ROAD_Y[1]
+		for y: float in ROAD_Y:
+			if absf(y - foot.y) < absf(lane_y - foot.y): lane_y = y
+		canvas.draw_line(foot, Vector2(foot.x, lane_y), Color("e2d9b8"), 10.0)
+		art.site(foot, i, 1.6, true)
+	for point: Vector2 in [Vector2(842, 570), Vector2(1928, 570), Vector2(842, 1060), Vector2(1928, 1060), Vector2(1130, 1210), Vector2(1620, 1210)]:
+		art.tree(point, 18.0, 1)
+		art._flowerbed(point.x - 16, point.y + 14, 30, 8)
 
 # The whole-town view is wider than the town (16:9 screen, 3:2 town), so the
 # countryside around it is painted too: no empty bars at the sides. It is
@@ -428,9 +466,10 @@ func _draw_river(canvas: Node2D, art, layout: Dictionary) -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 5150
 	for i: int in range(120):
-		var p := Vector2(rng.randf_range(0, river.size.x), rng.randf_range(river.position.y + 8, river.end.y - 8))
+		var p := Vector2(rng.randf_range(river.position.x, river.end.x), rng.randf_range(river.position.y + 8, river.end.y - 8))
 		canvas.draw_rect(Rect2(p, Vector2(rng.randi_range(10, 22), 2)), Color("74a8a7"))
 	for x: float in [300.0, 900.0, 1500.0, 2050.0]:
+		if x < river.position.x + 50.0 or x > river.end.x - 50.0: continue
 		art._boat(Vector2(x, river.get_center().y + (12.0 if int(x) % 2 == 0 else -14.0)), 1, false)
 	for column: int in layout.bridges:
 		var x: float = ROAD_X[column]

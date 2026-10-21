@@ -34,6 +34,18 @@ var network: NetworkSession
 var voice: Node
 var capture_run_id := ""
 var capture_shift := -1
+var capture_session_id := ""
+var collection_choice_made := false
+var entry_popup := ""
+var briefing_role := "fire"
+var shared_level_run_id := ""
+var _level_ready_peers: Dictionary = {}
+var _waiting_for_briefings := false
+var _pending_level_events: Array[Dictionary] = []
+var _completed_remote_runs: Dictionary = {}
+var _pending_results_snapshot: Dictionary = {}
+var _announced_remote_runs: Dictionary = {}
+var _pending_transition_snapshot: Dictionary = {}
 var map_zoom := 1.5
 var minimap_hidden := false
 var map_pan := Vector2.ZERO
@@ -92,7 +104,7 @@ var orders: Dictionary = {}
 var particles: Array[Dictionary] = []
 var test_mode := false
 var result_rating_sent := false
-var event_actor := 1
+var event_actor := 0 # 0 denotes the simulation; player commands supply their actual peer ID.
 var has_resume := false
 var guest_progress: Dictionary = {}
 var field_focus: Node2D
@@ -109,7 +121,7 @@ var dedicated_server := false
 var _dedicated_shift_started := false
 var show_perf := false
 # Co-op: the level the host (or the first player on a dedicated server) picked in the lobby.
-var lobby_level := 0
+var lobby_level := 6 # Level 0 practice; campaign indices stay compatible with saved games.
 var _snapshot_gap_ms := 0.0
 var _last_snapshot_ms := -1
 var pressure_display := 0.0
@@ -156,6 +168,7 @@ func _session_screen() -> bool:
 	return screen in ["game", "pause", "help"] or (screen == "settings" and previous_screen in ["game", "pause", "help"])
 
 func _simulation_active() -> bool:
+	if _waiting_for_briefings or (not entry_popup.is_empty() and not network.active): return false
 	return screen == "game" or (network != null and network.active and _session_screen() and sim.running)
 
 func _map_rect() -> Rect2:
@@ -169,7 +182,7 @@ func _is_map_overview() -> bool:
 
 func _explore_min_zoom() -> float:
 	# Exploration always has room to move along both axes. Whole-map fit is
-	# reserved for the explicit overview button, never the wheel's zoom floor.
+	# selected explicitly with the overview button or wheel down.
 	return maxf(1.0, maxf(MAP_VIEW.size.x / TownView.MAP_SIZE.x, MAP_VIEW.size.y / TownView.MAP_SIZE.y) * 1.15)
 
 func _map_world_at(point: Vector2) -> Vector2:
@@ -268,15 +281,14 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 				var target := _map_press_target.duplicate()
 				_reset_map_gesture()
 				if activate:
-					if _is_map_overview(): _explore_map_at(_map_world_at(point))
+					# Inspecting or dispatching never changes the player's view.
 					tactical_map.activate_target(target)
 				return consumed
 			if MINIMAP_RECT.has_point(point) and _minimap_shown():
 				_reset_map_gesture()
 				_minimap_drag = true
 				var destination := (point - MINIMAP_RECT.position) / MINIMAP_RECT.size
-				if _is_map_overview(): _explore_map_at(destination)
-				else: _center_map(destination)
+				_center_map(destination)
 				return true
 			if not over_button and not _map_input_blocked(point):
 				_map_press_pending = true
@@ -286,7 +298,7 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 				_map_press_target = tactical_map.pointer_target(event.position)
 				# Crews and stations are picked on press (playtest 15.10): if the
 				# mouse moves and it turns into a drag, the crew is still selected.
-				if str(_map_press_target.get("type", "")) in ["unit", "base"] and not _is_map_overview():
+				if str(_map_press_target.get("type", "")) in ["unit", "base"]:
 					tactical_map.activate_target(_map_press_target)
 					_map_press_target.clear()
 				return true
@@ -297,7 +309,6 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 				return consumed
 			if not over_button and not _map_input_blocked(point):
 				_reset_map_gesture()
-				if _is_map_overview(): _explore_map_at(_map_world_at(point), point)
 				_map_middle_drag = true
 				map_dragging = true
 				_map_last_position = point
@@ -312,7 +323,6 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 			return true
 		if _map_press_pending or _map_middle_drag:
 			if not map_dragging and point.distance_to(_map_press_position) >= DRAG_THRESHOLD:
-				if _is_map_overview(): _explore_map_at(_map_world_at(_map_press_position), _map_press_position)
 				map_dragging = true
 				tactical_map.clear_hover()
 			if map_dragging:
@@ -406,40 +416,161 @@ func _draw_capture_status() -> void:
 
 func _sync_capture() -> void:
 	if dedicated_server or voice == null: return
-	var active := not tutorial_active and sim.running and not sim.finished and _session_screen()
+	# A guest's predicted clock can finish before the authoritative terminal
+	# events arrive. Keep its log open until those reliable events are received.
+	var guest_level_open := network.active and not network.hosting and not capture_run_id.is_empty()
+	var active := not tutorial_active and _session_screen() and ((sim.running and not sim.finished) or guest_level_open)
 	if not active:
-		if capture_run_id != "": _stop_capture()
+		if capture_run_id != "": _end_level_capture("completed" if sim.finished else "left_level")
 		return
 	if capture_run_id == "" or capture_shift != sim.shift_index:
-		_stop_capture()
+		_end_level_capture("changed_level")
 		capture_shift = sim.shift_index
-		capture_run_id = "shift%d_%d_%s" % [sim.shift_index + 1, int(Time.get_unix_time_from_system()), Crypto.new().generate_random_bytes(5).hex_encode()]
-		voice.set_session_time(sim.elapsed)
-		voice.start(capture_run_id)
+		capture_run_id = shared_level_run_id if not shared_level_run_id.is_empty() else _new_capture_id("level%d" % BeaconCampaign.level_number(sim.shift_index))
+	if capture_session_id.is_empty(): capture_session_id = _new_capture_id("session")
+	var context := _capture_context()
+	voice.set_research_context(context)
+	voice.set_capture_active(entry_popup.is_empty() and not _waiting_for_briefings)
+	voice.set_session_time(sim.elapsed)
+	voice.start(capture_session_id)
 	if research_enabled and not research.enabled:
 		research.set_clock(sim.elapsed, sim.shift_index)
-		research.begin_session(capture_run_id, {"peer_id": multiplayer.get_unique_id(), "departments": network.departments_for(), "build": "0.8.0", "map_pixels": TownView.MAP_SIZE})
+		research.begin_session(capture_session_id, {"peer_id": multiplayer.get_unique_id(), "departments": network.departments_for(), "build": "0.9.1", "map_pixels": TownView.MAP_SIZE})
+		research.begin_level(sim.shift_index, context, capture_run_id)
+		research.observe_state(sim.net_snapshot())
 		if sim.has_method("chaos_context"): research.log_event("chaos_state_at_capture_start", sim.chaos_context())
 	research.set_clock(sim.elapsed, sim.shift_index)
-	voice.set_session_time(sim.elapsed)
+	if research.enabled:
+		research.begin_level(sim.shift_index, context, capture_run_id)
+		research.update_context({"screen": screen, "selected_incident_id": selected, "selected_unit_id": selected_unit, "departments": network.departments_for()})
 
-func _stop_capture() -> void:
-	if research != null and research.enabled:
-		research.end_shift()
+func _new_capture_id(prefix: String) -> String:
+	return "%s_%d_%s" % [prefix, int(Time.get_unix_time_from_system()), Crypto.new().generate_random_bytes(6).hex_encode()]
+
+func _capture_context() -> Dictionary:
+	return {"capture_session_id": capture_session_id, "level_run_id": capture_run_id,
+		"level_index": sim.shift_index, "level_number": BeaconCampaign.level_number(sim.shift_index),
+		"level_name": BeaconCampaign.shift_data(sim.shift_index).get("title", ""),
+		"level_elapsed_s": sim.elapsed, "elapsed": sim.elapsed, "practice": BeaconCampaign.is_practice(sim.shift_index),
+		"departments": network.departments_for(), "peer_id": multiplayer.get_unique_id()}
+
+func _end_level_capture(reason: String = "completed") -> void:
+	if capture_run_id.is_empty(): return
+	var summary: Dictionary = sim.shift_summary()
+	var final_state: Dictionary = sim.net_snapshot()
+	var final_elapsed := sim.elapsed
+	if _completed_remote_runs.get(capture_run_id) is Dictionary:
+		# A new-level snapshot can overtake the old results snapshot; the
+		# reliable completion record still supplies the exact totals and clock.
+		summary = _completed_remote_runs[capture_run_id].duplicate(true)
+		final_elapsed = float(summary.get("at", summary.get("duration", sim.elapsed)))
+		final_state.merge({"elapsed": final_elapsed, "finished": true, "running": false,
+			"won": summary.get("won", sim.won), "score": summary.get("score", sim.score),
+			"rescued": summary.get("rescued", sim.rescued), "resolved_count": summary.get("resolved", sim.resolved_count),
+			"failed_count": summary.get("missed", sim.failed_count)}, true)
+	if research != null:
+		research.set_clock(final_elapsed, sim.shift_index)
+		research.end_level(reason, summary, final_state)
 		research.set_enabled(false)
-	if voice != null: voice.stop()
+	if voice != null:
+		voice.set_session_time(final_elapsed)
+		voice.set_capture_active(false)
 	capture_run_id = ""
 	capture_shift = -1
 
+func _stop_capture() -> void:
+	_end_level_capture("disconnected_or_exit")
+	if voice != null: voice.stop()
+	capture_session_id = ""
+	entry_popup = ""
+	_waiting_for_briefings = false
+	_pending_level_events.clear()
+	_completed_remote_runs.clear()
+	_pending_results_snapshot.clear()
+	_announced_remote_runs.clear()
+	_pending_transition_snapshot.clear()
+
 func _voice_recording_changed(active: bool, path: String) -> void:
 	if research != null: research.log_event("voice_recording", {"active": active, "path": path, "shift_elapsed_s": sim.elapsed})
+
+const ROLE_BRIEFINGS := {
+	"fire": ["Pick a red Fire crew, then click a confirmed call that needs FIRE.", "Send Fire to burning roads to reopen them for the whole team.", "Calls with several badges need teammates too; ask for the missing crews.", "Scout ? calls first (Q). Select a crew and press V to withdraw it."],
+	"medic": ["Pick a green Medical crew, then click a confirmed call that needs MED.", "Send Medical to road accidents to treat people and reopen the street.", "Coordinate with Fire, Engineering and Police on calls with several badges.", "Scout ? calls first (Q). Supply a crew on scene with E."],
+	"engineer": ["Pick a yellow Engineering crew, then click a call that needs ENG.", "Send Engineering to debris or a blackout's yellow substation badge.", "Clearing debris and restoring power helps every department reach calls.", "Scout ? calls first (Q). Flooded bridges and storms clear on their own."],
+	"police": ["Pick a purple Police crew, then click a confirmed call that needs POL.", "Send Police to a traffic jam's badge to reopen the street for everyone.", "Watch the other badges on a call and ask teammates for missing crews.", "Scout ? calls first (Q). Press R on a selected call to request help."]
+}
+
+func _begin_level_entry() -> void:
+	if dedicated_server or test_mode: return
+	var mine: Array = network.departments_for()
+	briefing_role = str(mine[0]) if not mine.is_empty() else "fire"
+	entry_popup = "briefing" if collection_choice_made else "consent"
+	_reset_map_gesture()
+	_update_visibility()
+
+func _choose_collection(enabled: bool) -> void:
+	collection_choice_made = true
+	research_enabled = enabled
+	if not enabled: research.set_enabled(false)
+	voice.set_recording_consent(enabled)
+	voice.set_recording_enabled(enabled)
+	entry_popup = "briefing"
+	_sync_capture()
+	research.log_event("collection_choice", {"enabled": enabled, "voice_requires_voice_chat": true})
+
+func _complete_briefing() -> void:
+	entry_popup = ""
+	if network.active: network.send_command("level_ready", {"level_run_id": shared_level_run_id})
+	else: _waiting_for_briefings = false
+	_sync_capture()
+	research.log_event("briefing_completed", {"departments": network.departments_for()})
+	_update_visibility()
+
+func _check_level_ready() -> void:
+	if not network.hosting or not _waiting_for_briefings: return
+	for peer_id in network.roster:
+		if not bool(_level_ready_peers.get(peer_id, false)): return
+	_waiting_for_briefings = false
+
+func _draw_entry_popup() -> void:
+	buttons.clear()
+	_overlay()
+	var panel := Rect2(350, 230, 740, 436)
+	_panel(panel, INK, TEAL)
+	if entry_popup == "consent":
+		_text("OPTIONAL DATA COLLECTION", Vector2(382, 276), 14, TEAL)
+		_text("Save this play session?", Vector2(382, 320), 29, CREAM)
+		_wrap("Save your mouse movements, clicks and game events by level. Save in-game team voice as separate, labelled speaker tracks in one session.", Vector2(382, 365), 670, 18, CREAM, 27)
+		_wrap("Enabling also lets teammates record your voice. Only consenting speakers are saved. Files stay on each recorder's computer; nothing is uploaded.", Vector2(382, 450), 670, 16, MUTED, 24)
+		_wrap("Voice chat stays off until you enable it in Sounds. Change any choice in Settings > Research. Both choices let you play.", Vector2(382, 530), 670, 15, MUTED, 23)
+		_button("collection_no", "PLAY WITHOUT COLLECTION", Rect2(382, 600, 326, 44), PANEL_LIGHT, CREAM, 14)
+		_button("collection_yes", "ENABLE COLLECTION", Rect2(724, 600, 326, 44), TEAL, INK, 14)
+	elif entry_popup == "briefing":
+		_text("LEVEL %d  /  YOUR ROLE" % BeaconCampaign.level_number(sim.shift_index), Vector2(382, 270), 13, TEAL)
+		_text("Ready, %s?" % str(KIND_NAME[briefing_role]).capitalize(), Vector2(382, 311), 28, CREAM)
+		var mine: Array = network.departments_for()
+		for i in range(mine.size()):
+			var kind := str(mine[i])
+			_button("briefing_role:" + kind, KIND_SHORT[kind], Rect2(382 + i * 170, 330, 158, 32), KIND_COLOR[kind] if kind == briefing_role else PANEL, INK if kind == briefing_role else CREAM, 13)
+		var y := 392.0
+		for line: String in ROLE_BRIEFINGS[briefing_role]:
+			_text("•", Vector2(386, y), 19, KIND_COLOR[briefing_role])
+			_wrap(line, Vector2(408, y), 630, 17, CREAM, 23)
+			y += 52
+		var hint := "Practice is 2½ minutes: take your time; there is no failure." if BeaconCampaign.is_practice(sim.shift_index) else "The level starts when everyone is ready."
+		if network.active and not _waiting_for_briefings and sim.elapsed > 0.5: hint = "Your team is already playing. Continue when you are ready."
+		_text(hint, Vector2(382, 586), 15, MUTED)
+		_button("briefing_done", "READY TO PLAY", Rect2(382, 607, 668, 38), TEAL, INK, 15)
+	else:
+		_text("Waiting for your team", Vector2(382, 320), 30, CREAM)
+		_wrap("Everyone is choosing their collection settings and reading their role. The level clock is paused.", Vector2(382, 380), 660, 20, MUTED, 30)
 
 func _ready() -> void:
 	dedicated_server = "--server" in OS.get_cmdline_args() or "--server" in OS.get_cmdline_user_args()
 	if dedicated_server:
 		_start_dedicated_server()
 		return
-	get_window().title = "Beacon Bay 0.8.0"
+	get_window().title = "Beacon Bay 0.9.1"
 	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 	get_tree().auto_accept_quit = false
 	Input.use_accumulated_input = false
@@ -617,6 +748,7 @@ func _start_dedicated_server() -> void:
 
 func _process(delta: float) -> void:
 	elapsed_ui += delta
+	_check_level_ready()
 	if fx != null:
 		fx.reduced_motion = reduced_motion
 		position = Vector2(UI_OFFSET_X, 0) + fx.shake_offset()
@@ -650,7 +782,7 @@ func _process(delta: float) -> void:
 		if net_timer > 0.12:
 			net_timer = 0
 			var shared_screen := "game" if network.active and _session_screen() and sim.running else screen
-			network.broadcast({"simulation": sim.net_snapshot(), "screen": shared_screen, "orders": orders, "speed": 1.0})
+			network.broadcast({"simulation": sim.net_snapshot(), "screen": shared_screen, "orders": orders, "speed": 1.0, "level_run_id": shared_level_run_id, "waiting_for_briefings": _waiting_for_briefings})
 	if dedicated_server: return
 	_sync_capture()
 	if screen == "game":
@@ -668,14 +800,14 @@ func _process(delta: float) -> void:
 			if float(call.deadline) < 10.0 and _missing_crews(call) > 0:
 				about_to_fail = true
 				break
-		audio.set_ticking(about_to_fail and sim.running)
+		audio.set_ticking(about_to_fail and sim.running and not BeaconCampaign.is_practice(sim.shift_index) and entry_popup.is_empty())
 		if not tutorial_active: save_timer += delta
 		if save_timer > 15 and not network.active and not tutorial_active:
 			save_timer = 0
 			_save_progress(true)
 		if selected >= 0 and not tutorial_active:
 			var incident := _incident(selected)
-			if incident.is_empty() or incident.get("status", "") in ["resolved", "failed"]:
+			if incident.is_empty() or incident.get("status", "") not in ["active", "working"]:
 				selected = -1
 				selected_unit = -1
 				role_filter = ""
@@ -727,6 +859,7 @@ func _process(delta: float) -> void:
 		if _withdraw_control_visible(): blocked.append(UNIT_CONTROL_RECT)
 	if field_focus.visible: blocked.append(Rect2(field_focus.position, FOCUS_RECT.size))
 	if tutorial_overlay.visible: blocked.append(Rect2(tutorial_overlay.position,tutorial_overlay.panel_size))
+	if not entry_popup.is_empty() or _waiting_for_briefings: blocked.append(VIEW)
 	tactical_map.occlusions = blocked
 	town.reduced_motion = reduced_motion
 	town.interpolate_units = network.active and not network.hosting
@@ -760,7 +893,7 @@ func _update_visibility() -> void:
 	field_focus.process_mode = Node.PROCESS_MODE_ALWAYS if field_focus.visible else Node.PROCESS_MODE_DISABLED
 	map_overlay.visible = screen=="game"
 	if tactical_map.visible and screen!="game": tactical_map.clear_hover()
-	tactical_map.visible = screen=="game"
+	tactical_map.visible = screen=="game" and entry_popup.is_empty() and not _waiting_for_briefings
 	tutorial_overlay.visible = tutorial_active and screen=="game"
 	ip_input.visible = screen == "lobby" and not network.active
 	name_input.visible = ip_input.visible
@@ -795,6 +928,7 @@ func _draw_all(canvas: CanvasItem) -> void:
 			line += "   hosting"
 		_panel(Rect2(-64, 70, font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x + 24, 30), Color(INK, 0.8), TEAL)
 		_text(line, Vector2(-52, 91), 15, CREAM)
+	if screen == "game" and (not entry_popup.is_empty() or _waiting_for_briefings): _draw_entry_popup()
 
 func _draw_title() -> void:
 	for i in range(72):
@@ -842,7 +976,7 @@ func _draw_game() -> void:
 	var shown_rescued: int = roundi(fx.displayed_rescued) if fx != null else sim.rescued
 	var punch: float = fx.counter_punch if fx != null and not reduced_motion else 0.0
 	rescued_anchor = Vector2(x + 28, 42)
-	_text("%d / %d" % [shown_rescued, sim.target] if not tutorial_active else str(shown_rescued), Vector2(x, 50 + punch * 3), 22 + int(punch * 8), GOLD.lerp(CREAM if sim.rescued < sim.target else TEAL, 1.0 - punch))
+	_text("%d / %d" % [shown_rescued, sim.target] if not tutorial_active and not BeaconCampaign.is_practice(sim.shift_index) else str(shown_rescued), Vector2(x, 50 + punch * 3), 22 + int(punch * 8), GOLD.lerp(CREAM if sim.rescued < sim.target else TEAL, 1.0 - punch))
 	x += 120
 	_text("COMMUNITY", Vector2(x, 26), 10, MUTED)
 	_bar(Rect2(x, 36, 140, 10), sim.reputation / 100.0, TEAL if sim.reputation > sim.minimum_confidence + 10 else CORAL)
@@ -850,7 +984,7 @@ func _draw_game() -> void:
 	_text("%d%%" % sim.reputation, Vector2(x + 148, 47), 16, CREAM)
 	x += 210
 	_text("TIME", Vector2(x, 26), 10, MUTED)
-	_text("--:--" if tutorial_active else _time(sim.duration - sim.elapsed), Vector2(x, 50), 22, GOLD)
+	_text("PRACTICE" if BeaconCampaign.is_practice(sim.shift_index) else ("--:--" if tutorial_active else _time(sim.duration - sim.elapsed)), Vector2(x, 50), 17 if BeaconCampaign.is_practice(sim.shift_index) else 22, GOLD)
 	x += 90
 	var boost := Rect2(x, 14, 136, 40)
 	var boost_ready: bool = sim.special_cooldown <= 0
@@ -1219,24 +1353,148 @@ func _draw_crew_cards() -> void:
 			idx += 1
 
 func _draw_campaign() -> void:
-	_draw_page_header("Your town is counting on you.", "SIX SHIFTS. ONE BEACON BAY.")
-	for i in range(6):
-		var data: Dictionary = BeaconCampaign.shift_data(i)
-		var rect := Rect2(80+(i%3)*430, 222+(i/3)*221, 402, 192)
-		var is_open := i <= unlocked
-		_panel(rect, PANEL if is_open else Color("122e39"))
-		cv.draw_rect(Rect2(rect.position, Vector2(402,4)), [TEAL,GOLD,BLUE,CORAL,Color("b5a5e9"),GOLD][i])
-		_text("%02d" % (i+1), rect.position+Vector2(23,45), 27, GOLD if is_open else MUTED)
-		_text(str(data.get("title","Shift")),rect.position+Vector2(23,83),24,CREAM if is_open else MUTED)
-		_text(_short(str(data.get("subtitle","")),42),rect.position+Vector2(23,112),14,MUTED)
-		_text("05:30   ·   %d neighbors" % int(data.get("target",12)),rect.position+Vector2(23,141),12,MUTED)
-		_button("shift:%d"%i if is_open else "locked", "START SHIFT  >" if is_open else "COMPLETE PREVIOUS SHIFT", Rect2(rect.position+Vector2(20,153),Vector2(362,29)),PANEL_LIGHT if is_open else PANEL,TEAL if is_open else MUTED,12)
-	if has_resume:
-		_button("resume","RESUME SAVED SHIFT",Rect2(80,705,610,60),TEAL,INK,18)
+	# Every level occupies the same grid, in play order, including practice.
+	# Coastline contours add a little depth without competing with the cards.
+	for radius in [270.0, 318.0, 366.0, 414.0]:
+		cv.draw_arc(Vector2(1420, -140), radius, 0, TAU, 80, Color(TEAL, .045), 1.0, true)
+	_text("BEACON BAY  /  YOUR NEXT WATCH", Vector2(40, 65), 13, TEAL)
+	_button("title", "<  BACK", Rect2(1286, 36, 114, 40), PANEL, CREAM, 13)
+	_text("A little town. Your next chapter.", Vector2(38, 135), 42, CREAM)
+	_text("Practice at the harbor, then take on the bay one shift at a time.", Vector2(40, 173), 17, MUTED)
+	cv.draw_line(Vector2(40, 200), Vector2(1400, 200), Color(TEAL, .14), 1)
+	var levels: Array[int] = [BeaconCampaign.PRACTICE_INDEX, 0, 1, 2, 3, 4, 5]
+	for slot in range(levels.size()):
+		var area := Rect2(40 + (slot % 4) * 346, 224 + (slot / 4) * 276, 322, 252)
+		_draw_campaign_card(area, levels[slot])
+	_draw_campaign_return_card(Rect2(1078, 500, 322, 252))
+	_text("Progress is saved automatically.", Vector2(40, 802), 14, MUTED)
+	_text("SOLO CAMPAIGN", Vector2(1250, 802), 12, Color(MUTED, .7))
+
+func _draw_campaign_card(area: Rect2, index: int) -> void:
+	var practice := BeaconCampaign.is_practice(index)
+	var data: Dictionary = BeaconCampaign.shift_data(index)
+	var is_open := practice or index <= unlocked
+	var complete := not practice and best_scores.has(str(index))
+	var accent: Color = TEAL if practice else [Color("95cdb4"), GOLD, BLUE, VIOLET, Color("e6b183"), CORAL][index]
+	var hover := area.has_point(get_local_mouse_position()) and is_open
+	var background := Color("244955") if hover else Color("1b3943")
+	_panel(Rect2(area.position + Vector2(0, 5), area.size), Color("0a2028"))
+	_panel(area, background, Color(accent, .75 if hover else .16))
+	var picture := Rect2(area.position + Vector2(10, 10), Vector2(area.size.x - 20, 116))
+	_draw_campaign_postcard(picture, index)
+	if not is_open: cv.draw_rect(picture, Color(INK, .48))
+	var number_plate := Rect2(area.position + Vector2(20, 20), Vector2(45, 32))
+	_panel(number_plate, Color(INK, .88))
+	_text("%02d" % BeaconCampaign.level_number(index), number_plate.position + Vector2(11, 23), 18, CREAM if is_open else MUTED)
+	var tag := "PRACTICE" if practice else ("COMPLETED" if complete else ("UP NEXT" if index == unlocked else ""))
+	if not tag.is_empty():
+		var width: float = font.get_string_size(tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 10).x + 20
+		var badge := Rect2(area.end.x - width - 20, area.position.y + 22, width, 26)
+		_panel(badge, Color(INK, .88))
+		_text(tag, badge.position + Vector2(10, 18), 10, accent)
+	elif not is_open:
+		_draw_campaign_lock(area.position + Vector2(area.size.x - 36, 34), Color(CREAM, .85))
+	_text(str(data.title).capitalize(), area.position + Vector2(20, 159), 23, CREAM if is_open else Color("a5b9ba"))
+	var themes: Array[String] = ["A calm morning", "Festival streets", "A river, three bridges", "Keep the lights on", "Shifting sands", "One last watch"]
+	_text("Learn at your own pace" if practice else themes[index], area.position + Vector2(20, 183), 14, MUTED)
+	cv.draw_line(area.position + Vector2(20, 201), area.position + Vector2(area.size.x - 20, 201), Color(MUTED, .16), 1)
+	_text("2:30  ·  No pressure" if practice else ("5:30  ·  %d to rescue" % int(data.target)), area.position + Vector2(20, 231), 12, MUTED)
+	var action := "PLAY" if practice else ("REPLAY" if complete else "START")
+	if is_open:
+		_text(action, area.position + Vector2(area.size.x - 91, 231), 12, accent)
+		var arrow := area.position + Vector2(area.size.x - 26, 226)
+		cv.draw_line(arrow - Vector2(10, 0), arrow, accent, 1.5, true)
+		cv.draw_polyline(PackedVector2Array([arrow + Vector2(-4, -4), arrow, arrow + Vector2(-4, 4)]), accent, 1.5, true)
 	else:
-		_text("Select an unlocked shift to go on duty.",Vector2(80,743),18,MUTED)
-	_text("Progress is saved automatically. A complete campaign contains 33 minutes of active shifts.",Vector2(80,818),15,MUTED)
-	_button("title","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
+		_text("LOCKED", area.position + Vector2(area.size.x - 76, 231), 11, MUTED)
+	buttons.append({"id": "shift:%d" % index if is_open else "locked", "rect": area})
+
+func _draw_campaign_lock(at: Vector2, color: Color) -> void:
+	cv.draw_arc(at - Vector2(0, 3), 5, PI, TAU, 12, color, 2.0, true)
+	cv.draw_rect(Rect2(at + Vector2(-7, -3), Vector2(14, 11)), color)
+	cv.draw_rect(Rect2(at + Vector2(-1, 1), Vector2(2, 4)), INK)
+
+func _draw_campaign_return_card(area: Rect2) -> void:
+	var completed := 0
+	for index in range(6):
+		if best_scores.has(str(index)): completed += 1
+	var hover := has_resume and area.has_point(get_local_mouse_position())
+	_panel(area, Color("234a4c") if hover else Color("173438"), Color(TEAL, .32))
+	_text("BACK ON DUTY" if has_resume else "YOUR JOURNEY", area.position + Vector2(24, 32), 11, TEAL)
+	_text("Your town is waiting." if has_resume else "Every rescue counts.", area.position + Vector2(24, 76), 23, CREAM)
+	_text("%d of 6 shifts completed" % completed, area.position + Vector2(24, 108), 15, MUTED)
+	for index in range(6):
+		var done := best_scores.has(str(index))
+		var dot := area.position + Vector2(32 + index * 43, 147)
+		if index < 5: cv.draw_line(dot, dot + Vector2(43, 0), Color(TEAL, .2), 2.0, true)
+		cv.draw_circle(dot, 6, TEAL if done else PANEL_LIGHT)
+		if done: cv.draw_circle(dot, 2, INK)
+	if has_resume:
+		_button("resume", "RESUME SAVED SHIFT  >", Rect2(area.position + Vector2(24, 190), Vector2(area.size.x - 48, 40)), TEAL, INK, 13)
+	else:
+		_text("Choose an open level to get started.", area.position + Vector2(24, 210), 14, MUTED)
+
+func _draw_campaign_postcard(area: Rect2, index: int) -> void:
+	# Small pixel illustrations use the same buildings and palette as the town.
+	# They are drawn in code and need no extra image downloads or assets.
+	var practice := BeaconCampaign.is_practice(index)
+	var desert := index == 4
+	var night := index == 3
+	var river := index in [2, 5] or practice
+	var grass: Color = Color("b8bd8b") if index in [1, 5] else Color("9eb88c")
+	if desert: grass = Color("d9c08d")
+	if night: grass = Color("526b66")
+	var sea: Color = Color("466e80") if night else Color("6a9ba2")
+	cv.draw_rect(area, sea if practice else grass)
+	var land := Rect2(area.position + Vector2(31, 6), area.size - Vector2(62, 12)) if practice else area
+	if practice:
+		cv.draw_rect(land.grow(3), Color("d7ceaa"))
+		cv.draw_rect(land, grass)
+	var road: Color = Color("a8b1a5") if not night else Color("788c88")
+	var edge: Color = Color("d8d2b2") if not night else Color("8b9d95")
+	for fraction in [.26, .73]:
+		var x: float = land.position.x + land.size.x * fraction
+		cv.draw_rect(Rect2(x - 5, land.position.y, 10, land.size.y), edge)
+		cv.draw_rect(Rect2(x - 3, land.position.y, 6, land.size.y), road)
+	for fraction in [.37, .81]:
+		var y: float = land.position.y + land.size.y * fraction
+		cv.draw_rect(Rect2(land.position.x, y - 5, land.size.x, 10), edge)
+		cv.draw_rect(Rect2(land.position.x, y - 3, land.size.x, 6), road)
+	if river:
+		var y: float = land.position.y + land.size.y * .51
+		cv.draw_rect(Rect2(area.position.x, y, area.size.x, 17), sea)
+		cv.draw_rect(Rect2(area.position.x, y + 3, area.size.x, 2), Color("9bc3c1"))
+		for fraction in [.26, .73]:
+			var x: float = land.position.x + land.size.x * fraction
+			cv.draw_rect(Rect2(x - 7, y - 2, 14, 21), Color("d6cba7"))
+			cv.draw_rect(Rect2(x - 4, y - 2, 8, 21), road)
+	elif night or desert:
+		var lake := Rect2(area.position + Vector2(area.size.x * .39, 34), Vector2(65, 39 if night else 30))
+		_panel(lake.grow(3), Color("c3b18a") if desert else Color("687f76"))
+		_panel(lake, sea)
+		cv.draw_line(lake.position + Vector2(14, 12), lake.position + Vector2(36, 12), Color("97c3bf"), 2)
+	var art := PixelTownArt.new(cv)
+	art.theme_index = 4 if desert else (1 if night else (2 if index in [1, 5] else 0))
+	var sites: Array[int] = [0, 2, 7, 14, 24, 30]
+	if index == 1: sites = [3, 16, 7, 29, 3, 11]
+	for row in range(2):
+		for column in range(3):
+			if (night or desert) and column == 1: continue
+			var foot := land.position + Vector2(land.size.x * (.13 + column * .35), 34 if row == 0 else land.size.y - 12)
+			art.site(foot, sites[row * 3 + column], .64)
+	for i in range(8):
+		var at := land.position + Vector2(9 + i * (land.size.x - 18) / 7, land.size.y - 4)
+		if desert:
+			cv.draw_line(at, at - Vector2(0, 9), Color("739472"), 3)
+			cv.draw_line(at - Vector2(0, 4), at - Vector2(4, 4), Color("739472"), 2)
+		else: art.tree(at, 5 + i % 3, i % 3)
+	if index == 5:
+		# A beacon by the water marks the final watch.
+		var at := area.position + Vector2(area.size.x - 32, 57)
+		cv.draw_colored_polygon(PackedVector2Array([at + Vector2(-7, 21), at + Vector2(-4, -7), at + Vector2(4, -7), at + Vector2(7, 21)]), CREAM)
+		cv.draw_rect(Rect2(at + Vector2(-5, 2), Vector2(10, 5)), CORAL)
+		cv.draw_rect(Rect2(at + Vector2(-6, -10), Vector2(12, 6)), GOLD)
+		cv.draw_line(at + Vector2(-15, -8), at + Vector2(15, -8), Color(GOLD, .55), 1)
 
 func _draw_lobby() -> void:
 	_draw_page_header("Play together", "UP TO FOUR PLAYERS")
@@ -1265,14 +1523,14 @@ func _draw_lobby() -> void:
 			row += 1
 		if network.hosting:
 			_draw_level_picker(Vector2(452,514))
-			_button("host_start","START LEVEL %02d TOGETHER" % (lobby_level+1),Rect2(452,586,536,54),TEAL,INK)
+			_button("host_start","START LEVEL %02d TOGETHER" % BeaconCampaign.level_number(lobby_level),Rect2(452,586,536,54),TEAL,INK)
 			_text("Same network: " + "   ".join(_local_addresses()),Vector2(452,664),16,CREAM)
 			_text(_short(network.internet_status,78),Vector2(452,690),13,TEAL if network.internet_address!="" else MUTED)
 			_text("Port %d (UDP). Allow Beacon Bay through the firewall when Windows asks." % NetworkSession.PORT,Vector2(452,712),12,MUTED)
 		else:
 			if network.can_start_session():
 				_draw_level_picker(Vector2(452,514))
-				_button("host_start","START LEVEL %02d TOGETHER" % (lobby_level+1),Rect2(452,586,536,54),TEAL,INK)
+				_button("host_start","START LEVEL %02d TOGETHER" % BeaconCampaign.level_number(lobby_level),Rect2(452,586,536,54),TEAL,INK)
 			else:
 				_text("Waiting for the first player to start…" if network.dedicated else "Waiting for the host to begin…",Vector2(452,600),19,GOLD)
 	_button("leave_lobby","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
@@ -1281,12 +1539,14 @@ func _draw_lobby() -> void:
 
 # Co-op level picker: every level is open in co-op, so a team can play any scenario.
 func _draw_level_picker(origin: Vector2) -> void:
-	lobby_level = clampi(lobby_level, 0, 5)
+	lobby_level = clampi(lobby_level, 0, BeaconCampaign.PRACTICE_INDEX)
 	var data: Dictionary = BeaconCampaign.shift_data(lobby_level)
-	_text("LEVEL %02d  ·  %s" % [lobby_level+1, str(data.get("title","")).to_upper()], origin, 13, TEAL)
-	for i in range(6):
+	_text("LEVEL %02d  ·  %s" % [BeaconCampaign.level_number(lobby_level), str(data.get("title","")).to_upper()], origin, 13, TEAL)
+	var levels: Array = [BeaconCampaign.PRACTICE_INDEX, 0, 1, 2, 3, 4, 5]
+	for slot in range(levels.size()):
+		var i: int = levels[slot]
 		var picked: bool = i == lobby_level
-		_button("lobby_level:%d" % i, "%02d" % (i+1), Rect2(origin + Vector2(i * 91, 12), Vector2(84, 40)), TEAL if picked else PANEL_LIGHT, INK if picked else CREAM, 15)
+		_button("lobby_level:%d" % i, "%02d" % BeaconCampaign.level_number(i), Rect2(origin + Vector2(slot * 78, 12), Vector2(70, 40)), TEAL if picked else PANEL_LIGHT, INK if picked else CREAM, 15)
 
 func _draw_role_picker(panel: Rect2) -> void:
 	_panel(panel, INK, Color("355966"))
@@ -1357,17 +1617,17 @@ func _draw_settings() -> void:
 			_settings_card("motion", "Reduced motion", "Calmer animation, no screen shake", reduced_motion, 0, y + SETTINGS_STEP)
 			_settings_card("perf", "Show FPS and ping", "Small counter in the corner (F3)", show_perf, 0, y + 2 * SETTINGS_STEP)
 			_settings_heading("KEYS", 1, y)
-			_settings_note([["F11  fullscreen  ·  F3  FPS and ping", 17, CREAM], ["M  minimap  ·  Esc  menu  ·  Right-click  clear selection", 15, MUTED], ["Scroll up or click the map to go in; scroll down for the whole town.", 15, MUTED]], 1, y, 2 * SETTINGS_STEP + SETTINGS_CARD.y)
+			_settings_note([["F11  fullscreen  ·  F3  FPS and ping", 17, CREAM], ["M  minimap  ·  Esc  menu  ·  Right-click  clear selection", 15, MUTED], ["Scroll up / EXPLORE to zoom in; down / OVERVIEW for the whole town.", 15, MUTED]], 1, y, 2 * SETTINGS_STEP + SETTINGS_CARD.y)
 		"research":
 			_settings_heading("MY GAMEPLAY", 0, y)
-			_settings_card("research", "Record my mouse", "My in-game movements and clicks, saved here", research_enabled, 0, y)
+			_settings_card("research", "Record gameplay & mouse", "Movements, clicks and event outcomes by level", research_enabled, 0, y)
 			var voice_y: float = y + SETTINGS_STEP + 30
 			_settings_heading("TEAM VOICE", 0, voice_y)
 			_settings_card("voice_consent", "Allow team recording", "Let teammates include my voice in their files", voice.recording_consent, 0, voice_y)
-			_settings_card("voice_record", "Save team voice", "One local audio file with consenting players", voice.recording_enabled, 0, voice_y + SETTINGS_STEP)
+			_settings_card("voice_record", "Save team voice", "One session with a separate track per speaker", voice.recording_enabled, 0, voice_y + SETTINGS_STEP)
 			_settings_heading("LOCAL RECORDINGS", 1, y)
 			var note_h: float = voice_y + 2 * SETTINGS_STEP - 10 - y - 58
-			_settings_note([["Recording runs while a level is played. Tutorials and menus are never recorded.", 16, CREAM], ["Files stay on this computer; nothing is uploaded. Your own voice is saved only while Voice chat (Sounds) is on.", 15, MUTED], ["Every switch starts off each launch.", 15, MUTED], [str(voice.status), 15, TEAL]], 1, y, note_h)
+			_settings_note([["Levels share one session. Mouse and event logs are grouped by level; speaker tracks share the same timeline.", 16, CREAM], ["Files stay here. Only in-game voice is saved, when Voice chat (Sounds) is on. During a level, voice also records in personal menus.", 15, MUTED], ["Collection starts off each launch. Choose on first level entry.", 15, MUTED], [str(voice.status), 15, TEAL]], 1, y, note_h)
 			_button("open_data","OPEN RECORDINGS",Rect2(SETTINGS_COL[1], y + note_h + 10, SETTINGS_CARD.x, 48),PANEL_LIGHT,TEAL,15)
 		_:
 			_settings_heading("GAME AUDIO", 0, y)
@@ -1406,7 +1666,7 @@ func _draw_help() -> void:
 	var tips := [
 		["01", "Send your crews", "Pick a crew, then a call. Or hover a call and press 1–4. Its icons show which departments are still needed."],
 		["02", "Help on scene", "Q scouts. E supplies. SPACE boosts. To leave a scene, select the busy crew in the bottom bar, then WITHDRAW or V."],
-		["03", "Explore the town", "Click or scroll up: go there. Scroll down: whole town. Drag: pan. M: minimap. Right-click: clear."],
+		["03", "Explore the town", "Scroll up or EXPLORE: zoom in. Scroll down or OVERVIEW: whole town. Drag: pan. Clicks keep your view. M: minimap."],
 		["04", "Coordinate", "Enable Voice chat in Settings to keep your microphone open. Turn it off there to mute. Recordings are optional and local."]
 	]
 	for i in range(tips.size()):
@@ -1435,12 +1695,13 @@ func _draw_results() -> void:
 	var m: float = RESULTS_MARGIN
 	var inner: float = panel.size.x - 2.0 * m
 	_panel(panel,INK,Color("355966"))
-	_text("SHIFT COMPLETE" if sim.won else "A DIFFICULT SHIFT",o+Vector2(m,51),13,TEAL if sim.won else CORAL)
-	_text(("A town worth saving." if sim.shift_index==5 else "The light stays on.") if sim.won else "Regroup. You can do this.",o+Vector2(m-2,107),38,CREAM)
+	_text("PRACTICE COMPLETE" if BeaconCampaign.is_practice(sim.shift_index) else ("SHIFT COMPLETE" if sim.won else "A DIFFICULT SHIFT"),o+Vector2(m,51),13,TEAL if sim.won else CORAL)
+	_text("Ready for Beacon Bay." if BeaconCampaign.is_practice(sim.shift_index) else (("A town worth saving." if sim.shift_index==5 else "The light stays on.") if sim.won else "Regroup. You can do this."),o+Vector2(m-2,107),38,CREAM)
 	# Stars pop in one at a time with a rising chime; the numbers count up.
 	var shown_for: float = elapsed_ui - results_since if results_since >= 0.0 else 99.0
 	if reduced_motion: shown_for = 99.0
 	for i in range(3):
+		if BeaconCampaign.is_practice(sim.shift_index): break
 		var appear: float = 0.5 + i * 0.45
 		var earned: bool = i < sim.stars
 		var grow: float = clampf((shown_for - appear) / 0.25, 0.0, 1.0)
@@ -1454,6 +1715,7 @@ func _draw_results() -> void:
 	var count_k: float = clampf((shown_for - 0.2) / 1.1, 0.0, 1.0)
 	count_k = 1.0 - pow(1.0 - count_k, 3)
 	var stats := [["%d / %d" % [roundi(sim.rescued * count_k), sim.target],"NEIGHBORS RESCUED / GOAL"],[str(roundi(sim.resolved_count * count_k)),"CALLS RESOLVED"],["%d%%"%roundi(sim.reputation * count_k),"COMMUNITY CONFIDENCE"]]
+	if BeaconCampaign.is_practice(sim.shift_index): stats[0] = [str(roundi(sim.rescued * count_k)), "NEIGHBORS HELPED"]
 	for i in range(3):
 		_text(stats[i][0],o+Vector2(m+i*226,184),37,GOLD)
 		_text(stats[i][1],o+Vector2(m+i*226,211),10,MUTED)
@@ -1471,7 +1733,7 @@ func _draw_results() -> void:
 		why = "2 stars: 75%+ confidence and at most 3 missed calls."
 	elif sim.stars == 2:
 		why = "3 stars: 92%%+ confidence, no missed calls and %d+ rescued." % (sim.target + 8)
-	_text("%d calls resolved · %d missed" % [sim.resolved_count, sim.failed_count], o+Vector2(m,280),18,MUTED)
+	_text("Practice has no score requirement. Try it again whenever you like." if BeaconCampaign.is_practice(sim.shift_index) else "%d calls resolved · %d missed" % [sim.resolved_count, sim.failed_count], o+Vector2(m,280),18,MUTED)
 	if why != "": _text(why, o+Vector2(m,306), 15, why_color)
 	# Three full-width actions: next / other levels (or leave) / settings.
 	var first := Rect2(o + Vector2(m, 378), Vector2(inner, 56))
@@ -1480,11 +1742,13 @@ func _draw_results() -> void:
 	if network.active and not network.hosting:
 		if network.can_start_session():
 			_text("OR PICK A LEVEL", o+Vector2(m,353), 12, TEAL)
-			var pick_w: float = 80.0
-			var pick_gap: float = (inner - 130.0 - 6.0 * pick_w) / 5.0
-			for i in range(6):
-				_button("lobby_start:%d" % i, "%02d" % (i+1), Rect2(o + Vector2(m + 130.0 + i * (pick_w + pick_gap), 330), Vector2(pick_w, 34)), PANEL_LIGHT, CREAM, 14)
-			_button("host_start", "NEXT SHIFT" if sim.won and sim.shift_index < 5 else "PLAY AGAIN", first, TEAL, INK, 17)
+			var pick_w: float = 68.0
+			var pick_gap: float = (inner - 130.0 - 7.0 * pick_w) / 6.0
+			var levels: Array = [BeaconCampaign.PRACTICE_INDEX, 0, 1, 2, 3, 4, 5]
+			for slot in range(levels.size()):
+				var i: int = levels[slot]
+				_button("lobby_start:%d" % i, "%02d" % BeaconCampaign.level_number(i), Rect2(o + Vector2(m + 130.0 + slot * (pick_w + pick_gap), 330), Vector2(pick_w, 34)), PANEL_LIGHT, CREAM, 14)
+			_button("host_start", "START LEVEL 1" if BeaconCampaign.is_practice(sim.shift_index) else ("NEXT SHIFT" if sim.won and sim.shift_index < 5 else "PLAY AGAIN"), first, TEAL, INK, 17)
 		else:
 			_panel(first, Color(PANEL, 0.6))
 			var wait := "Waiting for the session leader."
@@ -1492,7 +1756,7 @@ func _draw_results() -> void:
 			_text(wait, Vector2(first.get_center().x - ww / 2.0, first.position.y + 35), 19, GOLD)
 		_button("leave_lobby","LEAVE THE ROOM",second,PANEL_LIGHT,CREAM,15)
 	else:
-		_button("results_continue","NEXT SHIFT  >" if sim.won and sim.shift_index<5 else ("BACK TO YOUR TOWN" if sim.won else "TRY THIS SHIFT AGAIN"),first,TEAL,INK,17)
+		_button("results_continue", "START LEVEL 1  >" if BeaconCampaign.is_practice(sim.shift_index) else ("NEXT SHIFT  >" if sim.won and sim.shift_index<5 else ("BACK TO YOUR TOWN" if sim.won else "TRY THIS SHIFT AGAIN")),first,TEAL,INK,17)
 		_button("results_levels","CHOOSE ANOTHER LEVEL",second,PANEL_LIGHT,GOLD,15)
 	# Settings between levels (playtest 19.10): sound, voice chat and recordings
 	# can be changed here without leaving the room. BACK returns to this screen.
@@ -1586,11 +1850,32 @@ func _star(center: Vector2, radius: float, color: Color) -> void:
 
 func _input(event: InputEvent) -> void:
 	if dedicated_server: return
+	if screen == "game" and (not entry_popup.is_empty() or _waiting_for_briefings):
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			for button in buttons:
+				if button.rect.has_point(event.position - global_position):
+					_action(str(button.id))
+					break
+		# Consent has no implicit Enter/Escape default; the player chooses a button.
+		elif event is InputEventKey and event.pressed and not event.echo and event.keycode in [KEY_ENTER, KEY_KP_ENTER] and entry_popup == "briefing":
+			_complete_briefing()
+		get_viewport().set_input_as_handled()
+		return
 	# Capture local input once, before UI handlers consume it. Remote input never enters here.
 	if screen == "game" and not tutorial_active:
 		research.set_clock(sim.elapsed, sim.shift_index)
+		var input_context := {"screen": screen, "selected_incident_id": selected, "selected_unit_id": selected_unit, "map_zoom": map_zoom, "map_center": _map_center()}
+		if event is InputEventMouse:
+			input_context["world_position"] = _map_world_at(event.position - global_position)
+			input_context["pointer_target"] = tactical_map.pointer_target(event.position)
+			input_context["ui_button"] = ""
+			for button in buttons:
+				if button.rect.has_point(event.position - global_position): input_context["ui_button"] = button.id
+		research.update_context(input_context)
 		if event is InputEventMouseMotion: research.log_pointer(event.position, event.relative)
 		elif event is InputEventMouseButton: research.log_mouse_button(event)
+		elif event is InputEventKey and not event.echo:
+			research.log_event("key_input", {"keycode": event.keycode, "physical_keycode": event.physical_keycode, "pressed": event.pressed})
 	var over_hud_button: bool = false
 	if screen=="game" and event is InputEventMouse:
 		var p: Vector2 = event.position - global_position
@@ -1644,7 +1929,6 @@ func _input(event: InputEvent) -> void:
 		var direction: Vector2 = {KEY_W: Vector2.UP, KEY_UP: Vector2.UP, KEY_S: Vector2.DOWN, KEY_DOWN: Vector2.DOWN, KEY_A: Vector2.LEFT, KEY_LEFT: Vector2.LEFT, KEY_D: Vector2.RIGHT, KEY_RIGHT: Vector2.RIGHT}.get(event.keycode, Vector2.ZERO)
 		if direction != Vector2.ZERO:
 			_reset_map_gesture()
-			if _is_map_overview(): _explore_map_at(_overview_return_center)
 			map_pan -= direction * 72.0
 			_apply_map_layout()
 			get_viewport().set_input_as_handled()
@@ -1695,6 +1979,17 @@ func _input(event: InputEvent) -> void:
 
 func _action(id: String) -> void:
 	audio.play_cue("click")
+	if not tutorial_active: research.log_event("ui_action", {"action": id, "screen": screen})
+	if id == "collection_yes" or id == "collection_no":
+		_choose_collection(id == "collection_yes")
+		return
+	if id == "briefing_done":
+		_complete_briefing()
+		return
+	if id.begins_with("briefing_role:"):
+		var kind := id.trim_prefix("briefing_role:")
+		if kind in network.departments_for(): briefing_role = kind
+		return
 	if id.begins_with("settings_tab:"):
 		settings_tab = id.trim_prefix("settings_tab:")
 		_update_visibility()
@@ -1734,10 +2029,10 @@ func _action(id: String) -> void:
 		_plan_kind(id.trim_prefix("dispatch:"))
 		return
 	if id.begins_with("lobby_level:"):
-		lobby_level = clampi(id.trim_prefix("lobby_level:").to_int(), 0, 5)
+		lobby_level = clampi(id.trim_prefix("lobby_level:").to_int(), 0, BeaconCampaign.PRACTICE_INDEX)
 		return
 	if id.begins_with("lobby_start:"):
-		lobby_level = clampi(id.trim_prefix("lobby_start:").to_int(), 0, 5)
+		lobby_level = clampi(id.trim_prefix("lobby_start:").to_int(), 0, BeaconCampaign.PRACTICE_INDEX)
 		_submit_rating()
 		if network.dedicated: network.send_command("start_shift", {"shift": lobby_level})
 		else: _begin_shift(lobby_level)
@@ -1764,8 +2059,7 @@ func _action(id: String) -> void:
 		"focus": focus_open=not focus_open
 		"play":
 			if unlocked==0 and best_scores.is_empty() and not has_resume:
-				if not tutorial_seen: _begin_tutorial(true)
-				else: _begin_shift(0)
+				_begin_shift(BeaconCampaign.PRACTICE_INDEX)
 			else: screen="campaign"
 		"title":
 			if tutorial_active: _end_tutorial(false,false)
@@ -1801,7 +2095,7 @@ func _action(id: String) -> void:
 				# From the lobby the chosen level starts; from results: next shift / play again.
 				network.send_command("start_shift", {"shift": lobby_level} if screen == "lobby" else {})
 			else:
-				_begin_shift(lobby_level if screen == "lobby" else unlocked)
+				_begin_shift(lobby_level if screen == "lobby" else (0 if BeaconCampaign.is_practice(sim.shift_index) else unlocked))
 		"leave_lobby":
 			if screen=="results": _submit_rating()
 			_leave_network()
@@ -1824,7 +2118,8 @@ func _action(id: String) -> void:
 		"resume": _resume_shift()
 		"results_continue":
 			_submit_rating()
-			if sim.won and sim.shift_index<5: _begin_shift(sim.shift_index+1)
+			if BeaconCampaign.is_practice(sim.shift_index): _begin_shift(0)
+			elif sim.won and sim.shift_index<5: _begin_shift(sim.shift_index+1)
 			elif sim.won: screen="campaign"
 			else: _begin_shift(sim.shift_index)
 		"results_levels":
@@ -1993,9 +2288,18 @@ func _draw_tutorial_highlight(canvas: Node2D) -> void:
 				canvas.draw_rect((button.rect as Rect2).grow(4),accent,false,3)
 
 func _begin_shift(index: int) -> void:
-	_stop_capture()
+	_end_level_capture("restarted" if sim.running else "changed_level")
+	var previous_run := shared_level_run_id
+	shared_level_run_id = _new_capture_id("level%d" % BeaconCampaign.level_number(index))
+	if network.active and network.hosting:
+		# This reliable marker follows every event from the previous level. A
+		# snapshot on another channel must not move a guest past those events.
+		network.broadcast_event({"type": "level_transition", "previous_level_run_id": previous_run, "level_run_id": shared_level_run_id, "level_index": index})
+	_level_ready_peers.clear()
+	_waiting_for_briefings = network.active and not test_mode
+	entry_popup = ""
 	_route_cache_until = 0
-	sim.start_shift(clampi(index,0,5))
+	sim.start_shift(clampi(index,0,BeaconCampaign.PRACTICE_INDEX))
 	if fx != null:
 		fx.reset()
 		fx.displayed_rescued = 0.0
@@ -2003,7 +2307,7 @@ func _begin_shift(index: int) -> void:
 		orders.clear()
 		result_saved = false
 		screen = "game"
-		print("Dedicated server: Shift 1 started.")
+		print("Dedicated server: Level %d waiting for players." % BeaconCampaign.level_number(index))
 		return
 	audio.reset_session()
 	town.set_theme(index)
@@ -2024,6 +2328,7 @@ func _begin_shift(index: int) -> void:
 	screen="game"
 	_reset_exploration_camera()
 	ticker=str(BeaconCampaign.shift_data(index).get("introduction","All crews ready."))
+	_begin_level_entry()
 	_sync_capture()
 	research.update_context({"shift":index,"mode":"co_op" if network.active else "solo","role":network.role})
 	audio.play_cue("shift")
@@ -2033,11 +2338,14 @@ func _finish_shift() -> void:
 	if result_saved: return
 	result_saved=true
 	screen="results"
-	_stop_capture()
+	_end_level_capture("completed")
+	entry_popup = ""
 	if dedicated_server:
 		print("Dedicated server: shift ended. The first player can start the next shift or replay.")
 		return
-	if sim.won:
+	if BeaconCampaign.is_practice(sim.shift_index):
+		audio.play_cue("win")
+	elif sim.won:
 		unlocked=maxi(unlocked,mini(5,sim.shift_index+1))
 		best_scores[str(sim.shift_index)]=maxi(int(best_scores.get(str(sim.shift_index),0)),sim.score)
 		total_rescued+=sim.rescued
@@ -2079,13 +2387,14 @@ func _cycle_incident() -> void:
 	var idx:=0
 	for i in range(calls.size()):
 		if int(calls[i].id)==selected: idx=(i+1)%calls.size(); break
-	_center_map(calls[idx].pos)
 	_select_incident(int(calls[idx].id))
 
 func _command(action: String, payload: Dictionary) -> void:
 	_route_cache_until = 0
 	if screen != "game": return
+	research.log_event("command_requested", {"action": action, "payload": payload, "actor_peer": multiplayer.get_unique_id()})
 	if not network.can_do(action,-1,payload):
+		research.log_event("command_result", {"action": action, "payload": payload, "actor_peer": multiplayer.get_unique_id(), "accepted": false, "reason": "department_not_owned"})
 		var owner: int = network.owner_of(str(payload.get("kind","")))
 		_toast("You command %s. Ask %s to send that crew." % [network.departments_text(), network.player_label(owner) if owner>0 else "a teammate"])
 		return
@@ -2105,6 +2414,11 @@ func _command(action: String, payload: Dictionary) -> void:
 			focused_unit_left = 0
 
 func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
+	if action == "level_ready":
+		if network.hosting and network.roster.has(_peer_id) and str(payload.get("level_run_id", "")) == shared_level_run_id:
+			_level_ready_peers[_peer_id] = true
+			_check_level_ready()
+		return
 	if action == "change_role":
 		var between_levels := screen in ["lobby", "results"] or (screen == "settings" and previous_screen in ["lobby", "results"])
 		if between_levels and not sim.running and network._valid_payload(action, payload):
@@ -2117,15 +2431,19 @@ func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
 		if dedicated_server and screen in ["lobby", "results"] and network.can_start_session(_peer_id) and multiplayer.get_peers().has(_peer_id):
 			_dedicated_shift_started = true
 			var next_shift := sim.shift_index + 1 if screen == "results" and sim.won and sim.shift_index < 5 else (sim.shift_index if screen == "results" and not sim.won else 0)
-			if payload.has("shift"): next_shift = clampi(int(payload.shift), 0, 5)
+			if payload.has("shift"): next_shift = clampi(int(payload.shift), 0, BeaconCampaign.PRACTICE_INDEX)
 			_begin_shift(next_shift)
 		return
 	_route_cache_until = 0
-	if not _simulation_active() or not sim.running: return
+	if not _simulation_active() or not sim.running:
+		_record_command_result(action, payload, _peer_id, false, "level_not_active")
+		return
 	if tutorial_active and not tutorial.can_action(action,payload):
 		_toast(str(tutorial.current().objective))
 		return
-	if not network.can_do(action,_peer_id,payload): return
+	if not network.can_do(action,_peer_id,payload):
+		_record_command_result(action, payload, _peer_id, false, "department_not_owned")
+		return
 	event_actor = _peer_id
 	var local_command: bool = not network.active or _peer_id==multiplayer.get_unique_id()
 	var id:=int(payload.get("incident_id",-1))
@@ -2164,11 +2482,23 @@ func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
 		if local_command: _toast(reason)
 		elif network.has_method("broadcast_event"): network.call("broadcast_event",{"type":"action_denied","text":reason,"actor_peer":_peer_id})
 	_process_events()
-	event_actor = 1
+	_record_command_result(action, payload, _peer_id, success, "accepted" if success else "unavailable_or_invalid_target")
+	event_actor = 0
+
+func _record_command_result(action: String, payload: Dictionary, peer_id: int, accepted: bool, reason: String) -> void:
+	if tutorial_active: return
+	var result := {"type": "command_result", "action": action, "payload": payload, "actor_peer": peer_id,
+		"accepted": accepted, "reason": reason, "level_run_id": shared_level_run_id,
+		"level_index": sim.shift_index, "at": sim.elapsed, "research_only": true}
+	if research != null: research.log_event("command_result", result)
+	if network.active and network.hosting: network.broadcast_event(result)
 
 func _process_events() -> void:
 	for event in sim.drain_events():
 		event["actor_peer"] = event_actor
+		event["level_run_id"] = shared_level_run_id
+		event["level_index"] = sim.shift_index
+		if not event.has("at"): event["at"] = sim.elapsed
 		if str(event.get("type", "")) == "shift_complete":
 			# Presentation metadata only: simulation already converted these calls.
 			var failed_ids: Array[int] = []
@@ -2181,7 +2511,23 @@ func _process_events() -> void:
 			network.call("broadcast_event",event)
 
 func _on_remote_event(event: Dictionary) -> void:
+	var event_run := str(event.get("level_run_id", ""))
+	if str(event.get("type", "")) == "level_transition":
+		_announced_remote_runs[event_run] = true
+		if str(_pending_transition_snapshot.get("level_run_id", "")) == event_run:
+			var next_level := _pending_transition_snapshot
+			_pending_transition_snapshot = {}
+			_receive_snapshot(next_level)
+		return
+	if str(event.get("type", "")) == "shift_complete": _completed_remote_runs[event_run] = event.duplicate(true)
+	if not event_run.is_empty() and (event_run != capture_run_id or not _session_screen()):
+		if _pending_level_events.size() < 512: _pending_level_events.append(event.duplicate(true))
+		return
 	_handle_game_event(event)
+	if str(event.get("type", "")) == "shift_complete" and not _pending_results_snapshot.is_empty() and str(_pending_results_snapshot.get("level_run_id", "")) == event_run:
+		var terminal := _pending_results_snapshot
+		_pending_results_snapshot = {}
+		_receive_snapshot(terminal)
 
 func _handle_game_event(event: Dictionary) -> void:
 	if dedicated_server: return
@@ -2197,13 +2543,17 @@ func _handle_game_event(event: Dictionary) -> void:
 			message="Unconfirmed report at %s. Scout before committing." % event_call.name
 		ticker=("#%02d · " % int(event_call.id) if not event_call.is_empty() else "")+message
 	var local_actor := not network.active or int(event.get("actor_peer",1))==multiplayer.get_unique_id()
-	if not tutorial_active and (local_actor or type not in ["dispatch","scout","supply","rally"]):
+	if not tutorial_active:
 		var logged: Dictionary = event
 		if event.has("path"):
 			# The full route is for drawing only; keep research lines small.
 			logged = event.duplicate()
 			logged.erase("path")
 		research.log_event("incident_spawned" if type=="incident" else type,logged)
+	if BeaconCampaign.is_practice(sim.shift_index) and type in ["road_event", "bridge_flooded", "hazard_warning", "hazard_started"]:
+		_toast(message)
+		audio.play_cue("arrival")
+		return
 	if type in ["resolved","rescue","incident_resolved"]:
 		audio.play_cue("rescue")
 		if fx != null and event.get("pos") is Vector2:
@@ -2322,6 +2672,15 @@ func _receive_snapshot(data: Dictionary) -> void:
 	_route_cache_until = 0
 	if network.hosting: return
 	var next_screen:=str(data.get("screen","game"))
+	var incoming_run := str(data.get("level_run_id", ""))
+	if network.active and next_screen == "game" and not capture_run_id.is_empty() and not incoming_run.is_empty() and incoming_run != capture_run_id and not _announced_remote_runs.has(incoming_run):
+		_pending_transition_snapshot = data.duplicate(true)
+		return
+	# Reliable lifecycle events and snapshots travel on different channels.
+	# Do not finalize a playing guest's level before its end events arrive.
+	if next_screen == "results" and not capture_run_id.is_empty() and not incoming_run.is_empty() and incoming_run == capture_run_id and not _completed_remote_runs.has(incoming_run):
+		_pending_results_snapshot = data.duplicate(true)
+		return
 	if screen=="results" and next_screen=="game":
 		_submit_rating()
 		result_rating_sent=false
@@ -2329,16 +2688,24 @@ func _receive_snapshot(data: Dictionary) -> void:
 	var previous_elapsed: float = sim.elapsed
 	var entering_session := not _session_screen()
 	var keep_menu := _session_screen() and screen != "game"
+	var next_run_id := str(data.get("level_run_id", shared_level_run_id))
+	var run_changed := not next_run_id.is_empty() and next_run_id != shared_level_run_id
+	if run_changed or int(data.get("simulation", {}).get("shift_index", sim.shift_index)) != sim.shift_index or float(data.get("simulation", {}).get("elapsed", sim.elapsed)) + 1.0 < sim.elapsed:
+		_end_level_capture("completed" if _completed_remote_runs.has(capture_run_id) else "changed_level")
+		_pending_results_snapshot = {}
+	shared_level_run_id = next_run_id
+	_waiting_for_briefings = bool(data.get("waiting_for_briefings", false))
 	sim.apply_snapshot(data.get("simulation",{}))
-	var restarting := sim.shift_index != previous_shift or sim.elapsed + 1.0 < previous_elapsed
-	if restarting: _stop_capture()
+	var restarting := run_changed or sim.shift_index != previous_shift or sim.elapsed + 1.0 < previous_elapsed
+	if restarting and not data.has("level_run_id"): shared_level_run_id = _new_capture_id("received_level")
+	if next_screen == "game" and (entering_session or restarting): _begin_level_entry()
 	if next_screen == "game" and (entering_session or restarting): audio.reset_session(sim.incidents)
 	if next_screen == "game" and sim.running and (entering_session or restarting): _reset_exploration_camera()
 	host_speed = float(data.get("speed", 1.0))
 	var now: int = Time.get_ticks_msec()
 	if _last_snapshot_ms >= 0: _snapshot_gap_ms = lerpf(_snapshot_gap_ms, float(now - _last_snapshot_ms), 0.2)
 	_last_snapshot_ms = now
-	if next_screen == "game" and sim.running:
+	if next_screen == "game" and sim.running and not _waiting_for_briefings:
 		# The snapshot left the host half a round trip ago; catch up to "now".
 		sim.tick(clampf(network.round_trip_ms() * 0.0005, 0.0, 0.15) * host_speed)
 		_reapply_predictions()
@@ -2349,7 +2716,16 @@ func _receive_snapshot(data: Dictionary) -> void:
 		pass # A guest's settings opened from the results screen stay open until BACK.
 	elif next_screen in ["game","pause","results","help"]:
 		if next_screen != "game" or not keep_menu: screen=next_screen
+	if next_screen == "results":
+		_end_level_capture("completed")
+		entry_popup = ""
 	orders=data.get("orders",{})
+	_sync_capture()
+	var pending_events := _pending_level_events
+	_pending_level_events = []
+	for event: Dictionary in pending_events:
+		if str(event.get("level_run_id", "")) == capture_run_id: _on_remote_event(event)
+		elif not restarting: _pending_level_events.append(event)
 	# Repainting the town backdrop is expensive; only do it when the shift changes.
 	if sim.shift_index != previous_shift or screen != "game": town.set_theme(sim.shift_index)
 
@@ -2445,6 +2821,8 @@ func _resume_shift() -> void:
 	if FileAccess.file_exists(SAVE_PATH):
 		var data=JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))
 		if data is Dictionary and data.has("session"):
+			_end_level_capture("resumed_level")
+			shared_level_run_id = _new_capture_id("resume")
 			sim.apply_snapshot(data.session)
 			audio.reset_session(sim.incidents)
 			screen="game"
@@ -2456,6 +2834,8 @@ func _resume_shift() -> void:
 			result_rating_sent=false
 			save_timer=0
 			town.set_theme(sim.shift_index)
+			_begin_level_entry()
+			_sync_capture()
 			return
 	_toast("No suspended shift yet. Choose a shift to get started.")
 

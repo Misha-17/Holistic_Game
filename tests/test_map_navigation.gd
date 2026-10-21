@@ -24,6 +24,88 @@ func motion(at: Vector2, relative: Vector2) -> void:
 	event.relative = root.get_final_transform().basis_xform(relative)
 	Input.parse_input_event(event)
 
+func refresh_map() -> void:
+	game._process(0)
+	game.tactical_map.refresh()
+
+func click_target(rect: Rect2, label: String) -> void:
+	check(rect.has_area(), label + " has a clickable marker")
+	if not rect.has_area(): return
+	button(rect.get_center(), true)
+	button(rect.get_center(), false)
+
+func check_camera(zoom: float, pan: Vector2, label: String) -> void:
+	check(is_equal_approx(game.map_zoom, zoom) and game.map_pan == pan, label + " preserves zoom and camera position")
+
+func test_selection_preserves_view() -> void:
+	game.research_enabled = false
+	game.buttons.clear()
+	for overview: bool in [true, false]:
+		game._begin_shift(0)
+		if not overview: game._toggle_overview()
+		game._center_map(Vector2(.55, .55))
+		var zoom: float = game.map_zoom
+		var pan: Vector2 = game.map_pan
+		var view := "Overview" if overview else "Exploration"
+		game.sim._spawn_incident()
+		var call: Dictionary = game.sim.incidents.back()
+		call.pos = Vector2(.48, .4)
+		call.kind = "medical"
+		call.needs = {"medic": 1, "fire": 1}
+		call.discovered = false
+		var medic: Dictionary = {}
+		for unit: Dictionary in game.sim.units:
+			if unit.kind == "medic":
+				medic = unit
+				break
+		medic.state = "return"
+		medic.pos = Vector2(.65, .65)
+		refresh_map()
+		# Stations and individual crews use press-to-select in both views.
+		var station: Rect2 = game.tactical_map.base_hit_rect("engineer")
+		# An offscreen station is deliberately not moved into view automatically.
+		if station.has_area():
+			click_target(station, view + " station")
+			check(game.selected_unit >= 0 and game.sim.get_unit(game.selected_unit).kind == "engineer", view + " station selects a crew")
+			check_camera(zoom, pan, view + " station selection")
+		game.selected_unit = -1
+		refresh_map()
+		click_target(game.tactical_map.unit_hit_rect(int(medic.id)), view + " crew")
+		check(game.selected_unit == int(medic.id), view + " crew remains selected after release")
+		check_camera(zoom, pan, view + " crew selection")
+		refresh_map()
+		click_target(game.tactical_map.call_hit_rect(int(call.id)), view + " unconfirmed call")
+		check(game.selected == int(call.id) and game.selected_unit == int(medic.id), view + " unconfirmed call opens with the crew still selected")
+		check(game.sim.successful_dispatches == 0, view + " unconfirmed call does not dispatch")
+		check_camera(zoom, pan, view + " call selection")
+		refresh_map()
+		click_target(game.tactical_map._rect_for("scout", int(call.id)), view + " scout control")
+		check(bool(call.discovered), view + " scout control reveals the selected call")
+		check_camera(zoom, pan, view + " scouting")
+		refresh_map()
+		click_target(game.tactical_map.call_hit_rect(int(call.id)), view + " dispatch call")
+		check(game.sim.successful_dispatches == 1 and int(medic.target) == int(call.id), view + " call click dispatches the selected crew")
+		check_camera(zoom, pan, view + " dispatch")
+		game._pick_department("fire")
+		check(game.sim.successful_dispatches == 2, view + " department shortcut dispatches another crew")
+		check_camera(zoom, pan, view + " quick dispatch")
+		game._action("unit:%d" % int(medic.id))
+		check(game.selected_unit == int(medic.id), view + " crew bar selects an assigned crew")
+		game._action("withdraw:%d" % int(medic.id))
+		check(str(medic.state) == "return", view + " selected crew can withdraw")
+		check_camera(zoom, pan, view + " crew controls")
+		game.selected_unit = -1
+		game._cycle_incident()
+		check_camera(zoom, pan, view + " next-call shortcut")
+		game._action("focus")
+		check_camera(zoom, pan, view + " call focus panel")
+		# Selecting an ordinary known call also leaves the camera untouched.
+		game.selected = -1
+		refresh_map()
+		click_target(game.tactical_map.call_hit_rect(int(call.id)), view + " known call")
+		check(game.selected == int(call.id), view + " known call opens without a selected crew")
+		check_camera(zoom, pan, view + " known call selection")
+
 func run() -> void:
 	game = load("res://scripts/main.gd").new()
 	game.test_mode = true
@@ -132,11 +214,12 @@ func run() -> void:
 		if event.event == "mouse_button": clicks += 1
 		if event.event == "mouse_motion": moves += 1
 	check(clicks == 12 and moves == 4, "Gesture routing records each delivered mouse event exactly once")
+	test_selection_preserves_view()
 	game.voice.shutdown()
 	game.queue_free()
 	await process_frame
 	await process_frame
-	if failures.is_empty(): print("PASS: drag-versus-click, press-to-select crews, minimap, two views (whole town / drag), HUD input and local recording")
+	if failures.is_empty(): print("PASS: stable camera for selection, scouting, dispatch and crew controls in both views; drag, minimap, explicit zoom, HUD input and recording")
 	else:
 		for failure in failures: printerr("FAIL: ", failure)
 	quit(0 if failures.is_empty() else 1)

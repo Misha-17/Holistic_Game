@@ -93,11 +93,11 @@ var _surge_spawn_timer: float = 0.0
 var _surge_breather_length: float = 0.0
 
 func start_shift(index: int) -> void:
-	shift_index = clampi(index, 0, 5)
+	shift_index = index if Campaign.is_practice(index) else clampi(index, 0, 5)
 	_shift = Campaign.shift_data(shift_index)
 	_rng.seed = 738291 + shift_index * 1097
 	elapsed = 0.0
-	duration = 330.0
+	duration = float(_shift.get("duration", Campaign.SHIFT_SECONDS))
 	running = true
 	finished = false
 	won = false
@@ -159,8 +159,11 @@ func start_shift(index: int) -> void:
 	_surge_spawn_timer = 0.0
 	_surge_breather_length = 0.0
 	_build_fleet()
-	_emit("shift_started", notice, {"shift": shift_index})
+	_emit("shift_started", notice, {"shift": shift_index, "level_number": Campaign.level_number(shift_index), "practice": is_practice(), "duration": duration})
 	_tick_chaos_schedule()
+
+func is_practice() -> bool:
+	return Campaign.is_practice(shift_index)
 
 func tick(delta: float) -> void:
 	if not running or finished:
@@ -184,8 +187,9 @@ func _tick_step(delta: float) -> void:
 	if disruption_remaining > 0.0:
 		disruption_remaining = maxf(0.0, disruption_remaining - delta)
 		if disruption_remaining <= 0.0:
+			var ended_disruption: String = disruption
 			disruption = ""
-			_emit("disruption_end", "Conditions improving • keep going")
+			_emit("disruption_end", "Conditions improving • keep going", _disruption_record(ended_disruption, "elapsed"))
 	var schedule: Array = _shift.get("disruptions", [])
 	if _disruption_index < schedule.size() and elapsed >= float(schedule[_disruption_index].at):
 		_start_disruption(schedule[_disruption_index])
@@ -207,10 +211,10 @@ func _tick_step(delta: float) -> void:
 	for incident: Dictionary in incidents:
 		_tick_incident(incident, delta)
 	peak_active = maxi(peak_active, active_count())
-	if not _reported_target and rescued >= target:
+	if not is_practice() and not _reported_target and rescued >= target:
 		_reported_target = true
 		_emit("target_reached", "Rescue goal reached • keep the bay safe", {"rescued": rescued})
-	if not _reported_final_minute and elapsed >= duration - 60.0:
+	if not is_practice() and not _reported_final_minute and elapsed >= duration - 60.0:
 		_reported_final_minute = true
 		_emit("final_minute", "One minute until relief • finish strong")
 	if reputation <= 0.0 or elapsed >= duration:
@@ -238,11 +242,11 @@ func chaos_context() -> Dictionary:
 	if chaos_phase_index < 0 or chaos_phase_index >= schedule.size():
 		return {}
 	var phase: Dictionary = schedule[chaos_phase_index]
-	return {"schedule_version": Campaign.CHAOS_SCHEDULE_VERSION,
+	return {"schedule_version": Campaign.PRACTICE_SCHEDULE_VERSION if is_practice() else Campaign.CHAOS_SCHEDULE_VERSION,
 		"shift": shift_index, "phase": chaos_phase, "phase_index": chaos_phase_index,
 		"at": float(phase.at), "until": float(phase.until),
 		"duration": float(phase.until) - float(phase.at),
-		"campaign_at": shift_index * Campaign.SHIFT_SECONDS + float(phase.at)}
+		"campaign_at": float(phase.at) if is_practice() else shift_index * Campaign.SHIFT_SECONDS + float(phase.at)}
 
 func _tick_arrivals() -> void:
 	var schedule: Array = _shift.get("arrival_schedule", [])
@@ -250,7 +254,7 @@ func _tick_arrivals() -> void:
 		var scheduled: Dictionary = schedule[arrival_index]
 		var capacity: int = int(_shift.max_active) + (1 if chaos_phase == "high" else 0)
 		if active_count() < capacity:
-			_spawn_incident()
+			_spawn_incident(Campaign.location_index(str(scheduled.get("site", ""))), str(scheduled.get("kind", "")))
 		else:
 			# Never move the next phase or arrival because a group is busy. The
 			# skipped opportunity is retained in research data for comparison.
@@ -260,8 +264,18 @@ func _tick_arrivals() -> void:
 		arrival_index += 1
 
 func _emit_research(type: String, payload: Dictionary) -> void:
-	var record: Dictionary = {"type": type, "text": "", "research_only": true}
-	record.merge(payload)
+	var record: Dictionary = payload.duplicate(true)
+	# An event subtype (jam, blackout...) must not overwrite its lifecycle name.
+	if record.has("type"):
+		record["event_type"] = record.type
+	record["type"] = type
+	record["text"] = ""
+	record["research_only"] = true
+	if not record.has("at"): record["at"] = elapsed
+	record["observed_elapsed"] = elapsed
+	record["shift"] = shift_index
+	record["level_number"] = Campaign.level_number(shift_index)
+	record["practice"] = is_practice()
 	events.append(record)
 
 func dispatch(incident_id: int, unit_kind: String, unit_id: int = -1) -> bool:
@@ -570,6 +584,7 @@ func road_conditions() -> Array[Dictionary]:
 	return result
 
 func _all_work_done() -> bool:
+	if is_practice(): return false # Always allow the full, gentle 2.5-minute practice.
 	# Only shifts that run on the arrival schedule can end early (not the tutorial
 	# or tests that clear the schedule).
 	var schedule: Array = _shift.get("arrival_schedule", [])
@@ -598,6 +613,9 @@ func road_event_center(event: Dictionary) -> Vector2:
 	return Vector2(event.position) + Vector2(event.size) * 0.5
 
 func _hazard_text(event: Dictionary) -> String:
+	if is_practice():
+		if str(event.type) == "blackout": return "Power practice: send Engineering to the substation. Helpers are standing by."
+		return "%s. It will pass shortly; crews can keep moving." % event.name
 	match str(event.type):
 		"blackout": return "%s • calls there can't be seen and crews crawl. An engineer at the substation brings the lights back" % event.name
 		"sandstorm": return "%s • everyone drives slowly there and new calls are hard to see" % event.name
@@ -613,7 +631,7 @@ func _tick_road_events() -> void:
 		var event: Dictionary = {"id": int(plan.id), "type": str(plan.type), "clear_kind": str(plan.clear_kind),
 			"name": str(plan.name), "street": str(plan.get("street", "")), "position": plan.position, "size": plan.size,
 			"speed_factor": float(plan.speed_factor), "clear_time": float(plan.clear_time),
-			"started_at": elapsed, "expires_at": elapsed + float(plan.duration), "status": "active",
+			"scheduled_at": float(plan.at), "started_at": elapsed, "expires_at": float(plan.at) + float(plan.duration), "status": "active",
 			"assigned_unit": -1, "clear_dispatched_at": -1.0, "clear_started_at": -1.0, "clear_progress": 0.0,
 			"ended_at": -1.0, "chaos_phase": chaos_phase, "linked_incident": -1}
 		if plan.has("target"): event["target"] = plan.target
@@ -638,7 +656,9 @@ func _tick_road_events() -> void:
 		if bool(event.get("hazard", false)):
 			_emit("hazard_started", _hazard_text(event), {"road_event_id": event.id, "pos": road_event_center(event), "clear_kind": event.clear_kind, "hazard_type": event.type})
 		else:
-			_emit("road_event", "%s • only %s gets through. Clear it to open the road" % [event.name, who],
+			var road_message: String = "%s • only %s gets through. Clear it to open the road" % [event.name, who]
+			if is_practice(): road_message = "%s: select the road and send %s. Helpers will handle it if you leave it." % [event.name, who]
+			_emit("road_event", road_message,
 				{"road_event_id": event.id, "pos": road_event_center(event), "clear_kind": event.clear_kind})
 		_emit_research("road_event_started", _road_event_record(event))
 	for event: Dictionary in road_events:
@@ -654,10 +674,20 @@ func _tick_road_events() -> void:
 			elif bool(event.get("hazard", false)): ended = "The %s has passed %s" % [str(event.type), event.street]
 			_emit("hazard_ended" if bool(event.get("hazard", false)) else "road_event_end", ended, {"road_event_id": event.id, "pos": road_event_center(event), "hazard_type": event.type})
 			_emit_research("road_event_expired", _road_event_record(event))
+			_emit_research("road_event_ended", _road_event_record(event))
 
 func _road_event_record(event: Dictionary) -> Dictionary:
-	return {"road_event_id": int(event.id), "type": str(event.type), "clear_kind": str(event.clear_kind),
+	var ended: bool = float(event.ended_at) >= 0.0
+	var solvable: bool = not str(event.clear_kind).is_empty()
+	var outcome: String = "open"
+	if str(event.status) == "cleared": outcome = "resolved"
+	elif str(event.status) == "expired": outcome = "expired_unsolved" if solvable else "elapsed"
+	elif str(event.status) == "level_ended": outcome = "level_ended_unsolved" if solvable else "level_ended"
+	return {"road_event_id": int(event.id), "event_id": "road_%d" % int(event.id), "event_type": str(event.type), "clear_kind": str(event.clear_kind),
 		"name": str(event.name), "shift": shift_index, "started_at": float(event.started_at),
+		"scheduled_at": float(event.get("scheduled_at", event.started_at)), "scheduled_end_at": float(event.expires_at),
+		"position": event.position, "size": event.size, "solvable": solvable,
+		"solved": (str(event.status) == "cleared") if ended and solvable else null, "outcome": outcome,
 		"chaos_phase_at_start": str(event.get("chaos_phase", "")), "status": str(event.status),
 		"assigned_unit": int(event.assigned_unit), "linked_incident": int(event.get("linked_incident", -1)), "clear_dispatched_at": float(event.clear_dispatched_at),
 		"clear_started_at": float(event.clear_started_at), "ended_at": float(event.ended_at),
@@ -725,6 +755,7 @@ func _finish_clearing(crew: Dictionary) -> void:
 		_emit("road_cleared", done_text,
 			{"road_event_id": event.id, "unit_id": crew.id, "kind": crew.kind, "pos": road_event_center(event)})
 		_emit_research("road_event_cleared", _road_event_record(event))
+		_emit_research("road_event_ended", _road_event_record(event))
 		_reroute_around_roads()
 	_send_home(crew)
 
@@ -1152,12 +1183,15 @@ func _read_legacy_vector(value: Variant) -> Vector2:
 	return Vector2.ZERO
 
 func shift_summary() -> Dictionary:
-	return {"shift": shift_index, "title": _shift.get("title", ""), "won": won, "stars": stars, "score": score, "rescued": rescued, "target": target, "resolved": resolved_count, "missed": failed_count, "reputation": snappedf(reputation, 0.1), "best_combo": best_combo, "credits_earned": shift_reward, "duration": elapsed, "dispatches": successful_dispatches, "scouts": scout_count, "supplies_used": supply_count, "escalations": escalation_count, "rapid_responses": rapid_response_count, "peak_calls": peak_active, "roads_cleared": roads_cleared, "wrong_dispatches": wrong_dispatches, "minimum_confidence": minimum_confidence}
+	return {"shift": shift_index, "level_number": Campaign.level_number(shift_index), "practice": is_practice(), "title": _shift.get("title", ""), "won": won, "stars": stars, "score": score, "rescued": rescued, "target": target, "resolved": resolved_count, "missed": failed_count, "reputation": snappedf(reputation, 0.1), "best_combo": best_combo, "credits_earned": shift_reward, "duration": elapsed, "dispatches": successful_dispatches, "scouts": scout_count, "supplies_used": supply_count, "escalations": escalation_count, "rapid_responses": rapid_response_count, "peak_calls": peak_active, "roads_cleared": roads_cleared, "wrong_dispatches": wrong_dispatches, "minimum_confidence": minimum_confidence}
 
 func kind_name(kind: String) -> String:
 	return str({"fire": "Fire", "medic": "Medical", "medical": "Medical", "engineer": "Engineer", "flood": "Flood", "power": "Power", "police": "Police"}.get(kind, kind.capitalize()))
 
 func _fleet_home(kind: String, crew_index: int) -> Vector2:
+	if is_practice():
+		var practice_homes: Dictionary = {"fire": Vector2(864, 448), "medic": Vector2(1888, 448), "engineer": Vector2(1120, 928), "police": Vector2(1632, 1184)}
+		return (Vector2(practice_homes[kind]) + Vector2(6.0 * crew_index, 0.0)) / Campaign.MAP_SIZE
 	# Stations are spread over the whole town (Oct 2026): every department has a
 	# main station and a second station in a different district, so which crew is
 	# closest changes from call to call. Even crew numbers use the main station,
@@ -1227,7 +1261,7 @@ func _spawn_incident(forced_location: int = -1, forced_kind: String = "") -> voi
 	if forced_location >= 0: report_clear = true
 	# All-four-department calls in every shift, from shift 1, after the opening minute.
 	# Each shift is guaranteed at least one by its 8th call and two by its 16th.
-	if elapsed > 60.0 and total_spawned >= 4:
+	if not is_practice() and elapsed > 60.0 and total_spawned >= 4:
 		var four_team_calls: int = 0
 		for earlier: Dictionary in incidents:
 			if int(earlier.severity) >= 3: four_team_calls += 1
@@ -1235,12 +1269,15 @@ func _spawn_incident(forced_location: int = -1, forced_kind: String = "") -> voi
 		if _rng.randf() < chance or (four_team_calls == 0 and total_spawned >= 7) or (four_team_calls < 2 and total_spawned >= 15):
 			severity = 3
 	# Every call needs a team: severity 1 = two departments, 2 = three, 3 = all four.
+	if is_practice():
+		severity = 1
+		report_clear = true
 	var needs: Dictionary = {"fire": 0, "medic": 0, "engineer": 0, "police": 0}
 	var order: Array = _team_order(kind)
-	var team_size: int = clampi(severity + 1, 2, 4)
+	var team_size: int = 1 if is_practice() else clampi(severity + 1, 2, 4)
 	for index: int in range(team_size):
 		needs[order[index]] = 1
-	var work_duration: float = 10.0 + severity * 4.2
+	var work_duration: float = 3.0 if is_practice() else 10.0 + severity * 4.2
 	var arrival_budget: float = 0.0
 	# Deadlines assume open roads: a closed street is a problem for the team to
 	# solve (clear it or crawl), not something the countdown quietly absorbs.
@@ -1263,6 +1300,7 @@ func _spawn_incident(forced_location: int = -1, forced_kind: String = "") -> voi
 	var deadline: float = arrival_budget * 1.12 + work_duration * WORK_TIME_ALLOWANCE + decision_slack + _rng.randf_range(-2.0, 4.0) + 7.0 * upgrade_level("radio")
 	if not report_clear: deadline += 4.0
 	if shift_index == 0 and total_spawned == 0: deadline += 10.0
+	if is_practice(): deadline = 300.0 # Practice timers never tick down or become urgent.
 	var bonuses: Array[String] = ["Neighbors cleared the way.", "A safe route is marked. Crews can work faster.", "Everyone is accounted for. Rescue plan confirmed.", "Local volunteers are helping. You've got this."]
 	var incident: Dictionary = {
 		"id": _next_id, "pos": place.pos, "kind": kind, "name": place.name,
@@ -1280,9 +1318,24 @@ func _spawn_incident(forced_location: int = -1, forced_kind: String = "") -> voi
 		"rapid_response": false, "phase": "waiting", "confirmed_on_scene": false
 	}
 	incidents.append(incident)
+	if is_practice():
+		incident.title = {"fire": "Fire response practice", "medical": "First-aid practice", "power": "Engineering practice", "police": "Police response practice"}.get(kind, "Response practice")
 	_next_id += 1
 	total_spawned += 1
 	_emit("incident", "%s • %s" % [incident.title if report_clear else "Unverified report", incident.name], {"incident_id": incident.id, "kind": kind, "pos": incident.pos, "severity": severity})
+	_emit_research("incident_started", _incident_record(incident, "open"))
+
+func _incident_record(incident: Dictionary, outcome: String) -> Dictionary:
+	var ended: float = float(incident.get("resolved_at", -1.0))
+	return {"incident_id": int(incident.id), "event_id": "incident_%d" % int(incident.id), "event_type": str(incident.kind),
+		"name": str(incident.name), "title": str(incident.title), "position": incident.pos, "location_index": int(incident.location_index),
+		"started_at": float(incident.created_at), "ended_at": ended, "status": str(incident.status),
+		"outcome": outcome, "solvable": true, "solved": (outcome == "resolved") if ended >= 0.0 else null,
+		"seconds_open": (ended if ended >= 0.0 else elapsed) - float(incident.created_at),
+		"severity": int(incident.severity), "needs": incident.needs.duplicate(true), "assigned_units": incident.assigned.duplicate(),
+		"progress": float(incident.progress), "discovered": bool(incident.discovered), "scouted": bool(incident.scouted),
+		"people": int(incident.people), "time_left": float(incident.deadline), "max_deadline": float(incident.max_deadline),
+		"highest_hazard_stage": int(incident.get("highest_hazard_stage", 0))}
 
 const LEAD_KIND := {"fire": "fire", "medic": "medical", "police": "police"}
 
@@ -1411,6 +1464,9 @@ func _tick_unit(unit: Dictionary, delta: float) -> void:
 func _tick_incident(incident: Dictionary, delta: float) -> void:
 	if not _is_active(incident):
 		return
+	if is_practice() and elapsed - float(incident.created_at) >= 35.0:
+		_handoff_practice_incident(incident)
+		return
 	var complete_team: bool = true
 	var arrived_total: int = 0
 	var deploying: bool = false
@@ -1428,7 +1484,7 @@ func _tick_incident(incident: Dictionary, delta: float) -> void:
 			complete_team = false
 	_update_hazard(incident, delta, arrived_total, complete_team)
 	# The countdown is real time: one second per second, always.
-	incident.deadline = maxf(0.0, float(incident.deadline) - delta)
+	if not is_practice(): incident.deadline = maxf(0.0, float(incident.deadline) - delta)
 	incident.phase = "deploy" if deploying else ("contain" if arrived_total > 0 else ("enroute" if not incident.assigned.is_empty() else "waiting"))
 	if complete_team:
 		if not bool(incident.arrival_sent):
@@ -1451,6 +1507,10 @@ func _tick_incident(incident: Dictionary, delta: float) -> void:
 		_fail(incident)
 
 func _update_hazard(incident: Dictionary, delta: float, arrived: int, complete_team: bool) -> void:
+	if is_practice():
+		incident.hazard = 0.0
+		incident.hazard_stage = 0
+		return
 	var hazard: float = float(incident.get("hazard", 0.0))
 	if complete_team:
 		hazard -= delta * 0.04
@@ -1483,6 +1543,7 @@ func _update_hazard(incident: Dictionary, delta: float, arrived: int, complete_t
 
 func _resolve(incident: Dictionary) -> void:
 	incident.status = "resolved"
+	incident["outcome"] = "resolved"
 	incident.resolved_at = elapsed
 	resolved_count += 1
 	rescued += int(incident.people)
@@ -1499,6 +1560,7 @@ func _resolve(incident: Dictionary) -> void:
 	for id: int in incident.assigned:
 		_send_home(get_unit(id))
 	_emit("resolved", "%d neighbors safe • crews returning to standby" % incident.people, {"incident_id": incident.id, "pos": incident.pos, "people": incident.people, "points": earned, "combo": combo, "time_left": float(incident.deadline)})
+	_emit_research("incident_ended", _incident_record(incident, "resolved"))
 	if combo in [3, 5, 8, 12, 16, 20]:
 		_emit("combo", "%d calls. One unbroken chain of care." % combo, {"combo": combo})
 	if combo > 0 and combo % 5 == 0:
@@ -1507,6 +1569,7 @@ func _resolve(incident: Dictionary) -> void:
 
 func _fail(incident: Dictionary) -> void:
 	incident.status = "failed"
+	incident["outcome"] = "failed"
 	incident.resolved_at = elapsed
 	failed_count += 1
 	combo = 0
@@ -1514,6 +1577,16 @@ func _fail(incident: Dictionary) -> void:
 	for id: int in incident.assigned:
 		_send_home(get_unit(id))
 	_emit("failed", "Backup took over at %s • regroup and keep going" % incident.name, {"incident_id": incident.id, "pos": incident.pos})
+	_emit_research("incident_ended", _incident_record(incident, "failed"))
+
+func _handoff_practice_incident(incident: Dictionary) -> void:
+	incident.status = "practice_handoff"
+	incident["outcome"] = "practice_handoff"
+	incident.resolved_at = elapsed
+	for id: int in incident.assigned:
+		_send_home(get_unit(id), false)
+	_emit("practice_handoff", "A practice helper finished this call. You can try the next one whenever you are ready.", {"incident_id": incident.id, "pos": incident.pos})
+	_emit_research("incident_ended", _incident_record(incident, "practice_handoff"))
 
 func _send_home(unit: Dictionary, count_job: bool = true) -> void:
 	if unit.is_empty():
@@ -1655,13 +1728,25 @@ func _route_length(start: Vector2, points: Array) -> float:
 	return length
 
 func _start_disruption(data: Dictionary) -> void:
+	if not disruption.is_empty() and disruption_remaining > 0.0:
+		_emit("disruption_end", "Conditions have changed", _disruption_record(disruption, "superseded"))
 	disruption = str(data.type)
 	disruption_remaining = float(data.duration)
 	if disruption in ["comms", "blackout"]:
 		for incident: Dictionary in incidents:
 			if _is_active(incident) and not bool(incident.scouted) and not bool(incident.get("confirmed_on_scene", false)):
 				incident.discovered = false
-	_emit("disruption", str(data.text), {"disruption": disruption, "duration": disruption_remaining})
+	_emit("disruption", str(data.text), {"disruption": disruption, "duration": disruption_remaining,
+		"event_id": "disruption_%d" % _disruption_index, "event_type": disruption, "started_at": elapsed,
+		"scheduled_end_at": float(data.at) + float(data.duration), "outcome": "open", "solvable": false, "solved": null})
+
+func _disruption_record(kind: String, outcome: String) -> Dictionary:
+	var schedule: Array = _shift.get("disruptions", [])
+	var index: int = maxi(0, _disruption_index - 1)
+	var plan: Dictionary = schedule[index] if index < schedule.size() else {}
+	return {"event_id": "disruption_%d" % index, "event_type": kind, "disruption": kind,
+		"started_at": float(plan.get("at", elapsed)), "ended_at": elapsed,
+		"solvable": false, "solved": null, "outcome": outcome}
 	
 
 func _finish_shift() -> void:
@@ -1669,23 +1754,41 @@ func _finish_shift() -> void:
 	finished = true
 	for incident: Dictionary in incidents:
 		if _is_active(incident):
-			
+			if is_practice():
+				_handoff_practice_incident(incident)
+				continue
 			incident.status = "failed"
+			incident["outcome"] = "level_ended_unsolved"
 			incident.resolved_at = elapsed
 			failed_count += 1
 			reputation = maxf(0.0, reputation - 4.0)
-	won = rescued >= target and reputation >= minimum_confidence
+			_emit_research("incident_ended", _incident_record(incident, "level_ended_unsolved"))
+	for event: Dictionary in active_road_events():
+		event.status = "level_ended"
+		event.ended_at = elapsed
+		_emit_research("road_event_ended", _road_event_record(event))
+	for flood: Array in _layout.get("floods", []):
+		if elapsed >= float(flood[1]) and elapsed < float(flood[1]) + float(flood[2]):
+			_emit_research("bridge_flood_ended", _flood_record(flood, "level_ended"))
+	if not disruption.is_empty():
+		_emit("disruption_end", "Watch complete", _disruption_record(disruption, "level_ended"))
+		disruption = ""
+		disruption_remaining = 0.0
+	won = is_practice() or (rescued >= target and reputation >= minimum_confidence)
 	stars = 0
-	if won:
+	if won and not is_practice():
 		stars = 1
 		if reputation >= 75.0 and failed_count <= 3:
 			stars = 2
 		if reputation >= 92.0 and failed_count == 0 and rescued >= target + 8:
 			stars = 3
 	shift_reward = 35 + resolved_count * 4 + stars * 22 + (30 if won else 0)
+	if is_practice(): shift_reward = 0
 	credits += shift_reward
 	score += int(reputation * 3.0) + stars * 100
-	_emit("shift_complete", "The bay is brighter because of you" if won else "Every rescue mattered • regroup for another watch", shift_summary())
+	var complete_message: String = "The bay is brighter because of you" if won else "Every rescue mattered • regroup for another watch"
+	if is_practice(): complete_message = "Practice complete. You are ready to try your first watch."
+	_emit("shift_complete", complete_message, shift_summary())
 
 func _is_active(incident: Dictionary) -> bool:
 	return incident.status in ["active", "working"]
@@ -1740,13 +1843,22 @@ func _tick_floods(delta: float) -> void:
 		if before < begins and elapsed >= begins:
 			_edge_cache.clear()
 			_emit("bridge_flooded", "%s is flooded • cross the river somewhere else" % name, {"pos": pos, "bridge": name, "seconds": ends - begins})
-			_emit_research("bridge_flood_started", {"shift": shift_index, "bridge": name, "at": elapsed, "until": ends, "chaos_phase": chaos_phase})
+			_emit_research("bridge_flood_started", _flood_record(flood, "open"))
 			_reroute_all()
 		elif before < ends and elapsed >= ends:
 			_edge_cache.clear()
 			_emit("bridge_open", "%s is open again" % name, {"pos": pos, "bridge": name})
-			_emit_research("bridge_flood_ended", {"shift": shift_index, "bridge": name, "at": elapsed})
+			_emit_research("bridge_flood_ended", _flood_record(flood, "elapsed"))
 			_reroute_all()
+
+func _flood_record(flood: Array, outcome: String) -> Dictionary:
+	var begins: float = float(flood[1])
+	var ends: float = begins + float(flood[2])
+	return {"event_id": "bridge_%d_%.3f" % [int(flood[0]), begins], "event_type": "bridge_flood",
+		"bridge": str(_layout.bridges.get(int(flood[0]), "Bridge")), "bridge_column": int(flood[0]),
+		"started_at": begins, "scheduled_end_at": ends, "until": ends,
+		"ended_at": -1.0 if outcome == "open" else elapsed, "chaos_phase": chaos_phase,
+		"solvable": false, "solved": null, "outcome": outcome}
 
 # Every moving crew takes the best route again (e.g. its bridge just flooded).
 func _reroute_all() -> void:

@@ -41,3 +41,9 @@ These screenshots are written to `test_output/*-v8.png`. The minimap capture ent
 ## Verified result
 
 On 12 October 2026, the rendered viewport regression passed at both window sizes with the 2304×1536 map and restored native pixel renderer. The drag-versus-click, player capture, and session lifecycle suites also passed. The actual ENet main client/server suite passed lobby, start, menus, results, replay, local recording, and disconnect checks. Screenshots were reviewed for default station visibility, changed streets after dragging, southeast district travel, full overview, title, calls, and tutorial controls.
+# 0.9.1: camera stays in the selected view
+
+Selection no longer switches out of overview or recentres the map. Navigation regression coverage now includes call/crew/station selection, unconfirmed calls, scouting, dispatch, department keys, crew-bar actions, Tab cycling and focus panels in both views. Dragging, middle-drag and arrow keys retain zoom; wheel and EXPLORE/OVERVIEW are the explicit view controls.
+
+`test_map_navigation.gd` and `test_map_viewport_input.gd` passed headlessly. The viewport suite also passed with the Windows rendering driver, including resized-window input. The new ordered level-card menu and practice map without its title/subtitle were rendered and visually inspected using `tests/capture_level_entry.gd`.
+

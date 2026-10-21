@@ -3,10 +3,12 @@ var finish_path := ""
 var done_path := ""
 var game: Node
 var failures: Array[String] = []
+var briefings := false
 func _initialize() -> void:
 	var directory := "user://main-network-qa"
 	for argument in OS.get_cmdline_user_args():
 		if argument.begins_with("--qa-dir="): directory = argument.trim_prefix("--qa-dir=")
+		if argument == "--qa-briefings": briefings = true
 	DirAccess.make_dir_recursive_absolute(directory)
 	finish_path = directory.path_join("finish.signal")
 	done_path = directory.path_join("done.signal")
@@ -27,7 +29,7 @@ func signal_file(path: String) -> void:
 func run() -> void:
 	game = load("res://scripts/main.gd").new()
 	game.name = "BeaconGame"
-	game.test_mode = true
+	game.test_mode = not briefings
 	root.add_child(game)
 	if game.dedicated_server:
 		var deadline := Time.get_ticks_msec() + 40000
@@ -48,8 +50,9 @@ func run() -> void:
 	game.audio.set_music_enabled(false)
 	game.audio.set_sfx_enabled(false)
 	game.screen = "lobby"
-	game.research_enabled = true
-	game.voice.set_recording_enabled(true)
+	if not briefings:
+		game.research_enabled = true
+		game.voice.set_recording_enabled(true)
 	game.network.join("127.0.0.1:%d" % game.network.port)
 	if not await wait_for(func(): return game.network.roster.size() == 1, "server lobby handshake"):
 		finish()
@@ -59,6 +62,16 @@ func run() -> void:
 	if not await wait_for(func(): return game.screen == "game" and game.capture_run_id != "", "first shared shift and local capture"):
 		finish()
 		return
+	if briefings:
+		check(game.entry_popup == "consent", "Real client first entry asks for consent")
+		await create_timer(.4).timeout
+		check(is_zero_approx(game.sim.elapsed), "Host and guest stay at zero during collection choice")
+		check(not game.research.enabled and not game.voice.recording_active, "Real client has no capture before choice")
+		game._choose_collection(true)
+		await create_timer(.25).timeout
+		check(is_zero_approx(game.sim.elapsed), "Role briefing also holds team clock")
+		game._complete_briefing()
+		await wait_for(func(): return not game._waiting_for_briefings and game.sim.elapsed > .05, "reliable ready handshake starts level")
 	var first_run: String = game.capture_run_id
 	var first_audio: String = game.voice.recording_path
 	for menu in ["pause", "help", "settings"]:
@@ -74,13 +87,17 @@ func run() -> void:
 	if not await wait_for(func(): return game.screen == "results" and game.capture_run_id == "", "results and finalized capture"):
 		finish()
 		return
-	check(FileAccess.file_exists(first_audio), "First session local WAV exists")
+	check(FileAccess.file_exists(first_audio), "Whole-session voice manifest exists")
 	game._action("host_start")
 	if not await wait_for(func(): return game.screen == "game" and game.capture_run_id != "", "same-shift replay"):
 		finish()
 		return
+	if briefings:
+		check(game.entry_popup == "briefing", "Following level shows role briefing without repeating consent")
+		game._complete_briefing()
+		await wait_for(func(): return not game._waiting_for_briefings, "ready handshake on next level")
 	check(game.capture_run_id != first_run, "Replay uses new recording run")
-	check(game.voice.recording_path != first_audio, "Replay uses new WAV path")
+	check(game.voice.recording_path == first_audio, "Replay keeps aligned speaker tracks in the same session")
 	var second_events: String = game.research.log_path
 	signal_file(done_path)
 	await wait_for(func(): return game.screen == "lobby" and not game.network.active, "server disconnect", 10.0)

@@ -26,10 +26,11 @@ def main() -> int:
         cmd = [args.godot, "--headless", "--path", str(root), "--script", script, "--"] + extra
         return label, subprocess.Popen(cmd, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT, creationflags=hidden), log
 
-    unit = launch("audio", "res://tests/voice_audio_test.gd", [])
-    code = unit[1].wait(timeout=20)
-    unit[2].close()
-    if code: failures.append(unit[0])
+    for label, script in [("audio", "voice_audio_test.gd"), ("sessions", "test_voice_sessions.gd")]:
+        unit = launch(label, "res://tests/" + script, [])
+        code = unit[1].wait(timeout=20)
+        unit[2].close()
+        if code: failures.append(unit[0])
     for mode, port in [("dedicated", 24781), ("desktop", 24782)]:
         common = [f"--port={port}"]
         if mode == "desktop": common.append("--desktop-host")

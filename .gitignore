@@ -6,6 +6,7 @@
 /research/
 /logs/
 /.test-user/
+/.test-user-*/
 /test_output/
 /artifacts/
 **/__pycache__/

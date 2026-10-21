@@ -926,7 +926,7 @@ func _draw_pin(point: Vector2, incident: Dictionary) -> void:
 	if selected:
 		draw_arc(point, 36, 0, TAU, 40, CREAM, 3, false)
 	# Time left, big and outlined, above the marker.
-	_btext("%d" % ceili(deadline), point + Vector2(0, -42), 21, RED if urgent else CREAM, true)
+	_btext("PRACTICE" if sim.is_practice() else "%d" % ceili(deadline), point + Vector2(0, -42), 13 if sim.is_practice() else 21, RED if urgent else CREAM, true)
 
 # How many crews this call still needs (unknown calls count as needing help until a crew arrives).
 func _missing(incident: Dictionary) -> int:

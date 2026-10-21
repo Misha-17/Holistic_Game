@@ -78,10 +78,11 @@ func run() -> void:
 	button(point, true)
 	motion(point + Vector2(140, 70), Vector2(140, 70))
 	button(point + Vector2(140, 70), false)
-	check(game.map_zoom > game._fit_map_zoom() + .2, "Dragging overview returns to exploration")
-	check(game.map_pan.distance_to(before) > 100, "Overview drag changes the visible streets")
+	check(game._is_map_overview(), "Dragging overview keeps the chosen zoom")
+	check(game.map_pan == before, "Overview drag keeps the whole town in frame")
 	await snapshot("overview-drag")
 	# The minimap (drag view only) jumps to a distant district.
+	game._toggle_overview()
 	game._center_map(Vector2(.3, .3))
 	var destination: Vector2 = game.MINIMAP_RECT.position + game.MINIMAP_RECT.size * Vector2(.82, .8)
 	button(destination, true)
@@ -106,8 +107,7 @@ func run() -> void:
 	game._toggle_overview()
 	button(point, true)
 	button(point, false)
-	check(not game._is_map_overview(), "A district click opens its exploration view")
-	game._toggle_overview()
+	check(game._is_map_overview(), "A district click keeps the chosen overview")
 	var key := InputEventKey.new()
 	key.keycode = KEY_RIGHT
 	key.pressed = true
@@ -115,12 +115,11 @@ func run() -> void:
 	key = key.duplicate()
 	key.pressed = false
 	Input.parse_input_event(key)
-	check(not game._is_map_overview(), "Arrow keys leave overview")
-	game._toggle_overview()
+	check(game._is_map_overview(), "Arrow keys pan without changing zoom")
 	button(point, true, MOUSE_BUTTON_MIDDLE)
 	motion(point + Vector2(80, 40), Vector2(80, 40))
 	button(point + Vector2(80, 40), false, MOUSE_BUTTON_MIDDLE)
-	check(not game._is_map_overview(), "Middle-button pan leaves overview")
+	check(game._is_map_overview(), "Middle-button pan keeps the chosen zoom")
 	# Exercise the actual window stretch rather than passing preconverted events
 	# straight to _input. An odd aspect ratio also covers letterbox conversion.
 	root.size = Vector2i(1100, 700)
@@ -162,7 +161,7 @@ func run() -> void:
 	game.queue_free()
 	await process_frame
 	await process_frame
-	if failures.is_empty(): print("PASS: real viewport drag, overview escape, minimap, zoom floor and resized-window input")
+	if failures.is_empty(): print("PASS: real viewport drag, stable overview, minimap, explicit zoom and resized-window input")
 	else:
 		for failure in failures: printerr("FAIL: ", failure)
 	quit(0 if failures.is_empty() else 1)

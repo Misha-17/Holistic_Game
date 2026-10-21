@@ -12,11 +12,33 @@ const TOWN_SHIFT_X := 224.0
 const MAP_VERSION := 5
 const CHAOS_SCHEDULE_VERSION := "beacon-chaos-v1"
 const SHIFT_SECONDS := 330.0
+# Practice lives outside the six campaign indices so old saves retain their levels.
+const PRACTICE_INDEX := 6
+const PRACTICE_SECONDS := 150.0
+const PRACTICE_BOUNDS := Rect2(820.0, 360.0, 1136.0, 880.0)
+const PRACTICE_SCHEDULE_VERSION := "beacon-practice-v1"
+
+static func is_practice(index: int) -> bool:
+	return index == PRACTICE_INDEX
+
+static func level_number(index: int) -> int:
+	return 0 if is_practice(index) else clampi(index, 0, 5) + 1
+
+static func practice_data() -> Dictionary:
+	return {"title": "TRAINING HARBOR", "subtitle": "A gentle first watch. Take your time.",
+		"display_number": 0, "practice": true, "weather": "clear", "target": 0,
+		"introduction": "Practice at your own pace. Helpers will finish anything left open; there is no failing this watch.",
+		"accent": "98dfc7", "duration": PRACTICE_SECONDS, "interval": 30.0, "max_active": 2,
+		"weights": [1, 1, 1, 1, 1], "surges": [], "disruptions": [],
+		"chaos_phases": chaos_schedule(PRACTICE_INDEX),
+		"arrival_schedule": arrival_schedule(PRACTICE_INDEX, 30.0), "traffic": road_events(PRACTICE_INDEX)}
 
 # The order looks irregular to a player, but is an immutable study protocol.
 # Times are active seconds since this shift started, never wall-clock time.
 # Keep old versions available if a future study changes this protocol.
 static func chaos_schedule(index: int) -> Array[Dictionary]:
+	if is_practice(index):
+		return [{"at": 0.0, "until": PRACTICE_SECONDS, "phase": "low", "index": 0}]
 	var starts: Array = [
 		[0, 42, 73, 106, 142, 174, 204, 244, 278],
 		[0, 37, 68, 101, 137, 172, 211, 246, 280],
@@ -42,6 +64,13 @@ static func chaos_schedule(index: int) -> Array[Dictionary]:
 	return result
 
 static func arrival_schedule(index: int, base_interval: float) -> Array[Dictionary]:
+	if is_practice(index):
+		return [
+			{"at": 5.0, "phase_index": 0, "site": "Community Hall", "kind": "fire"},
+			{"at": 32.0, "phase_index": 0, "site": "Seaport Museum", "kind": "medical"},
+			{"at": 62.0, "phase_index": 0, "site": "Saltmarsh Cafe", "kind": "power"},
+			{"at": 88.0, "phase_index": 0, "site": "Southgate School", "kind": "police"}
+		]
 	# A dedicated seed is used once to prepare arrival opportunities. Gameplay,
 	# occupied locations and random art can never consume this random stream.
 	var timing_rng := RandomNumberGenerator.new()
@@ -141,6 +170,7 @@ static func location_index(name: String) -> int:
 	return -1
 
 static func road_events(index: int) -> Array[Dictionary]:
+	if is_practice(index): return _practice_events()
 	# [at, type, title, stretch, which building on it, call kind at that building]
 	# Each shift's closures land in different parts of town.
 	# The call that comes with a closure is led by another department than the
@@ -174,6 +204,32 @@ static func road_events(index: int) -> Array[Dictionary]:
 		result.append(hazard)
 		number += 1
 	result.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.at) < float(b.at))
+	return result
+
+# The same event mechanics as the campaign, in short, gentle demonstrations.
+# The four road exercises use different departments and never overlap.
+static func _practice_events() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var plans: Array = [
+		[18.0, "jam", "Traffic practice", "Harbor Lane", Vector2(1412, 1184)],
+		[36.0, "debris", "Debris practice", "Workshop Lane", Vector2(1412, 704)],
+		[54.0, "road_fire", "Fire practice", "Training Lane", Vector2(1156, 448)],
+		[72.0, "accident", "First-aid practice", "Clinic Lane", Vector2(1668, 928)]
+	]
+	for plan: Array in plans:
+		result.append({"id": result.size() + 1, "at": float(plan[0]), "duration": 17.0,
+			"type": str(plan[1]), "clear_kind": ROAD_CLEAR_KIND[str(plan[1])], "clear_time": 3.0,
+			"name": str(plan[2]), "street": str(plan[3]), "position": (Vector2(plan[4]) - Vector2(0, 24)) / MAP_SIZE,
+			"size": Vector2(180, 48) / MAP_SIZE, "speed_factor": 0.8, "call_site": "", "call_kind": ""})
+	result.append({"id": 5, "at": 92.0, "duration": 20.0, "type": "blackout",
+		"clear_kind": "engineer", "clear_time": 3.0, "name": "Power practice at the harbor", "street": "Training Harbor",
+		"position": Vector2(1110, 370) / MAP_SIZE, "size": Vector2(560, 350) / MAP_SIZE,
+		"speed_factor": 0.9, "target": Vector2(1376, 448) / MAP_SIZE, "hazard": true, "call_site": "", "call_kind": ""})
+	for storm: Array in [[132.0, "sandstorm", "A little sand passes through"], [141.0, "squall", "A brief rain shower"]]:
+		result.append({"id": result.size() + 1, "at": float(storm[0]), "duration": 8.0,
+			"type": str(storm[1]), "clear_kind": "", "clear_time": 0.0, "name": str(storm[2]), "street": "the practice harbor",
+			"position": Vector2(840, 920) / MAP_SIZE, "size": Vector2(1096, 280) / MAP_SIZE,
+			"speed_factor": 0.9, "hazard": true, "eastward": true, "call_site": "", "call_kind": ""})
 	return result
 
 # Which department leads each call, by call number. Every block of four calls
@@ -220,6 +276,13 @@ const DISTRICTS := {
 }
 
 static func layout(index: int) -> Dictionary:
+	if is_practice(index):
+		return {"name": "training_harbor", "theme": "practice", "bounds": PRACTICE_BOUNDS,
+			"water": [Rect2(0, 0, 820, MAP_SIZE.y), Rect2(1956, 0, MAP_SIZE.x - 1956, MAP_SIZE.y),
+				Rect2(820, 0, 1136, 360), Rect2(820, 1240, 1136, MAP_SIZE.y - 1240),
+				Rect2(820, RIVER_TOP, 1136, RIVER_BOTTOM - RIVER_TOP)],
+			"river": Rect2(820, RIVER_TOP, 1136, RIVER_BOTTOM - RIVER_TOP), "river_row": 2,
+			"bridges": {4: "Practice Bridge", 6: "Harbor Bridge"}, "floods": [[4, 114.0, 14.0]]}
 	match clampi(index, 0, 5):
 		2:
 			return {"name": "two_banks", "theme": "river",
@@ -306,6 +369,7 @@ static func edge_blocked(data: Dictionary, horizontal: bool, ix: int, iy: int) -
 	if not horizontal and iy + 1 >= ROAD_Y_PX.size(): return true
 	var a := Vector2(ROAD_X_PX[ix], ROAD_Y_PX[iy])
 	var b: Vector2 = Vector2(ROAD_X_PX[ix + 1], a.y) if horizontal else Vector2(a.x, ROAD_Y_PX[iy + 1])
+	if data.has("bounds") and (not Rect2(data.bounds).has_point(a) or not Rect2(data.bounds).has_point(b)): return true
 	var piece_area := Rect2(a, b - a).abs().grow(1.0)
 	for water: Rect2 in data.get("water", []):
 		if water.grow(-2.0).intersects(piece_area): return true
@@ -319,6 +383,7 @@ static func site_open(index: int, site_pos_normalized: Vector2) -> bool:
 	var data: Dictionary = layout(index)
 	if data.is_empty(): return true
 	var point: Vector2 = site_pos_normalized * MAP_SIZE
+	if data.has("bounds") and not Rect2(data.bounds).grow(-20.0).has_point(point): return false
 	for water: Rect2 in data.get("water", []):
 		if water.grow(20.0).has_point(point): return false
 	var row: int = 0
@@ -331,6 +396,7 @@ static func site_open(index: int, site_pos_normalized: Vector2) -> bool:
 	return true
 
 static func shift_data(index: int) -> Dictionary:
+	if is_practice(index): return practice_data()
 	return shifts()[clampi(index, 0, 5)].duplicate(true)
 
 static func upgrades() -> Array[Dictionary]:

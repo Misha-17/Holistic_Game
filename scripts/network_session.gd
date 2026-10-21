@@ -11,7 +11,7 @@ signal voice_packet_received(peer_id: int, sequence: int, pcm: PackedByteArray)
 signal voice_participants_changed
 
 const PORT := 24680
-const PROTOCOL_VERSION := 12 # 19.10: four crews in every level; dispatch events carry the route.
+const PROTOCOL_VERSION := 13 # Level 0, shared level run IDs and the start-of-level ready barrier.
 const MAX_PLAYER_NAME_LENGTH := 20
 const UNRELIABLE_SNAPSHOT_LIMIT := 1100 # Leave room for RPC/ENet headers below the path MTU.
 # Every player has the same job: command one (or more) emergency departments.
@@ -24,7 +24,7 @@ const SPLITS := {
 	3: [["fire", "police"], ["medic"], ["engineer"]],
 	4: [["fire"], ["medic"], ["engineer"], ["police"]],
 }
-const ACTIONS := ["dispatch", "withdraw", "clear_road", "scout", "supply", "special", "ping", "start_shift", "change_role"]
+const ACTIONS := ["dispatch", "withdraw", "clear_road", "scout", "supply", "special", "ping", "start_shift", "change_role", "level_ready"]
 var active := false
 var port := PORT
 var hosting := false
@@ -517,9 +517,11 @@ func _valid_roster(data: Dictionary, server_only: bool = false) -> bool:
 	return true
 
 func _valid_payload(action: String, payload: Dictionary) -> bool:
+	if action == "level_ready":
+		return payload.size() == 1 and payload.get("level_run_id") is String and not str(payload.level_run_id).is_empty() and str(payload.level_run_id).length() <= 120
 	if action == "start_shift":
 		# Optionally the level picked in the co-op lobby.
-		return payload.is_empty() or (payload.size() == 1 and payload.get("shift") is int and int(payload.shift) >= 0 and int(payload.shift) <= 5)
+		return payload.is_empty() or (payload.size() == 1 and payload.get("shift") is int and int(payload.shift) >= 0 and int(payload.shift) <= 6)
 	if payload.size() > 6:
 		return false
 	if action == "change_role":
@@ -548,6 +550,8 @@ func _valid_payload(action: String, payload: Dictionary) -> bool:
 
 func _clean_payload(action: String, payload: Dictionary) -> Dictionary:
 	match action:
+		"level_ready":
+			return {"level_run_id": str(payload.level_run_id)}
 		"start_shift":
 			return {"shift": int(payload.shift)} if payload.has("shift") else {}
 		"dispatch":

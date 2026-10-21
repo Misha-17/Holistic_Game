@@ -124,12 +124,19 @@ func _finish() -> void:
 		for peer_id in received:
 			if int(received[peer_id].count) < 15: errors.append("too few audio packets received")
 		voice.stop()
-		var data := FileAccess.get_file_as_bytes(voice.recording_path)
-		if data.size() < 6400 or data.decode_u32(40) != data.size() - 44: errors.append("invalid local WAV")
-		var maximum := 0
-		for offset in range(44, data.size(), 2): maximum = maxi(maximum, data.decode_s16(offset))
-		if maximum <= 1000 * (1 << index): errors.append("remote voice missing from local mixed file")
-		if index != 3 and maximum > 7000: errors.append("unconsenting participant was included in local recording")
+		var manifest: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(voice.recording_path))
+		var recorded_levels: Array[int] = []
+		for track: Dictionary in manifest.tracks:
+			var data := FileAccess.get_file_as_bytes(voice.recording_path.get_base_dir().path_join(track.file))
+			if data.size() < 6400 or data.decode_u32(40) != data.size() - 44: errors.append("invalid speaker WAV")
+			if int(track.frames) != int(manifest.frames): errors.append("speaker tracks are not aligned to the same session end")
+			var maximum := 0
+			for offset in range(44, data.size(), 2): maximum = maxi(maximum, data.decode_s16(offset))
+			if maximum > 0: recorded_levels.append(maximum)
+			if maximum not in [0, 1000, 2000, 4000, 8000]: errors.append("speaker WAV contains mixed voices")
+		if recorded_levels.size() < 3: errors.append("consented local or remote speaker track missing")
+		if index != 3 and recorded_levels.has(8000): errors.append("unconsenting participant was included in local recording")
+		if not recorded_levels.has(1000 * (1 << index)): errors.append("own microphone missing from own recording")
 		voice.shutdown()
 	if index != 3 and not saw_departure: errors.append("peer departure was not observed")
 	network.close()

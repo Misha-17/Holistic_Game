@@ -28,6 +28,10 @@ func open_file(destination: String, metadata: Dictionary) -> bool:
 		return false
 	_write_header(_file, 0)
 	_file.flush()
+	if _file.get_error() != OK:
+		error = "Could not write the voice WAV header."
+		close_file()
+		return false
 	var marker := FileAccess.open(path + ".open", FileAccess.WRITE)
 	if marker == null:
 		error = "Could not create the voice recovery marker."
@@ -41,7 +45,7 @@ func open_file(destination: String, metadata: Dictionary) -> bool:
 		close_file()
 		return false
 	log_metadata("recording_open", metadata)
-	return true
+	return error.is_empty()
 
 
 func append(pcm: PackedByteArray) -> bool:
@@ -55,8 +59,8 @@ func append(pcm: PackedByteArray) -> bool:
 		return false
 	bytes_written += pcm.size()
 	if bytes_written - _checkpoint_bytes >= RATE * 2:
-		checkpoint()
-	return true
+		return checkpoint()
+	return error.is_empty()
 
 
 func append_silence(frames: int) -> bool:
@@ -69,29 +73,36 @@ func append_silence(frames: int) -> bool:
 	return true
 
 
-func checkpoint() -> void:
-	if _file == null: return
+func checkpoint() -> bool:
+	if _file == null: return false
 	_file.flush()
 	_write_header(_file, bytes_written)
 	_file.seek(44 + bytes_written)
 	_file.flush()
+	if _file.get_error() != OK:
+		error = "Could not checkpoint voice audio to disk."
+		return false
 	_checkpoint_bytes = bytes_written
-	if _metadata != null: _metadata.flush()
+	if _metadata != null:
+		_metadata.flush()
+		if _metadata.get_error() != OK: error = "Could not checkpoint voice timing metadata."
+	return error.is_empty()
 
 
 func log_metadata(event: String, data: Dictionary) -> void:
 	if _metadata == null: return
 	_metadata.store_line(JSON.stringify({"event": event, "audio_frame": bytes_written / 2, "data": data}))
 	_metadata.flush()
+	if _metadata.get_error() != OK: error = "Could not write voice timing metadata."
 
 
 func close_file() -> void:
 	if _file != null:
 		log_metadata("recording_closed", {"frames": bytes_written / 2, "sample_rate": RATE})
-		checkpoint()
+		var finalized := checkpoint()
 		_file.close()
 		_file = null
-		DirAccess.remove_absolute(path + ".open")
+		if finalized: DirAccess.remove_absolute(path + ".open")
 	if _metadata != null:
 		_metadata.close()
 		_metadata = null

@@ -168,7 +168,7 @@ func _session_screen() -> bool:
 	return screen in ["game", "pause", "help"] or (screen == "settings" and previous_screen in ["game", "pause", "help"])
 
 func _simulation_active() -> bool:
-	if _waiting_for_briefings or (not entry_popup.is_empty() and not network.active): return false
+	if _waiting_for_briefings or not entry_popup.is_empty(): return false
 	return screen == "game" or (network != null and network.active and _session_screen() and sim.running)
 
 func _map_rect() -> Rect2:
@@ -504,7 +504,7 @@ func _begin_level_entry() -> void:
 	if dedicated_server or test_mode: return
 	var mine: Array = network.departments_for()
 	briefing_role = str(mine[0]) if not mine.is_empty() else "fire"
-	entry_popup = "briefing" if collection_choice_made else "consent"
+	entry_popup = "consent"
 	_reset_map_gesture()
 	_update_visibility()
 
@@ -514,23 +514,47 @@ func _choose_collection(enabled: bool) -> void:
 	if not enabled: research.set_enabled(false)
 	voice.set_recording_consent(enabled)
 	voice.set_recording_enabled(enabled)
-	entry_popup = "briefing"
+	entry_popup = "voice"
 	_sync_capture()
 	research.log_event("collection_choice", {"enabled": enabled, "voice_requires_voice_chat": true})
 
 func _complete_briefing() -> void:
 	entry_popup = ""
 	if network.active: network.send_command("level_ready", {"level_run_id": shared_level_run_id})
-	else: _waiting_for_briefings = false
+	else: _level_ready_peers[1] = true
 	_sync_capture()
 	research.log_event("briefing_completed", {"departments": network.departments_for()})
 	_update_visibility()
 
-func _check_level_ready() -> void:
-	if not network.hosting or not _waiting_for_briefings: return
+func _entry_owner(peer_id: int = -1) -> bool:
+	if not network.active: return true
+	var actor := multiplayer.get_unique_id() if peer_id < 0 else peer_id
+	return network.can_start_session(actor) if network.dedicated else actor == 1
+
+func _all_entry_ready() -> bool:
+	if not network.active: return bool(_level_ready_peers.get(1, false))
+	if network.roster.is_empty(): return false
 	for peer_id in network.roster:
-		if not bool(_level_ready_peers.get(peer_id, false)): return
-	_waiting_for_briefings = false
+		if not bool(_level_ready_peers.get(peer_id, false)): return false
+	return true
+
+func _check_level_ready() -> void:
+	# Readiness never starts the clock; only the owner's explicit command does.
+	pass
+
+func _choose_voice(enabled: bool) -> void:
+	voice.set_mic_enabled(enabled)
+	entry_popup = "briefing"
+	if enabled:
+		previous_screen = "game"
+		screen = "settings"
+		settings_tab = "sounds"
+	_update_visibility()
+
+func _request_entry_action(action: String) -> void:
+	var payload := {"level_run_id": shared_level_run_id}
+	if network.active: network.send_command(action, payload)
+	else: _execute_command(action, payload, 1)
 
 func _draw_entry_popup() -> void:
 	buttons.clear()
@@ -542,9 +566,16 @@ func _draw_entry_popup() -> void:
 		_text("Save this play session?", Vector2(382, 320), 29, CREAM)
 		_wrap("Save your mouse movements, clicks and game events by level. Save in-game team voice as separate, labelled speaker tracks in one session.", Vector2(382, 365), 670, 18, CREAM, 27)
 		_wrap("Enabling also lets teammates record your voice. Only consenting speakers are saved. Files stay on each recorder's computer; nothing is uploaded.", Vector2(382, 450), 670, 16, MUTED, 24)
-		_wrap("Voice chat stays off until you enable it in Sounds. Change any choice in Settings > Research. Both choices let you play.", Vector2(382, 530), 670, 15, MUTED, 23)
+		_wrap("The next step lets you choose voice chat. Change any choice in Settings > Research. Both choices let you play.", Vector2(382, 530), 670, 15, MUTED, 23)
 		_button("collection_no", "PLAY WITHOUT COLLECTION", Rect2(382, 600, 326, 44), PANEL_LIGHT, CREAM, 14)
 		_button("collection_yes", "ENABLE COLLECTION", Rect2(724, 600, 326, 44), TEAL, INK, 14)
+	elif entry_popup == "voice":
+		_text("TEAM VOICE CHECK", Vector2(382, 276), 14, TEAL)
+		_text("Talk with your team", Vector2(382, 320), 29, CREAM)
+		_wrap("Enable voice chat for hands-free communication. Before starting, say hello and check that everyone can hear each other.", Vector2(382, 375), 670, 20, CREAM, 30)
+		_wrap("Use headphones and adjust teammate volumes in Settings > Sounds. Voice stays on until you switch it off. This choice is separate from recording permission.", Vector2(382, 480), 670, 17, MUTED, 26)
+		_button("entry_voice_no", "CONTINUE WITH VOICE OFF", Rect2(382, 600, 326, 44), PANEL_LIGHT, CREAM, 14)
+		_button("entry_voice_yes", "ENABLE & OPEN SOUNDS", Rect2(724, 600, 326, 44), TEAL, INK, 14)
 	elif entry_popup == "briefing":
 		_text("LEVEL %d  /  YOUR ROLE" % BeaconCampaign.level_number(sim.shift_index), Vector2(382, 270), 13, TEAL)
 		_text("Ready, %s?" % str(KIND_NAME[briefing_role]).capitalize(), Vector2(382, 311), 28, CREAM)
@@ -557,13 +588,19 @@ func _draw_entry_popup() -> void:
 			_text("•", Vector2(386, y), 19, KIND_COLOR[briefing_role])
 			_wrap(line, Vector2(408, y), 630, 17, CREAM, 23)
 			y += 52
-		var hint := "Practice is 2½ minutes: take your time; there is no failure." if BeaconCampaign.is_practice(sim.shift_index) else "The level starts when everyone is ready."
+		var hint := "Practice is 2½ minutes: take your time; there is no failure." if BeaconCampaign.is_practice(sim.shift_index) else "When everyone is ready, the room owner clicks Start."
 		if network.active and not _waiting_for_briefings and sim.elapsed > 0.5: hint = "Your team is already playing. Continue when you are ready."
 		_text(hint, Vector2(382, 586), 15, MUTED)
 		_button("briefing_done", "READY TO PLAY", Rect2(382, 607, 668, 38), TEAL, INK, 15)
 	else:
-		_text("Waiting for your team", Vector2(382, 320), 30, CREAM)
-		_wrap("Everyone is choosing their collection settings and reading their role. The level clock is paused.", Vector2(382, 380), 660, 20, MUTED, 30)
+		_text("Ready to start", Vector2(382, 320), 30, CREAM)
+		if _entry_owner():
+			if _all_entry_ready():
+				_button("entry_start", "START GAME", Rect2(382, 600, 668, 44), TEAL, INK, 15)
+			else:
+				_text("Waiting for everyone to finish their reminders...", Vector2(382, 560), 18, MUTED)
+	if _waiting_for_briefings and _entry_owner():
+		_button("entry_cancel", "X", Rect2(1044, 240, 34, 32), PANEL_LIGHT, CREAM, 18)
 
 func _ready() -> void:
 	dedicated_server = "--server" in OS.get_cmdline_args() or "--server" in OS.get_cmdline_user_args()
@@ -782,7 +819,7 @@ func _process(delta: float) -> void:
 		if net_timer > 0.12:
 			net_timer = 0
 			var shared_screen := "game" if network.active and _session_screen() and sim.running else screen
-			network.broadcast({"simulation": sim.net_snapshot(), "screen": shared_screen, "orders": orders, "speed": 1.0, "level_run_id": shared_level_run_id, "waiting_for_briefings": _waiting_for_briefings})
+			network.broadcast({"simulation": sim.net_snapshot(), "screen": shared_screen, "orders": orders, "speed": 1.0, "level_run_id": shared_level_run_id, "waiting_for_briefings": _waiting_for_briefings, "level_ready_peers": _level_ready_peers})
 	if dedicated_server: return
 	_sync_capture()
 	if screen == "game":
@@ -1980,6 +2017,12 @@ func _input(event: InputEvent) -> void:
 func _action(id: String) -> void:
 	audio.play_cue("click")
 	if not tutorial_active: research.log_event("ui_action", {"action": id, "screen": screen})
+	if id in ["entry_start", "entry_cancel"]:
+		_request_entry_action(id)
+		return
+	if id in ["entry_voice_yes", "entry_voice_no"]:
+		_choose_voice(id == "entry_voice_yes")
+		return
 	if id == "collection_yes" or id == "collection_no":
 		_choose_collection(id == "collection_yes")
 		return
@@ -2296,7 +2339,7 @@ func _begin_shift(index: int) -> void:
 		# snapshot on another channel must not move a guest past those events.
 		network.broadcast_event({"type": "level_transition", "previous_level_run_id": previous_run, "level_run_id": shared_level_run_id, "level_index": index})
 	_level_ready_peers.clear()
-	_waiting_for_briefings = network.active and not test_mode
+	_waiting_for_briefings = not test_mode
 	entry_popup = ""
 	_route_cache_until = 0
 	sim.start_shift(clampi(index,0,BeaconCampaign.PRACTICE_INDEX))
@@ -2414,6 +2457,22 @@ func _command(action: String, payload: Dictionary) -> void:
 			focused_unit_left = 0
 
 func _execute_command(action: String,payload: Dictionary,_peer_id: int) -> void:
+	if action in ["entry_start", "entry_cancel"]:
+		if (network.active and not network.hosting) or not _waiting_for_briefings or not _entry_owner(_peer_id): return
+		if str(payload.get("level_run_id", "")) != shared_level_run_id: return
+		if action == "entry_start":
+			if not _all_entry_ready(): return
+			_waiting_for_briefings = false
+			entry_popup = ""
+		else:
+			_end_level_capture("preparation_cancelled")
+			sim.running = false
+			_waiting_for_briefings = false
+			entry_popup = ""
+			_level_ready_peers.clear()
+			screen = "lobby" if network.active else "title"
+		if not dedicated_server: _update_visibility()
+		return
 	if action == "level_ready":
 		if network.hosting and network.roster.has(_peer_id) and str(payload.get("level_run_id", "")) == shared_level_run_id:
 			_level_ready_peers[_peer_id] = true
@@ -2695,6 +2754,7 @@ func _receive_snapshot(data: Dictionary) -> void:
 		_pending_results_snapshot = {}
 	shared_level_run_id = next_run_id
 	_waiting_for_briefings = bool(data.get("waiting_for_briefings", false))
+	_level_ready_peers = data.get("level_ready_peers", {}).duplicate()
 	sim.apply_snapshot(data.get("simulation",{}))
 	var restarting := run_changed or sim.shift_index != previous_shift or sim.elapsed + 1.0 < previous_elapsed
 	if restarting and not data.has("level_run_id"): shared_level_run_id = _new_capture_id("received_level")
@@ -2711,6 +2771,9 @@ func _receive_snapshot(data: Dictionary) -> void:
 		_reapply_predictions()
 		sim.drain_events()
 	if next_screen == "lobby" and not sim.running:
+		entry_popup = ""
+		_waiting_for_briefings = false
+		_end_level_capture("preparation_cancelled")
 		if not (screen == "settings" and previous_screen == "lobby"): screen = "lobby"
 	elif next_screen == "results" and screen == "settings" and previous_screen == "results":
 		pass # A guest's settings opened from the results screen stay open until BACK.

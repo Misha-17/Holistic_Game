@@ -11,7 +11,7 @@ signal voice_packet_received(peer_id: int, sequence: int, pcm: PackedByteArray)
 signal voice_participants_changed
 
 const PORT := 24680
-const PROTOCOL_VERSION := 13 # Level 0, shared level run IDs and the start-of-level ready barrier.
+const PROTOCOL_VERSION := 12 # Owner-controlled start/cancel after entry reminders.
 const MAX_PLAYER_NAME_LENGTH := 20
 const UNRELIABLE_SNAPSHOT_LIMIT := 1100 # Leave room for RPC/ENet headers below the path MTU.
 # Every player has the same job: command one (or more) emergency departments.
@@ -24,7 +24,7 @@ const SPLITS := {
 	3: [["fire", "police"], ["medic"], ["engineer"]],
 	4: [["fire"], ["medic"], ["engineer"], ["police"]],
 }
-const ACTIONS := ["dispatch", "withdraw", "clear_road", "scout", "supply", "special", "ping", "start_shift", "change_role", "level_ready"]
+const ACTIONS := ["dispatch", "withdraw", "clear_road", "scout", "supply", "special", "ping", "start_shift", "change_role", "level_ready", "entry_start", "entry_cancel"]
 var active := false
 var port := PORT
 var hosting := false
@@ -232,6 +232,8 @@ func can_do(action: String, peer_id: int = -1, payload: Dictionary = {}) -> bool
 	var actor := multiplayer.get_unique_id() if peer_id < 0 else peer_id
 	if not roster.has(actor):
 		return false
+	if action in ["entry_start", "entry_cancel"]:
+		return can_start_session(actor) if dedicated else actor == 1
 	if action == "change_role":
 		return payload.get("target_peer_id") is int and int(payload.target_peer_id) != actor and roster.has(int(payload.target_peer_id))
 	if action in ["dispatch", "withdraw", "clear_road"]:
@@ -517,7 +519,7 @@ func _valid_roster(data: Dictionary, server_only: bool = false) -> bool:
 	return true
 
 func _valid_payload(action: String, payload: Dictionary) -> bool:
-	if action == "level_ready":
+	if action in ["level_ready", "entry_start", "entry_cancel"]:
 		return payload.size() == 1 and payload.get("level_run_id") is String and not str(payload.level_run_id).is_empty() and str(payload.level_run_id).length() <= 120
 	if action == "start_shift":
 		# Optionally the level picked in the co-op lobby.
@@ -550,7 +552,7 @@ func _valid_payload(action: String, payload: Dictionary) -> bool:
 
 func _clean_payload(action: String, payload: Dictionary) -> Dictionary:
 	match action:
-		"level_ready":
+		"level_ready", "entry_start", "entry_cancel":
 			return {"level_run_id": str(payload.level_run_id)}
 		"start_shift":
 			return {"shift": int(payload.shift)} if payload.has("shift") else {}

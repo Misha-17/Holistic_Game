@@ -125,6 +125,22 @@ func close_file() -> void:
 	_closed = true
 
 
+# Complete, playable files after every level (mid-term report, Table A4: "the
+# voice files were not finalised"). If the game is later killed (for example
+# with the Godot editor's Stop button), only audio after this point needs the
+# recovery that runs on the next launch.
+func publish_checkpoint() -> bool:
+	if _closed: return false
+	for entry: Dictionary in _tracks.values():
+		entry.writer.checkpoint()
+		if not str(entry.writer.error).is_empty(): error = str(entry.writer.error)
+	_manifest["last_checkpoint_utc"] = Time.get_datetime_string_from_system(true)
+	var ok := _save_manifest()
+	if ok and not Player.write_file(path.get_base_dir().path_join("listen.html"), _manifest):
+		ok = false
+	if _timeline != null: _timeline.flush()
+	return ok
+
 func _save_manifest() -> bool:
 	var tracks: Array[Dictionary] = []
 	for peer_id in _tracks:

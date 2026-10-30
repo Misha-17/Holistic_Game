@@ -993,8 +993,7 @@ func _ready() -> void:
 	tactical_map.unit_selected.connect(_select_unit)
 	tactical_map.dispatch_requested.connect(_dispatch_selected)
 	tactical_map.close_requested.connect(func():
-		selected = -1
-		focus_hold_left = 0
+		_close_call_card(true) # the CLOSE button keeps a selected crew
 		audio.play_cue("click"))
 	tactical_map.scout_requested.connect(func(id: int):
 		if screen != "game": return
@@ -1531,6 +1530,24 @@ func _crew_on_scene(call: Dictionary) -> bool:
 		if int(unit.target)==int(call.id) and unit.state=="working" and bool(unit.get("assignment_suitable",true)): return true
 	return false
 
+# Esc and the card's CLOSE button: close the open call card completely, in
+# one press, whatever else is selected (Andrei, 30.10). Before, Esc first only
+# dropped a selected crew, left a card the mouse was over open as a hover
+# preview, and kept a just-resolved call's close-up for 2.2 s.
+func _close_call_card(keep_crew: bool = false) -> void:
+	var closing: int = selected if selected >= 0 else tactical_map.hovered_incident_id
+	selected = -1
+	if not keep_crew: selected_unit = -1
+	role_filter = ""
+	focused_unit = -1
+	focus_hold_left = 0
+	tactical_map.selected_id = -1
+	tactical_map.dismiss_call(closing)
+
+func _call_card_open() -> bool:
+	var hover_preview: bool = tactical_map.hovered_incident_id >= 0 and tactical_map.hovered_incident_id != tactical_map.dismissed_incident_id
+	return selected >= 0 or selected_unit >= 0 or focus_hold_left > 0 or hover_preview
+
 func _clear_selection() -> void:
 	if selected_unit>=0:
 		selected_unit=-1
@@ -2016,6 +2033,12 @@ func _settings_note(lines: Array, column: int, y: float, height: float) -> void:
 func _draw_settings() -> void:
 	_draw_page_header("", "SETTINGS")
 	_button("settings_back","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
+	# Opened from the pause menu during a level: leave to the main menu from
+	# here too (Andrei, 30.10). Same action as the pause menu's button.
+	if previous_screen == "pause":
+		_button("save_exit", "LEAVE TO MAIN MENU" if network.active else "SAVE & MAIN MENU", Rect2(221,91,240,38), PANEL, CORAL, 14)
+	elif previous_screen == "results":
+		_button("results_title", "LEAVE TO MAIN MENU" if network.active else "MAIN MENU", Rect2(221,91,240,38), PANEL, CORAL, 14)
 	for i in range(SETTINGS_TABS.size()):
 		var tab: Array = SETTINGS_TABS[i]
 		var picked: bool = settings_tab == tab[0] or (settings_tab == "pc_check" and tab[0] == "research")
@@ -2187,7 +2210,11 @@ func _draw_results() -> void:
 		_button("results_levels","CHOOSE ANOTHER LEVEL",second,PANEL_LIGHT,GOLD,15)
 	# Settings between levels (playtest 19.10): sound, voice chat and recordings
 	# can be changed here without leaving the room. BACK returns to this screen.
-	_button("results_settings","SETTINGS",third,PANEL_LIGHT,CREAM,15)
+	# Bottom row: SETTINGS and MAIN MENU side by side (Andrei, 30.10: no way to
+	# the main menu after a level). In co-op, MAIN MENU leaves the room.
+	var half: float = (third.size.x - 12.0) / 2.0
+	_button("results_settings","SETTINGS",Rect2(third.position, Vector2(half, third.size.y)),PANEL_LIGHT,CREAM,15)
+	_button("results_title","LEAVE TO MAIN MENU" if network.active else "MAIN MENU",Rect2(third.position + Vector2(half + 12.0, 0), Vector2(half, third.size.y)),PANEL_LIGHT,CORAL,15)
 	# Footer: one row along the bottom edge of the panel.
 	_text(_upload_footer(),o+Vector2(m,panel.size.y - 25),13,MUTED)
 	if research_enabled or voice.recording_enabled:
@@ -2370,7 +2397,7 @@ func _input(event: InputEvent) -> void:
 			KEY_F11:
 				_toggle_fullscreen()
 			KEY_ESCAPE:
-				if screen=="game" and (selected_unit>=0 or selected>=0): _clear_selection()
+				if screen=="game" and _call_card_open(): _close_call_card()
 				elif screen=="game": _action("pause")
 				elif screen in ["pause","help"]: _action("unpause")
 				elif screen=="settings": _action("settings_back")
@@ -2496,6 +2523,9 @@ func _action(id: String) -> void:
 	match id:
 		"lobby_settings": previous_screen="lobby"; screen="settings"; settings_tab="sounds"
 		"results_settings": previous_screen="results"; screen="settings"
+		"results_title":
+			_submit_rating()
+			screen="title"; _leave_network()
 		"map_overview": _toggle_overview()
 		"minimap_toggle": minimap_hidden = not minimap_hidden
 		"map_in": _zoom_map(1.0, MAP_VIEW.get_center())

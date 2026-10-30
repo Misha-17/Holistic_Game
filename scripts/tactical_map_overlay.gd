@@ -36,6 +36,9 @@ var view_rect := Rect2(Vector2(56, 34), BeaconCampaign.MAP_SIZE * 1.5)
 var owner_labels: Dictionary = {}
 var reduced_motion: bool = false
 var hovered_incident_id: int = -1
+## A call closed with Esc/CLOSE while the mouse is still on it: no hover
+## preview for it until the mouse leaves (Andrei, 30.10: Esc seemed not to close it).
+var dismissed_incident_id: int = -1
 var hovered_unit_id: int = -1
 var hovered_road_id: int = -1
 var hovered_base_kind: String = ""
@@ -126,6 +129,13 @@ func _follow_moving_crews() -> void:
 		if item.has("hit"): item.hit.rect = marker.grow(8)
 
 func refresh() -> void:
+	_refresh_layout()
+	queue_redraw()
+
+## Close a call's card for good: it is no longer selected and its hover
+## preview stays closed until the mouse moves off the call.
+func dismiss_call(id: int) -> void:
+	dismissed_incident_id = id if id >= 0 and id == hovered_incident_id else -1
 	_refresh_layout()
 	queue_redraw()
 
@@ -241,6 +251,7 @@ func _update_hover(point: Vector2) -> void:
 	var next_road: int = int(hit.get("id", -1)) if hit.get("type", "") == "road" else -1
 	var changed: bool = hovered_incident_id != next_call or hovered_unit_id != next_unit or previous_key != next_key or hovered_road_id != next_road
 	hovered_road_id = next_road
+	if next_call != dismissed_incident_id: dismissed_incident_id = -1
 	hovered_incident_id = next_call
 	hovered_unit_id = next_unit
 	if changed:
@@ -351,7 +362,7 @@ func _refresh_layout() -> void:
 			_pin_positions[id] = footprint
 		pin = footprint.position + Vector2(34, 54)
 		var estimate: Dictionary = sim.incident_estimate(id) if sim.has_method("incident_estimate") else {}
-		_calls.append({"incident": incident, "point": point, "pin": pin, "rect": footprint, "card": Rect2(), "estimate": estimate, "expanded": id == selected_id or id == hovered_incident_id})
+		_calls.append({"incident": incident, "point": point, "pin": pin, "rect": footprint, "card": Rect2(), "estimate": estimate, "expanded": id == selected_id or (id == hovered_incident_id and id != dismissed_incident_id)})
 		_occupied.append(footprint.grow(5))
 		_hits.append({"rect": footprint, "type": "call", "id": id})
 	_layout_bases()

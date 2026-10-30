@@ -163,6 +163,7 @@ godot --headless --path . --script tests/test_withdrawal.gd
 godot --headless --path . --script tests/test_remote_route.gd
 godot --headless --path . --script tests/test_playtest_19_10.gd
 godot --headless --path . --script tests/test_crew_controls.gd
+godot --headless --path . --script tests/test_call_card_close.gd
 godot --headless --path . --script tests/test_capture_continuity.gd
 godot --headless --path . --script tests/test_mic_check.gd
 godot --headless --path . --script tests/test_nasa_tlx.gd

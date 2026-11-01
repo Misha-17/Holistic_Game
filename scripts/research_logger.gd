@@ -30,6 +30,18 @@ var _last_click_us := -1
 var _last_flush_ms := 0
 var _last_context_ms := 0
 var _shift_elapsed := 0.0
+const CLOCK_CORRECTION_LOG_S := 0.25
+var _clock_corrections := 0
+var _clock_held_total_s := 0.0
+var _clock_holding := false
+const DISPLAY_INTERVAL_S := 10.0
+## Returns window/screen facts for "display" rows (set by main.gd).
+var display_provider: Callable
+var _last_display_ms := 0
+var _frame_count := 0
+var _frame_time_sum := 0.0
+var _frame_time_max := 0.0
+var _motion_events := 0
 var _shift_index := 0
 var _completed_level_elapsed := 0.0
 var _capture_segment := 0
@@ -39,8 +51,33 @@ var _disabled_level_elapsed := 0.0
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if enabled and Time.get_ticks_msec() - _last_flush_ms >= 1000: _flush()
+	if not enabled or _level.is_empty(): return
+	_frame_count += 1
+	_frame_time_sum += delta
+	_frame_time_max = maxf(_frame_time_max, delta)
+	if Time.get_ticks_msec() - _last_display_ms >= int(DISPLAY_INTERVAL_S * 1000.0): _write_display("periodic")
+
+# Frame rate and window state (mid-term report, Table A4): mouse events arrive
+# once per frame, so their spacing depends on each PC's frame rate, and 5.4% of
+# one player's cursor positions lay outside the 1600x900 view. Logged at every
+# level start and every DISPLAY_INTERVAL_S seconds, with the input rate.
+func _write_display(reason: String) -> void:
+	var info: Dictionary = display_provider.call() if display_provider.is_valid() else {}
+	var window_s := maxf(0.001, float(Time.get_ticks_msec() - _last_display_ms) / 1000.0) if _last_display_ms > 0 else 0.0
+	info.merge({"reason": reason, "frames": _frame_count,
+		"fps_measured": float(_frame_count) / window_s if window_s > 0.0 else null,
+		"frame_time_ms_mean": _frame_time_sum * 1000.0 / _frame_count if _frame_count > 0 else null,
+		"frame_time_ms_max": _frame_time_max * 1000.0 if _frame_count > 0 else null,
+		"mouse_motion_events_per_s": float(_motion_events) / window_s if window_s > 0.0 else null,
+		"window_s": window_s}, true)
+	_write("display", info)
+	_last_display_ms = Time.get_ticks_msec()
+	_frame_count = 0
+	_frame_time_sum = 0.0
+	_frame_time_max = 0.0
+	_motion_events = 0
 
 func begin_session(run_id: String, metadata: Dictionary = {}) -> void:
 	var requested_id := run_id.validate_filename()
@@ -120,6 +157,9 @@ func begin_level(level_index: int, metadata: Dictionary = {}, level_run_id: Stri
 	if not _level.is_empty(): end_level("level_changed")
 	_shift_index = level_index
 	_shift_elapsed = float(metadata.get("elapsed", metadata.get("level_elapsed_s", 0.0)))
+	_clock_corrections = 0
+	_clock_held_total_s = 0.0
+	_clock_holding = false
 	var level_number := int(metadata.get("level_number", metadata.get("level_id", level_index + 1)))
 	var attempt := int(_attempts.get(str(level_number), 0)) + 1
 	_attempts[str(level_number)] = attempt
@@ -139,6 +179,12 @@ func begin_level(level_index: int, metadata: Dictionary = {}, level_run_id: Stri
 	_active_events.clear()
 	_closed_events.clear()
 	_write("level_started", {"metadata": metadata, "capture_started_midlevel": _shift_elapsed > 0.0})
+	_last_display_ms = 0
+	_frame_count = 0
+	_frame_time_sum = 0.0
+	_frame_time_max = 0.0
+	_motion_events = 0
+	_write_display("level_started")
 	_flush()
 	_write_manifest()
 
@@ -154,7 +200,8 @@ func end_level(reason: String = "completed", summary: Dictionary = {}, final_sta
 				"end_reason": reason, "censored": reason not in ["completed", "finished", "won", "lost"]})
 		_write("level_ended", {"reason": reason, "summary": summary,
 			"clicks": _level_clicks, "pointer_distance_px": _level_pointer_distance,
-			"events_observed": _closed_events.size(), "capture_duration_s": maxf(0.0, _shift_elapsed - float(_level.capture_started_at_s))})
+			"events_observed": _closed_events.size(), "capture_duration_s": maxf(0.0, _shift_elapsed - float(_level.capture_started_at_s)),
+			"clock_corrections": _clock_corrections, "clock_held_total_s": _clock_held_total_s})
 		_flush()
 		for recorded: Dictionary in _levels:
 			if recorded.level_run_id == _level.level_run_id:
@@ -177,15 +224,32 @@ func get_level_context() -> Dictionary:
 	return result
 
 func set_clock(shift_elapsed: float, shift_index: int) -> void:
-	_shift_elapsed = shift_elapsed
 	_shift_index = shift_index
+	_advance_clock(shift_elapsed)
+
+# The level clock never moves backwards inside one level attempt. A guest that
+# ran ahead of the host during a network stall is corrected by the next
+# snapshot; the logged clock holds until the game catches up (playtest 22.10).
+func _advance_clock(value: float) -> void:
+	if not _level.is_empty() and value < _shift_elapsed:
+		if not _clock_holding:
+			# One record per correction, not one per update while it catches up.
+			_clock_holding = true
+			var behind := _shift_elapsed - value
+			_clock_held_total_s += behind
+			if behind >= CLOCK_CORRECTION_LOG_S:
+				_clock_corrections += 1
+				_write("clock_correction", {"held_at_s": _shift_elapsed, "game_clock_s": value, "behind_s": behind})
+		return
+	_clock_holding = false
+	_shift_elapsed = value
 
 func observe_state(state: Dictionary) -> void:
 	if not enabled or _level.is_empty(): return
 	# Saved snapshots wrap numeric values to retain exact precision. Network
 	# snapshots already contain native values; this accepts either form.
 	state = _decode_snapshot(state)
-	_shift_elapsed = float(state.get("elapsed", _shift_elapsed))
+	_advance_clock(float(state.get("elapsed", _shift_elapsed)))
 	var snapshot_summary: Dictionary = {}
 	for key: String in ["score", "reputation", "rescued", "resolved_count", "failed_count", "roads_cleared", "supplies", "chaos_phase", "running", "finished", "won"]:
 		if state.has(key): snapshot_summary[key] = state[key]
@@ -266,6 +330,7 @@ func log_pointer(pos: Vector2, delta: Vector2) -> void:
 	if not enabled: return
 	_pointer_distance += delta.length()
 	_level_pointer_distance += delta.length()
+	_motion_events += 1
 	_write("mouse_motion", {"x": pos.x, "y": pos.y, "dx": delta.x, "dy": delta.y, "distance_px": delta.length()})
 
 func log_mouse_button(event: InputEventMouseButton) -> void:
@@ -390,7 +455,7 @@ func _write(event_type: String, data: Dictionary) -> void:
 	var record := {"schema": SCHEMA_VERSION, "session_id": session_id, "capture_session_id": session_id,
 		"sequence": _event_count, "capture_segment": _capture_segment,
 		"local_elapsed_us": Time.get_ticks_usec() - _session_start_us,
-		"utc": Time.get_datetime_string_from_system(true), "shift_index": _shift_index,
+		"utc": Time.get_datetime_string_from_system(true), "unix_ms": int(Time.get_unix_time_from_system() * 1000.0), "shift_index": _shift_index,
 		"shift_elapsed_s": _shift_elapsed, "level_elapsed_s": _shift_elapsed,
 		"session_elapsed_s": _completed_level_elapsed + (_shift_elapsed if not _level.is_empty() else 0.0),
 		"level_id": _level.get("level_id"), "level_number": _level.get("level_number"),

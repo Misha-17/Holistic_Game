@@ -9,11 +9,24 @@ signal message_received(text: String)
 signal disconnected
 signal voice_packet_received(peer_id: int, sequence: int, pcm: PackedByteArray)
 signal voice_participants_changed
+signal research_ack(remote_path: String, end: int, ok: bool, message: String)
+signal research_status(sizes: Dictionary)
 
 const PORT := 24680
-const PROTOCOL_VERSION := 13 # Level 0, shared level run IDs and the start-of-level ready barrier.
+const PROTOCOL_VERSION := 13 # 30.10: research upload channel 4, NASA-TLX, session consent.
 const MAX_PLAYER_NAME_LENGTH := 20
 const UNRELIABLE_SNAPSHOT_LIMIT := 1100 # Leave room for RPC/ENet headers below the path MTU.
+# ENet channels: 0 control, 1 voice audio, 2 voice state, 3 large state/events,
+# 4 research uploads (its own channel, so uploads never delay gameplay messages).
+const CHANNELS := 5
+const RESEARCH_CHANNEL := 4
+const RESEARCH_CHUNK_MAX := 65536
+const RESEARCH_FILE_MAX := 512 * 1024 * 1024
+const RESEARCH_EXTENSIONS := ["jsonl", "json", "wav", "html"]
+## Where a dedicated server stores uploaded research files. Default: a
+## "research_uploads" folder next to the server program (/opt/beaconbay on
+## Azure); override with --research-dir=PATH.
+var research_root := ""
 # Every player has the same job: command one (or more) emergency departments.
 # Departments are split automatically by how many people are in the room.
 const DEPARTMENTS: Array[String] = ["fire", "medic", "engineer", "police"]
@@ -24,7 +37,7 @@ const SPLITS := {
 	3: [["fire", "police"], ["medic"], ["engineer"]],
 	4: [["fire"], ["medic"], ["engineer"], ["police"]],
 }
-const ACTIONS := ["dispatch", "withdraw", "clear_road", "scout", "supply", "special", "ping", "start_shift", "change_role", "level_ready"]
+const ACTIONS := ["dispatch", "withdraw", "clear_road", "scout", "supply", "special", "ping", "start_shift", "change_role", "level_ready", "entry_start", "entry_cancel"]
 var active := false
 var port := PORT
 var hosting := false
@@ -65,6 +78,8 @@ func _ready() -> void:
 		if argument.begins_with("--port="):
 			var value := argument.trim_prefix("--port=")
 			if value.is_valid_int() and int(value) >= 1024 and int(value) <= 65535: port = int(value)
+		if argument.begins_with("--research-dir="):
+			research_root = argument.trim_prefix("--research-dir=")
 	multiplayer.peer_connected.connect(_peer_connected)
 	multiplayer.peer_disconnected.connect(_peer_disconnected)
 	multiplayer.connected_to_server.connect(_connected)
@@ -75,7 +90,7 @@ func host(server_only: bool = false) -> Error:
 	close()
 	dedicated = server_only
 	var peer := ENetMultiplayerPeer.new()
-	var err := peer.create_server(port, 4 if dedicated else 3, 4)
+	var err := peer.create_server(port, 4 if dedicated else 3, CHANNELS)
 	if err != OK:
 		status = "Could not open port %d (is another copy of the game already hosting?)" % port
 		return err
@@ -113,7 +128,7 @@ func join(address: String) -> Error:
 		status = "Type the host's IP address first"
 		return ERR_INVALID_PARAMETER
 	var peer := ENetMultiplayerPeer.new()
-	var err := peer.create_client(target, target_port, 4)
+	var err := peer.create_client(target, target_port, CHANNELS)
 	if err != OK:
 		status = "Could not connect to %s" % target
 		return err
@@ -232,6 +247,8 @@ func can_do(action: String, peer_id: int = -1, payload: Dictionary = {}) -> bool
 	var actor := multiplayer.get_unique_id() if peer_id < 0 else peer_id
 	if not roster.has(actor):
 		return false
+	if action in ["entry_start", "entry_cancel"]:
+		return can_start_session(actor) if dedicated else actor == 1
 	if action == "change_role":
 		return payload.get("target_peer_id") is int and int(payload.target_peer_id) != actor and roster.has(int(payload.target_peer_id))
 	if action in ["dispatch", "withdraw", "clear_road"]:
@@ -517,7 +534,7 @@ func _valid_roster(data: Dictionary, server_only: bool = false) -> bool:
 	return true
 
 func _valid_payload(action: String, payload: Dictionary) -> bool:
-	if action == "level_ready":
+	if action in ["level_ready", "entry_start", "entry_cancel"]:
 		return payload.size() == 1 and payload.get("level_run_id") is String and not str(payload.level_run_id).is_empty() and str(payload.level_run_id).length() <= 120
 	if action == "start_shift":
 		# Optionally the level picked in the co-op lobby.
@@ -550,7 +567,7 @@ func _valid_payload(action: String, payload: Dictionary) -> bool:
 
 func _clean_payload(action: String, payload: Dictionary) -> Dictionary:
 	match action:
-		"level_ready":
+		"level_ready", "entry_start", "entry_cancel":
 			return {"level_run_id": str(payload.level_run_id)}
 		"start_shift":
 			return {"shift": int(payload.shift)} if payload.has("shift") else {}
@@ -749,3 +766,83 @@ func _voice_rate_allowed(windows: Dictionary, peer_id: int, per_second: float, b
 	if allowed: window.tokens = float(window.tokens) - 1.0
 	windows[peer_id] = window
 	return allowed
+
+
+# ------------------------------------------------------------ research uploads
+# Players' computers send their finished research files to the dedicated study
+# server (see research_uploader.gd). Only a dedicated server accepts them; a
+# player hosting on the LAN never receives other players' files.
+
+static func valid_research_path(path: String) -> bool:
+	if path.is_empty() or path.length() > 240 or path.begins_with("/") or ".." in path or "\\" in path: return false
+	var parts := path.split("/", false)
+	if parts.size() < 3 or parts.size() > 6: return false
+	for part in parts:
+		for character in part:
+			if not character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.": return false
+		if part.begins_with("."): return false
+	return parts[-1].get_extension() in RESEARCH_EXTENSIONS
+
+func research_upload_ready() -> bool:
+	return active and not hosting and dedicated and multiplayer.has_multiplayer_peer() \
+		and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED \
+		and roster.has(multiplayer.get_unique_id())
+
+func send_research_chunk(remote_path: String, offset: int, data: PackedByteArray, truncate: bool) -> void:
+	if research_upload_ready(): _research_chunk.rpc_id(1, remote_path, offset, data, truncate)
+
+func request_research_status(remote_paths: Array[String]) -> void:
+	if research_upload_ready(): _research_status_request.rpc_id(1, remote_paths)
+
+func _research_folder() -> String:
+	if not research_root.is_empty(): return research_root
+	# Exported server: next to the program. Editor/tests: the user data folder.
+	if OS.has_feature("editor") or OS.get_executable_path().is_empty(): return ProjectSettings.globalize_path("user://research_uploads")
+	return OS.get_executable_path().get_base_dir().path_join("research_uploads")
+
+@rpc("any_peer", "call_remote", "reliable", RESEARCH_CHANNEL)
+func _research_chunk(remote_path: String, offset: int, data: PackedByteArray, truncate: bool) -> void:
+	if not active or not hosting or not dedicated: return
+	var sender := multiplayer.get_remote_sender_id()
+	if not roster.has(sender): return
+	var reply := func(end: int, ok: bool, message: String): _research_ack.rpc_id(sender, remote_path, end, ok, message)
+	if not valid_research_path(remote_path) or offset < 0 or data.size() > RESEARCH_CHUNK_MAX or offset + data.size() > RESEARCH_FILE_MAX:
+		reply.call(0, false, "the server refused a file name or size")
+		return
+	var target := _research_folder().path_join(remote_path)
+	if DirAccess.make_dir_recursive_absolute(target.get_base_dir()) not in [OK, ERR_ALREADY_EXISTS]:
+		reply.call(0, false, "the server could not create its upload folder")
+		return
+	var file: FileAccess = null
+	if truncate or not FileAccess.file_exists(target): file = FileAccess.open(target, FileAccess.WRITE)
+	else: file = FileAccess.open(target, FileAccess.READ_WRITE)
+	if file == null:
+		reply.call(0, false, "the server could not write the file")
+		return
+	file.seek(offset)
+	file.store_buffer(data)
+	var ok := file.get_error() == OK
+	file.close()
+	reply.call(offset + data.size(), ok, "" if ok else "the server disk refused the file")
+
+@rpc("authority", "call_remote", "reliable", RESEARCH_CHANNEL)
+func _research_ack(remote_path: String, end: int, ok: bool, message: String) -> void:
+	if not hosting and multiplayer.get_remote_sender_id() == 1: research_ack.emit(remote_path, end, ok, message)
+
+@rpc("any_peer", "call_remote", "reliable", RESEARCH_CHANNEL)
+func _research_status_request(remote_paths: Array) -> void:
+	if not active or not hosting or not dedicated: return
+	var sender := multiplayer.get_remote_sender_id()
+	if not roster.has(sender) or remote_paths.size() > 512: return
+	var sizes: Dictionary = {}
+	for path in remote_paths:
+		if not path is String or not valid_research_path(path): continue
+		var target := _research_folder().path_join(path)
+		var file := FileAccess.open(target, FileAccess.READ)
+		sizes[path] = int(file.get_length()) if file != null else -1
+		if file != null: file.close()
+	_research_status.rpc_id(sender, sizes)
+
+@rpc("authority", "call_remote", "reliable", RESEARCH_CHANNEL)
+func _research_status(sizes: Dictionary) -> void:
+	if not hosting and multiplayer.get_remote_sender_id() == 1: research_status.emit(sizes)

@@ -1,7 +1,10 @@
 # Research files
 
-Collection starts only after the player enables it. Disabling collection stops
-writing observations immediately. Files are local to each recorder's computer.
+Collection starts only after the player enables it (asked once per session, at
+the first level). Disabling collection stops writing observations immediately.
+Files are written on each recorder's computer. In sessions on the dedicated
+study server they are also uploaded there automatically (see "Collecting the
+files" below).
 Mouse input belongs to that local player; shared game actions identify their
 actor separately with `data.actor_peer`. Voice consent and speaker files are
 managed by the voice recorder.
@@ -86,3 +89,35 @@ an old incident absent from a pruned network snapshot gets
 Personal player names, messages, chat, email/IP/address fields and transcripts
 are excluded from behavioral metadata. Speaker audio and its participant labels
 are separate artifacts governed by voice-recording consent.
+
+## Additions 30.10
+
+Every row now has `unix_ms` (wall clock, milliseconds) next to the game clock.
+
+- `clock_correction` - a guest's clock was ahead of the host's snapshot by
+  `behind_s` (logged once per correction, when at least 0.25 s). The logged
+  level clock holds at `held_at_s` until the game catches up, so it never goes
+  back. `level_ended` reports `clock_corrections` and `clock_held_total_s`.
+- `display` - at level start and every 10 s: window and viewport size, scaling,
+  window mode, screen size/scale/refresh rate, vsync, `fps_measured`,
+  `frame_time_ms_mean/max`, `mouse_motion_events_per_s`, `embedded_in_editor`.
+- `microphone_check` - result of the level-entry mic check: `verdict`
+  (good / too_quiet / too_loud / no_signal / waiting / microphone_off),
+  `speech_level_db` (90th percentile of speech frames), `clipped_frames`.
+- `pc_check` - summary of a Settings > Research study PC check; the full result
+  is in `research/pc_checks/pc_check_<unix_ms>.json`.
+
+NASA-TLX (raw, six subscales 0-100 in steps of 5, `raw_tlx` = mean) is saved as
+`research/<session>/questionnaires/nasa_tlx_<unix_ms>.json` with `source`
+(`after_last_level` or `title_button`), `last_level_number`, `last_level_won`,
+`departments` and `seconds_to_complete`.
+
+## Collecting the files
+
+On the dedicated server, uploads land in
+`research_uploads/<session_id>/<pc_id>/events/...` and `.../voice/...` next to
+the server executable (or `--research-dir=<path>`). Each computer sends only
+its own files and its own voice track; `pc_id` is a random id per computer.
+Logs and WAV files are sent incrementally after each level, so a session is
+complete on the server shortly after the last level. Download everything with
+`tools/download_research.ps1 -Server <ip>` or `tools/download_research.sh <ip>`.

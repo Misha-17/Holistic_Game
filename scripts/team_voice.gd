@@ -138,6 +138,7 @@ func set_capture_active(value: bool) -> void:
 	recording_active = value and recording_enabled and _session_active and _writer != null
 	if value and recording_enabled and _session_active and _writer == null: _open_recording()
 	_log("capture_resumed" if value else "capture_suspended", _timing())
+	if not value and _writer != null and _writer.has_method("publish_checkpoint"): _writer.publish_checkpoint()
 	_publish_state()
 	recording_changed.emit(recording_active, recording_path)
 	_refresh_status()
@@ -158,6 +159,8 @@ func set_mic_enabled(value: bool) -> void:
 		_resample_position = 0.0
 		_recording_source_cutoff = 0
 		_mixer.remove_peer(_local_peer)
+		input_level_db = -120.0
+		_meter_peak_db = -120.0
 	mic_enabled = value
 	_publish_state()
 	_log("microphone", {"enabled": value})
@@ -202,6 +205,15 @@ func get_recording_info() -> Dictionary:
 		"session_id": session_id, "sample_rate": RATE, "channels_per_track": 1, "format": Session.FORMAT,
 		"frames": int(_writer.bytes_written) / 2 if _writer != null else 0,
 		"session_seconds": _session_time, "microphone_enabled": mic_enabled}
+
+
+# This player's own files in the speaker session folder: the shared manifest,
+# timeline and player, and only the local speaker's track. Teammates' tracks are
+# sent by their own computers.
+func own_upload_files() -> PackedStringArray:
+	if recording_path.is_empty(): return PackedStringArray()
+	var own := "peer_%d" % _local_peer
+	return PackedStringArray(["session.json", "timeline.jsonl", "listen.html", own + ".wav", own + ".jsonl"])
 
 
 func shutdown() -> void:
@@ -317,11 +329,17 @@ func _capture_microphone() -> void:
 		var source_recordable := _resample_position >= _recording_source_cutoff
 		var pcm := PackedByteArray()
 		pcm.resize(FRAMES * 2)
+		var energy := 0.0
+		var peak := 0
 		for index in range(FRAMES):
 			var position := _resample_position + index * step
 			var base := int(position)
 			var stereo: Vector2 = _source[base].lerp(_source[base + 1], position - base)
-			pcm.encode_s16(index * 2, clampi(roundi((stereo.x + stereo.y) * 0.5 * 32768.0), -32768, 32767))
+			var sample := clampi(roundi((stereo.x + stereo.y) * 0.5 * 32768.0), -32768, 32767)
+			pcm.encode_s16(index * 2, sample)
+			energy += float(sample * sample)
+			peak = maxi(peak, absi(sample))
+		_meter_packet(sqrt(energy / FRAMES), peak)
 		_resample_position += FRAMES * step
 		_sequence += 1
 		_send_microphone_packet(pcm, source_recordable)
@@ -332,6 +350,75 @@ func _capture_microphone() -> void:
 		_resample_position -= consumed
 		_recording_source_cutoff = maxi(0, _recording_source_cutoff - consumed)
 
+
+# Microphone level, in dBFS (0 = digital maximum). The meter shows the live
+# level; a microphone check collects the loudest 20 ms frames while the player
+# speaks (mid-term report, Table A4: one microphone was very quiet).
+const MIC_GOOD_DB := -30.0 # loudest speech frames should reach this
+const MIC_SILENT_DB := -55.0 # below this nothing usable was heard
+const MIC_CLIP_DB := -0.5
+var input_level_db := -120.0
+var _meter_peak_db := -120.0
+var _meter_peak_ms := 0
+var _check_active := false
+var _check_frames := 0
+var _check_speech_frames := 0
+var _check_clipped_frames := 0
+var _check_loudest_db := -120.0
+var _check_levels: PackedFloat32Array = PackedFloat32Array()
+
+static func level_db(value: float) -> float:
+	return 20.0 * log(maxf(value, 1.0) / 32768.0) / log(10.0)
+
+func _meter_packet(rms: float, peak: int) -> void:
+	var db := level_db(rms)
+	# Fast attack, slow release, like a normal level meter.
+	input_level_db = db if db > input_level_db else lerpf(input_level_db, db, 0.15)
+	var peak_db := level_db(float(peak))
+	if peak_db >= _meter_peak_db or Time.get_ticks_msec() - _meter_peak_ms > 1500:
+		_meter_peak_db = peak_db
+		_meter_peak_ms = Time.get_ticks_msec()
+	if not _check_active: return
+	_check_frames += 1
+	_check_loudest_db = maxf(_check_loudest_db, db)
+	if db > MIC_SILENT_DB + 10.0:
+		_check_speech_frames += 1
+		_check_levels.append(db)
+	if peak_db >= MIC_CLIP_DB: _check_clipped_frames += 1
+
+func input_peak_db() -> float:
+	return _meter_peak_db if Time.get_ticks_msec() - _meter_peak_ms <= 1500 else input_level_db
+
+func begin_mic_check() -> void:
+	_check_active = true
+	_check_frames = 0
+	_check_speech_frames = 0
+	_check_clipped_frames = 0
+	_check_loudest_db = -120.0
+	_check_levels = PackedFloat32Array()
+
+# Verdict on what was heard since begin_mic_check(). The speech level is the
+# 90th percentile of active 20 ms frames, so one cough cannot pass the check.
+func mic_check_result() -> Dictionary:
+	var levels := _check_levels.duplicate()
+	levels.sort()
+	var speech_db: float = levels[int(levels.size() * 0.9)] if levels.size() >= 10 else _check_loudest_db
+	var verdict := "waiting"
+	if not mic_enabled: verdict = "microphone_off"
+	elif _check_frames == 0: verdict = "no_signal"
+	elif _check_speech_frames < 10: verdict = "waiting" if _check_loudest_db > MIC_SILENT_DB else "no_signal"
+	elif _check_clipped_frames > maxi(3, _check_speech_frames / 20): verdict = "too_loud"
+	elif speech_db < MIC_GOOD_DB: verdict = "too_quiet"
+	else: verdict = "good"
+	return {"verdict": verdict, "speech_level_db": snappedf(speech_db, 0.1), "loudest_frame_db": snappedf(_check_loudest_db, 0.1),
+		"speech_frames": _check_speech_frames, "frames": _check_frames, "clipped_frames": _check_clipped_frames,
+		"good_threshold_db": MIC_GOOD_DB}
+
+func end_mic_check() -> Dictionary:
+	var result := mic_check_result()
+	_check_active = false
+	_log("microphone_check", result)
+	return result
 
 func _seal_microphone_capture() -> void:
 	# Drain queued microphone samples using the old permission. A packet that

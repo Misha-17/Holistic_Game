@@ -9,6 +9,8 @@ signal dispatch_requested()
 signal road_event_selected(id: int)
 signal scout_requested(id: int)
 signal close_requested()
+## A WITHDRAW button on a call card was clicked (Andrei, 30.10).
+signal withdraw_requested(unit_id: int)
 
 const INK := Color("142e3b")
 const PANEL := Color("183c46")
@@ -34,12 +36,17 @@ var view_rect := Rect2(Vector2(56, 34), BeaconCampaign.MAP_SIZE * 1.5)
 var owner_labels: Dictionary = {}
 var reduced_motion: bool = false
 var hovered_incident_id: int = -1
+## A call closed with Esc/CLOSE while the mouse is still on it: no hover
+## preview for it until the mouse leaves (Andrei, 30.10: Esc seemed not to close it).
+var dismissed_incident_id: int = -1
 var hovered_unit_id: int = -1
 var hovered_road_id: int = -1
 var hovered_base_kind: String = ""
 var role_filter: String = ""
 var focused_unit_id: int = -1
 var dispatch_enabled: bool = true
+## Off during the practice tutorial (same rule as the V key).
+var withdraw_enabled: bool = true
 # Departments this player commands. Other departments stay visible but are drawn dimmer.
 var owned_kinds: Array = ["fire", "medic", "engineer", "police"]
 
@@ -122,6 +129,13 @@ func _follow_moving_crews() -> void:
 		if item.has("hit"): item.hit.rect = marker.grow(8)
 
 func refresh() -> void:
+	_refresh_layout()
+	queue_redraw()
+
+## Close a call's card for good: it is no longer selected and its hover
+## preview stays closed until the mouse moves off the call.
+func dismiss_call(id: int) -> void:
+	dismissed_incident_id = id if id >= 0 and id == hovered_incident_id else -1
 	_refresh_layout()
 	queue_redraw()
 
@@ -237,6 +251,7 @@ func _update_hover(point: Vector2) -> void:
 	var next_road: int = int(hit.get("id", -1)) if hit.get("type", "") == "road" else -1
 	var changed: bool = hovered_incident_id != next_call or hovered_unit_id != next_unit or previous_key != next_key or hovered_road_id != next_road
 	hovered_road_id = next_road
+	if next_call != dismissed_incident_id: dismissed_incident_id = -1
 	hovered_incident_id = next_call
 	hovered_unit_id = next_unit
 	if changed:
@@ -259,7 +274,9 @@ func handle_input(event: InputEvent) -> bool:
 			get_viewport().set_input_as_handled()
 			queue_redraw()
 			return true
-		Input.set_default_cursor_shape(Input.CURSOR_ARROW)
+		# No target here: main.gd picks the cursor once for this event (hand over
+		# a building or button, arrow otherwise). Setting ARROW here first made
+		# the cursor flash arrow -> hand on every mouse move.
 	# Main owns the click-versus-drag gesture; activation is committed on release.
 	return false
 
@@ -282,6 +299,8 @@ func activate_target(hit: Dictionary) -> void:
 			scout_requested.emit(int(hit.id))
 		"close":
 			close_requested.emit()
+		"withdraw":
+			withdraw_requested.emit(int(hit.id))
 		"base":
 			var pick: int = _station_pick(str(hit.base_key))
 			if pick >= 0: unit_selected.emit(pick)
@@ -343,7 +362,7 @@ func _refresh_layout() -> void:
 			_pin_positions[id] = footprint
 		pin = footprint.position + Vector2(34, 54)
 		var estimate: Dictionary = sim.incident_estimate(id) if sim.has_method("incident_estimate") else {}
-		_calls.append({"incident": incident, "point": point, "pin": pin, "rect": footprint, "card": Rect2(), "estimate": estimate, "expanded": id == selected_id or id == hovered_incident_id})
+		_calls.append({"incident": incident, "point": point, "pin": pin, "rect": footprint, "card": Rect2(), "estimate": estimate, "expanded": id == selected_id or (id == hovered_incident_id and id != dismissed_incident_id)})
 		_occupied.append(footprint.grow(5))
 		_hits.append({"rect": footprint, "type": "call", "id": id})
 	_layout_bases()
@@ -357,6 +376,12 @@ func _layout_call_cards() -> void:
 	for item in ordered:
 		if not item.expanded: continue
 		var size := Vector2(262, 82)
+		# The selected call lists every crew assigned to it, one row each, with a
+		# WITHDRAW button on the player's own crews (Andrei, 30.10: "it is not
+		# clear which units are on which scene").
+		var crews: Array = _crews_on_call(item.incident) if int(item.incident.id) == selected_id else []
+		item["crew_rows"] = crews
+		if not crews.is_empty(): size.y += 8 + CREW_ROW_H * crews.size()
 		var pin: Vector2 = item.pin
 		var choices: Array[Vector2] = [pin + Vector2(34, -26), pin + Vector2(-size.x - 34, -26), pin + Vector2(34, -size.y + 20), pin + Vector2(-size.x - 34, -size.y + 20), pin + Vector2(-size.x * .5, 48)]
 		var rect: Rect2 = _place_rect(choices, size)
@@ -369,6 +394,30 @@ func _layout_call_cards() -> void:
 		# Unconfirmed call: a real SCOUT button on its card (not only the Q key).
 		if not bool(item.incident.get("discovered", true)):
 			_hits.append({"rect": _scout_button_rect(rect), "type": "scout", "id": int(item.incident.id)})
+		for i in range((item.crew_rows as Array).size()):
+			var row: Dictionary = item.crew_rows[i]
+			if bool(row.can_withdraw):
+				_hits.append({"rect": _withdraw_button_rect(rect, i).grow(2), "type": "withdraw", "id": int(row.unit.id)})
+
+const CREW_ROW_H := 28.0
+
+# Crews assigned to a call (travelling there or working on it), own crews first.
+func _crews_on_call(incident: Dictionary) -> Array:
+	var rows: Array = []
+	for unit in sim.units:
+		if int(unit.get("target", -1)) != int(incident.id) or int(unit.get("clear_target", -1)) >= 0: continue
+		if str(unit.get("state", "")) not in ["travel", "working"]: continue
+		var own: bool = _owned(str(unit.kind))
+		rows.append({"unit": unit, "own": own, "can_withdraw": own and withdraw_enabled and sim.can_withdraw(int(unit.id))})
+	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.own and not b.own)
+	return rows
+
+func _crew_row_rect(card: Rect2, index: int) -> Rect2:
+	return Rect2(card.position + Vector2(8, 86 + CREW_ROW_H * index), Vector2(card.size.x - 16, CREW_ROW_H - 4))
+
+func _withdraw_button_rect(card: Rect2, index: int) -> Rect2:
+	var row := _crew_row_rect(card, index)
+	return Rect2(Vector2(row.end.x - 84, row.position.y + 1), Vector2(84, row.size.y - 2))
 
 func _close_button_rect(card: Rect2) -> Rect2:
 	return Rect2(card.end.x - 70, card.position.y + 6, 62, 20)
@@ -1052,6 +1101,33 @@ func _draw_call(item: Dictionary) -> void:
 		hint = ""
 	if hint != "":
 		_btext(hint, rect.position + Vector2(10, 71), 12, GOLD)
+	_draw_crew_rows(item)
+
+func _draw_crew_rows(item: Dictionary) -> void:
+	var rows: Array = item.get("crew_rows", [])
+	if rows.is_empty(): return
+	var rect: Rect2 = item.card
+	draw_line(rect.position + Vector2(8, 81), Vector2(rect.end.x - 8, rect.position.y + 81), Color(CREAM, .18), 1)
+	for i in range(rows.size()):
+		var row: Dictionary = rows[i]
+		var unit: Dictionary = row.unit
+		var kind := str(unit.kind)
+		var area := _crew_row_rect(rect, i)
+		var color: Color = ROLE_COLOR.get(kind, CREAM)
+		draw_rect(area, Color(color, .10))
+		draw_rect(Rect2(area.position, Vector2(3, area.size.y)), color)
+		var state := "ON SCENE" if str(unit.state) == "working" else "EN ROUTE"
+		var label := "%s  %s" % [ROLE_SHORT.get(kind, kind.to_upper()), str(unit.get("crew_name", unit.get("name", "Crew")))]
+		var text_width := area.size.x - (100.0 if bool(row.can_withdraw) else 16.0) - 62.0
+		_btext(_fit(label, text_width, 13), area.position + Vector2(9, 17), 13, color)
+		_btext(state, area.position + Vector2(9 + text_width + 4, 17), 10, GREEN if state == "ON SCENE" else MUTED)
+		if bool(row.can_withdraw):
+			var button := _withdraw_button_rect(rect, i)
+			var over: bool = _pointer_valid and button.grow(2).has_point(_pointer)
+			_panel(button, Color(RED, .95) if over else Color(INK, .95), RED, 1)
+			_btext("WITHDRAW", button.position + Vector2(button.size.x * .5, 16), 11, INK if over else RED, true)
+		elif not bool(row.own):
+			_btext("TEAMMATE", Vector2(area.end.x - 8, area.position.y + 17) - Vector2(56, 0), 10, MUTED)
 
 func _crew_on_scene(incident: Dictionary) -> bool:
 	for unit in sim.units:

@@ -97,6 +97,39 @@ func test_withdraw_commands() -> void:
 		check(str(medic.state) == "return", "Guest withdrawal works while host opens " + menu)
 		check(game.screen == menu, "Guest withdrawal preserves the host's " + menu + " menu")
 
+func test_call_card_withdraw() -> void:
+	# Andrei (30.10): "It is not clear which units are on which scene". The
+	# selected call's card lists its crews; each own crew has a WITHDRAW button.
+	configure_room()
+	game._begin_shift(0)
+	game.screen = "game"
+	var call := make_call()
+	var fire := unit_of_kind("fire")
+	var medic := unit_of_kind("medic")
+	game._execute_command("dispatch", {"incident_id": call.id, "kind": "fire", "unit_id": fire.id}, 1)
+	game._execute_command("dispatch", {"incident_id": call.id, "kind": "medic", "unit_id": medic.id}, 44)
+	arrive(fire)
+	game.tactical_map.owned_kinds = ["fire", "engineer"] # this player's departments
+	game._select_incident(int(call.id))
+	game._process(0.0)
+	game.tactical_map.refresh()
+	var card_item: Dictionary = {}
+	for item in game.tactical_map._calls:
+		if int(item.incident.id) == int(call.id): card_item = item
+	var rows: Array = card_item.get("crew_rows", [])
+	check(rows.size() == 2, "The selected call's card lists both assigned crews (found %d)" % rows.size())
+	check(not rows.is_empty() and int(rows[0].unit.id) == int(fire.id) and bool(rows[0].can_withdraw), "Own crew is listed first with a WITHDRAW button")
+	check(rows.size() > 1 and not bool(rows[1].can_withdraw), "A teammate's crew is shown without a WITHDRAW button")
+	check(not game.tactical_map._rect_for("withdraw", int(medic.id)).has_area(), "No withdraw target for a teammate's crew")
+	var button: Rect2 = game.tactical_map._rect_for("withdraw", int(fire.id))
+	check(button.has_area(), "Own crew has a clickable WITHDRAW button on the card")
+	var hit: Dictionary = game.tactical_map._hit_at(button.get_center())
+	check(str(hit.get("type", "")) == "withdraw" and int(hit.get("id", -1)) == int(fire.id), "Clicking the button targets that crew, not the call")
+	game.tactical_map.activate_target(hit)
+	check(str(fire.state) == "return" and not call.assigned.has(fire.id), "WITHDRAW on the call card sends the crew back")
+	check(call.assigned.has(medic.id), "Only the clicked crew is withdrawn")
+	game.tactical_map.owned_kinds = ["fire", "medic", "engineer", "police"]
+
 func test_solo_withdraw() -> void:
 	game.network.active = false
 	game.network.hosting = false
@@ -185,6 +218,7 @@ func run() -> void:
 	game.audio.set_sfx_enabled(false)
 	test_withdraw_commands()
 	test_solo_withdraw()
+	test_call_card_withdraw()
 	test_between_level_roles(false)
 	test_between_level_roles(true)
 	test_lobby_snapshots()

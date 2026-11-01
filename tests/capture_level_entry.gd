@@ -22,10 +22,14 @@ func run() -> void:
 	game._begin_shift(BeaconCampaign.PRACTICE_INDEX)
 	await snap("collection-choice")
 	game._choose_collection(false)
+	await snap("voice-reminder")
+	game._choose_voice(false)
 	for role in game.ROLE_BRIEFINGS:
 		game.briefing_role = role
 		await snap("briefing-" + role)
 	game._complete_briefing()
+	await snap("owner-start")
+	game._request_entry_action("entry_start")
 	await snap("training-harbor")
 	game.sim.tick(65)
 	game.sim.drain_events()

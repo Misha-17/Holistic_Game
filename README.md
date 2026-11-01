@@ -2,6 +2,17 @@
 
 A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engineering and Police each have four crews in every level; calls need several departments working together.
 
+## Study session update (30.10)
+
+- **Withdraw from the call.** Click a call: its card lists every crew sent there (department, crew name, EN ROUTE / ON SCENE). Your own crews have a **WITHDRAW** button; teammates' crews are marked TEAMMATE. The crew card + **V** still works.
+- **All levels open** in the solo menu (no unlock order).
+- **Consent once per session.** Recording and voice are asked at the first level only; one continuous capture per level, even when a guest's clock is corrected by the host (`clock_correction` rows, logged clock never goes back).
+- **Microphone check** after enabling voice at level entry, plus an input meter in Settings → Sounds.
+- **Study PC check:** Settings → Research → **CHECK THIS STUDY PC**. Five-second test of window size, scaling, frame rate, microphone and recording, with OK / CHECK / FIX lines; saved to `research/pc_checks/`. During play a `display` row (fps, window, scaling) is logged every 10 s.
+- **NASA-TLX (raw):** opens after the last level (Level 6, won or lost) and from **SURVEY · NASA-TLX** on the title screen. Saved to `research/<session>/questionnaires/`.
+- **Automatic upload to the study server.** In sessions on the dedicated (Azure) server each player's computer sends its own event logs, survey answers and own voice track to the server in the background after each level (slowed down while playing, resumes after disconnects or restarts). Players do nothing. The server stores them in `research_uploads/<session>/<pc_id>/` next to the server executable; the researcher downloads them with `tools/download_research.ps1` (Windows) or `tools/download_research.sh`.
+- **Fullscreen in the editor:** Godot 4.4+ runs the game inside the editor's Game tab, where fullscreen cannot work and the game looks small. Untick **Embed Game on Next Play** in the Game tab's ⋮ menu (or Editor Settings → Run → Window Placement → Game Embed Mode = Disabled). Exported builds are not affected.
+
 ## Menu and camera update (0.9.1)
 
 The level menu now shows illustrated cards in play order, **00–06**, with Level 0 first, clear completion/lock badges and a separate saved-shift panel. The Training Harbor title and subtitle no longer cover the practice map.
@@ -18,7 +29,7 @@ The six existing campaign levels keep their saved indices and difficulty. **Star
 
 ## Play
 - Pick a crew, then click a call. Or hover a call and press **1–4** for the nearest available crew in that department.
-- **Withdraw a crew from a scene:** click its crew card in the bottom bar, then **WITHDRAW** (or **V**). It leaves the incident and returns to standby; you can send it to another call while it returns, once the normal dispatch cooldown has passed. This also cancels a crew en route or clearing a road. Other crews keep working, and the incident still needs a replacement for the withdrawn department.
+- **Withdraw a crew from a scene:** click the call and press **WITHDRAW** next to the crew on its card, or click its crew card in the bottom bar, then **WITHDRAW** (or **V**). It leaves the incident and returns to standby; you can send it to another call while it returns, once the normal dispatch cooldown has passed. This also cancels a crew en route or clearing a road. Other crews keep working, and the incident still needs a replacement for the withdrawn department.
 - **Change roles between levels:** in the co-op lobby or results screen, click **SWAP** beside a teammate to exchange your department assignments. With two or three players, this swaps the entire department bundle. Roles stay fixed during a level; the host/session leader remains the same player. Joining or leaving redistributes departments to keep every role covered. Solo players already command every department.
 - **Q:** scout. The shared field team needs 8 s between scouts: the **SCOUT** counter in the top bar and the SCOUT button on a ? call show the seconds left (playtest 19.10). **E:** supply a crew on scene. **Space:** coffee boost. **C:** rescue close-up. **R:** ping.
 - **Two views only:** every level **starts on the whole town**. Scroll up or press **EXPLORE** to open the **drag view**; scroll down or press **OVERVIEW** to return to the whole town. Clicking calls, crews or stations preserves your chosen zoom and camera position. There is no further zooming in (no +/- buttons, no F shortcut). Switching to the whole town closes an open call card.
@@ -136,7 +147,7 @@ The game contains no classifier, workload model, adaptive assistance or required
 
 ## Build and verification
 
-This build uses network protocol **13** (Level 0 and the shared ready step). All co-op clients and the server must use the same build; redeploy the Azure server.
+This build uses network protocol **13** (30.10: research upload channel, survey and session consent; 5 ENet channels). All co-op clients and the server must use the same build; redeploy the Azure server.
 
 Run `powershell -ExecutionPolicy Bypass -File tools/package.ps1` on Windows; pass `-GodotConsole` and `-GodotGui` for other engine paths. It builds the Windows portable package, Linux-server resource pack and clean source ZIP under `artifacts/`. The portable build includes the official Godot runtime because export templates were unavailable locally; its license texts are in `licenses/`.
 
@@ -152,6 +163,12 @@ godot --headless --path . --script tests/test_withdrawal.gd
 godot --headless --path . --script tests/test_remote_route.gd
 godot --headless --path . --script tests/test_playtest_19_10.gd
 godot --headless --path . --script tests/test_crew_controls.gd
+godot --headless --path . --script tests/test_call_card_close.gd
+godot --headless --path . --script tests/test_capture_continuity.gd
+godot --headless --path . --script tests/test_mic_check.gd
+godot --headless --path . --script tests/test_nasa_tlx.gd
+godot --headless --path . --script tests/test_pc_check.gd
+godot --headless --path . --script tests/test_research_upload.gd
 godot --headless --path . --script tests/test_role_assignment.gd
 godot --headless --path . --script tests/test_road_events.gd
 godot --headless --path . --script tests/test_levels.gd
@@ -159,6 +176,7 @@ godot --headless --path . --script tests/test_two_banks.gd
 godot --headless --path . --script tests/test_player_capture.gd
 godot --headless --path . --script tests/test_map_navigation.gd
 godot --path . --script tests/test_map_viewport_input.gd
+godot --path . --script tests/test_cursor.gd
 godot --headless --path . --script tests/test_music_audio.gd
 godot --headless --path . --script tests/test_session_lifecycle.gd
 godot --headless --path . --script tests/test_snapshot_transport.gd

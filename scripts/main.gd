@@ -137,6 +137,8 @@ var _tick_left := 0.0
 # Networking smoothness (guests only): dispatches shown before the host confirms them.
 var predicted_dispatches: Array[Dictionary] = []
 var host_speed := 1.0
+# Newest pointer target under the local mouse, for the 60 Hz sample stream.
+var _last_pointer_target: Dictionary = {}
 var dedicated_server := false
 var _dedicated_shift_started := false
 var show_perf := false
@@ -463,7 +465,7 @@ func _sync_capture() -> void:
 	voice.start(capture_session_id)
 	if research_enabled and not research.enabled:
 		research.set_clock(sim.elapsed, sim.shift_index)
-		research.begin_session(capture_session_id, {"peer_id": multiplayer.get_unique_id(), "departments": network.departments_for(), "build": "0.9.1", "map_pixels": TownView.MAP_SIZE})
+		research.begin_session(capture_session_id, {"peer_id": multiplayer.get_unique_id(), "departments": network.departments_for(), "build": "0.9.2", "map_pixels": TownView.MAP_SIZE})
 		research.begin_level(sim.shift_index, context, capture_run_id)
 		research.observe_state(sim.net_snapshot())
 		if sim.has_method("chaos_context"): research.log_event("chaos_state_at_capture_start", sim.chaos_context())
@@ -486,6 +488,26 @@ func _display_info() -> Dictionary:
 		"vsync_mode": DisplayServer.window_get_vsync_mode(), "fps_engine": Engine.get_frames_per_second(),
 		"max_fps": Engine.max_fps, "embedded_in_editor": Engine.is_embedded_in_editor(),
 		"os": OS.get_name(), "renderer": RenderingServer.get_video_adapter_name()}
+
+# Newest game state for the 60 Hz sample stream (research_sampler.gd). Runs
+# once per frame while a level is recorded; the sampler thread repeats it in
+# every sample until the next frame publishes a newer one.
+func _sample_state() -> Dictionary:
+	var guest := network.active and not network.hosting
+	var hover_type := str(_last_pointer_target.get("type", ""))
+	var hover_id := int(_last_pointer_target.get("id", -1))
+	var ui_button := str(_last_pointer_target.get("ui_button", ""))
+	if hover_type.is_empty() and not ui_button.is_empty():
+		var parts := ui_button.split(":", true, 1)
+		hover_type = "ui:" + parts[0]
+		hover_id = parts[1].to_int() if parts.size() > 1 and parts[1].is_valid_int() else -1
+	return {"level_elapsed_s": sim.elapsed,
+		"clock_running": _simulation_active() and sim.running and not sim.finished and not tutorial_active,
+		"clock_rate": host_speed if guest else 1.0,
+		"screen": screen if entry_popup.is_empty() and not _waiting_for_briefings else "entry",
+		"selected_incident_id": selected, "selected_unit_id": selected_unit,
+		"hover_type": hover_type, "hover_id": hover_id,
+		"task_load": BeaconTaskLoad.compute(sim, network.departments_for())}
 
 # ---------------------------------------------------------------- STUDY PC CHECK
 # Settings > Research > CHECK THIS STUDY PC (Andrei, 30.10: "validate the
@@ -744,7 +766,7 @@ func _new_capture_id(prefix: String) -> String:
 func _capture_context() -> Dictionary:
 	return {"capture_session_id": capture_session_id, "level_run_id": capture_run_id,
 		"level_index": sim.shift_index, "level_number": BeaconCampaign.level_number(sim.shift_index),
-		"level_name": BeaconCampaign.shift_data(sim.shift_index).get("title", ""),
+		"level_name": BeaconCampaign.shift_title(sim.shift_index),
 		"level_elapsed_s": sim.elapsed, "elapsed": sim.elapsed, "practice": BeaconCampaign.is_practice(sim.shift_index),
 		"departments": network.departments_for(), "peer_id": multiplayer.get_unique_id()}
 
@@ -954,7 +976,7 @@ func _ready() -> void:
 	if dedicated_server:
 		_start_dedicated_server()
 		return
-	get_window().title = "Beacon Bay 0.9.1"
+	get_window().title = "Beacon Bay 0.9.2"
 	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 	get_tree().auto_accept_quit = false
 	Input.use_accumulated_input = false
@@ -1058,6 +1080,7 @@ func _ready() -> void:
 	voice.recording_changed.connect(_voice_recording_changed)
 	research.log_error.connect(func(message: String): research_enabled=false; _toast(message))
 	research.display_provider = _display_info
+	research.sample_provider = _sample_state
 	ip_input = LineEdit.new()
 	ip_input.position = Vector2(452, 379)
 	ip_input.size = Vector2(536, 52)
@@ -1199,6 +1222,11 @@ func _process(delta: float) -> void:
 			for call in active_calls:
 				if call.deadline < 20: urgent_count += 1
 			research.update_context({"shift":sim.shift_index,"role":network.role,"active_incidents":active_calls.size(),"urgent_incidents":urgent_count,"reputation":sim.reputation})
+			# Task load from this player's point of view, once a second (client feedback 01.11).
+			if research.enabled and sim.running:
+				var departments: Array = network.departments_for()
+				research.log_event("task_state", {"departments": departments, "counts": BeaconTaskLoad.compute(sim, departments),
+					"calls": BeaconTaskLoad.incidents(sim, departments), "at": sim.elapsed})
 		var about_to_fail := false
 		for call in _active_incidents():
 			if float(call.deadline) < 10.0 and _missing_crews(call) > 0:
@@ -1665,6 +1693,7 @@ func _select_unit(id: int) -> void:
 		return
 	if selected_unit==id:
 		selected_unit=-1
+		if not tutorial_active: research.log_event("crew_deselected", {"unit_id": id, "kind": str(unit.kind), "reason": "toggled", "selected_incident_id": selected, "at": sim.elapsed})
 		return
 	if unit.state not in ["idle","return"] and (tutorial_active or not sim.can_withdraw(id)):
 		_toast("%s is resting. Pick another crew." % unit.get("crew_name",unit.name))
@@ -1674,12 +1703,16 @@ func _select_unit(id: int) -> void:
 		_toast("%s can take another call in %ds." % [unit.get("crew_name",unit.name),ceili(wait_left)])
 		return
 	if tutorial_active and not tutorial.can_action("select_unit",{"unit_id":id,"incident_id":selected,"kind":unit.kind}): return
+	var replaced := selected_unit
 	selected_unit=id
 	focused_unit=-1
 	focused_unit_left=0
 	if tutorial_active:
 		tutorial.on_action("select_unit",{"unit_id":id,"incident_id":selected,"kind":unit.kind})
 		_sync_tutorial()
+	else:
+		research.log_event("crew_selected", {"unit_id": id, "kind": str(unit.kind), "unit_state": str(unit.state),
+			"selected_incident_id": selected, "replaced_unit_id": replaced, "at": sim.elapsed})
 	audio.play_cue("select")
 
 func _plan_kind(kind: String) -> void:
@@ -1688,10 +1721,13 @@ func _plan_kind(kind: String) -> void:
 	if tutorial_active and not tutorial.can_action("plan:"+kind,{"incident_id":selected,"kind":kind}):
 		_toast(str(tutorial.current().objective))
 		return
+	if not tutorial_active and selected_unit >= 0:
+		research.log_event("crew_deselected", {"unit_id": selected_unit, "kind": str(sim.get_unit(selected_unit).get("kind", "")), "reason": "department_filter", "selected_incident_id": selected, "at": sim.elapsed})
 	role_filter = kind
 	selected_unit=-1
 	focused_unit=-1
 	focused_unit_left=0
+	if not tutorial_active: research.log_event("department_filter", {"kind": kind, "selected_incident_id": selected, "at": sim.elapsed})
 	if tutorial_active:
 		tutorial.on_action("plan:"+kind,{"incident_id":selected,"kind":kind})
 		_sync_tutorial()
@@ -2325,6 +2361,8 @@ func _input(event: InputEvent) -> void:
 			input_context["ui_button"] = ""
 			for button in buttons:
 				if button.rect.has_point(event.position - global_position): input_context["ui_button"] = button.id
+			_last_pointer_target = (input_context.pointer_target as Dictionary).duplicate()
+			_last_pointer_target["ui_button"] = str(input_context.ui_button)
 		research.update_context(input_context)
 		if event is InputEventMouseMotion: research.log_pointer(event.position, event.relative)
 		elif event is InputEventMouseButton: research.log_mouse_button(event)

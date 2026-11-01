@@ -22,7 +22,7 @@ const CHANNELS := 5
 const RESEARCH_CHANNEL := 4
 const RESEARCH_CHUNK_MAX := 65536
 const RESEARCH_FILE_MAX := 512 * 1024 * 1024
-const RESEARCH_EXTENSIONS := ["jsonl", "json", "wav", "html"]
+const RESEARCH_EXTENSIONS := ["jsonl", "csv", "json", "wav", "html"]
 ## Where a dedicated server stores uploaded research files. Default: a
 ## "research_uploads" folder next to the server program (/opt/beaconbay on
 ## Azure); override with --research-dir=PATH.

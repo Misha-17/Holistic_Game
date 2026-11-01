@@ -28,6 +28,16 @@ var _shown_unit_positions: Dictionary = {}
 var _celebrations: Array[Dictionary] = []
 var _alert_left: float = 0.0
 var _pixel: PixelTownArt
+## The static town (ground, buildings, roads, outskirts) does not change during a
+## level. Drawn as shapes it is about 10,000 canvas commands and 420-450 draw
+## calls that the renderer replays every frame (frame-rate profile 01.11: the
+## largest single cost, and the reason slow PCs dropped to ~30 fps). It is now
+## painted once per level theme into a texture and shown as one sprite. The
+## shapes stay as a fallback (headless, or until the first bake finishes).
+const STATIC_TEXTURE_SCALE := 1.5
+var _static_sprite: Sprite2D
+var _static_bake := 0
+var _static_key := ""
 
 class StaticTown extends Node2D:
 	var town: TownView
@@ -41,6 +51,55 @@ func _ready() -> void:
 	_backdrop.town = self
 	_backdrop.show_behind_parent = true
 	add_child(_backdrop)
+	_static_sprite = Sprite2D.new()
+	_static_sprite.centered = false
+	_static_sprite.show_behind_parent = true
+	_static_sprite.position = OUTSKIRTS.position
+	_static_sprite.scale = Vector2.ONE / STATIC_TEXTURE_SCALE
+	# Crisp pixels when zoomed in, smooth mipmaps in the whole-town view.
+	_static_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST_WITH_MIPMAPS
+	_static_sprite.visible = false
+	add_child(_static_sprite)
+	_bake_static()
+
+func _bake_static() -> void:
+	# Guests call set_theme with every snapshot between levels: bake only when
+	# the theme really changes.
+	var key := "%d:%d" % [shift_theme, theme_index]
+	if key == _static_key: return
+	_static_key = key
+	_static_bake += 1
+	var bake := _static_bake
+	_backdrop.visible = true
+	_backdrop.queue_redraw()
+	_static_sprite.visible = false
+	if DisplayServer.get_name() == "headless" or not is_inside_tree(): return
+	var viewport := SubViewport.new()
+	viewport.size = Vector2i((OUTSKIRTS.size * STATIC_TEXTURE_SCALE).ceil())
+	viewport.disable_3d = true
+	viewport.transparent_bg = true
+	viewport.canvas_item_default_texture_filter = Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST
+	viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	var painter := StaticTown.new()
+	painter.town = self
+	painter.position = -OUTSKIRTS.position * STATIC_TEXTURE_SCALE
+	painter.scale = Vector2.ONE * STATIC_TEXTURE_SCALE
+	viewport.add_child(painter)
+	add_child(viewport)
+	await RenderingServer.frame_post_draw
+	await RenderingServer.frame_post_draw
+	if bake != _static_bake or not is_instance_valid(viewport):
+		if is_instance_valid(viewport): viewport.queue_free()
+		return
+	var image: Image = viewport.get_texture().get_image()
+	viewport.queue_free()
+	if image == null or image.is_empty():
+		_static_key = ""
+		return
+	image.generate_mipmaps()
+	_static_sprite.texture = ImageTexture.create_from_image(image)
+	_static_sprite.visible = true
+	_backdrop.visible = false
 
 func _process(delta: float) -> void:
 	if not reduced_motion:
@@ -83,7 +142,7 @@ func set_theme(index: int) -> void:
 	# 0 day, 1 night, 2 golden, 3 rain, 4 desert
 	theme_index = 0 if BeaconCampaign.is_practice(shift_theme) else [0,2,3,1,4,2][shift_theme]
 	if is_instance_valid(_backdrop):
-		_backdrop.queue_redraw()
+		_bake_static()
 	queue_redraw()
 
 func celebrate(normalized_position: Vector2, points: int, people: int) -> void:

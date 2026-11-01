@@ -8,7 +8,7 @@ class_name ResearchUploader
 # and resumes on the next connection to that server, even after a restart.
 #
 # Each file is uploaded incrementally:
-#   append  - event logs (*.jsonl) and audio (*.wav) only send the new bytes;
+#   append  - event logs (*.jsonl), 60 Hz samples (*.csv) and audio (*.wav) only send the new bytes;
 #             for a WAV the 44-byte header is re-sent last, so the server copy
 #             always has the right length.
 #   replace - small JSON/HTML files are re-sent whole when they change.
@@ -63,7 +63,7 @@ func sync_file(local_path: String, remote_path: String) -> void:
 	if not enabled or not FileAccess.file_exists(local_path) or not _valid_remote(remote_path): return
 	var entry: Dictionary = _files.get(local_path, {})
 	if entry.is_empty():
-		entry = {"remote": remote_path, "mode": "append" if local_path.get_extension() in ["jsonl", "wav"] else "replace",
+		entry = {"remote": remote_path, "mode": "append" if local_path.get_extension() in ["jsonl", "csv", "wav"] else "replace",
 			"acked": 0, "synced_size": -1, "synced_md5": ""}
 		_files[local_path] = entry
 	if not _dirty.has(local_path): _dirty.append(local_path)
@@ -213,7 +213,7 @@ func _read(path: String, offset: int, amount: int) -> PackedByteArray:
 	return data
 
 static func _uploadable(name: String) -> bool:
-	return name.get_extension() in ["jsonl", "json", "wav", "html"] and not name.ends_with(".tmp") and name != "upload_state.json"
+	return name.get_extension() in ["jsonl", "csv", "json", "wav", "html"] and not name.ends_with(".tmp") and name != "upload_state.json"
 
 static func _clean(text: String) -> String:
 	var result := ""

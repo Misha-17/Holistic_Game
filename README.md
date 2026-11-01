@@ -2,6 +2,15 @@
 
 A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engineering and Police each have four crews in every level; calls need several departments working together.
 
+## Research update (0.9.2, client feedback 01.11)
+
+- **Fixed 60 Hz recording.** Each level also writes `levels/<level_run_id>_samples_60hz.csv`: a background thread reads the cursor 60 times a second on a fixed clock, whatever the frame rate, plus the selection, the object under the cursor and the player's task load. Before, mouse rows came once per rendered frame, so a 30 fps PC recorded half as much as a 75 fps PC, and every PC recorded less when calls piled up.
+- **Task load per player:** calls that need your department vs not, your calls dispatched vs decision pending, urgent and critical calls, in every sample and once a second (`task_state`).
+- **Crew selection events** (`crew_selected`, `crew_deselected`) separate decision time from execution time. Definitions of every variable: `docs/VARIABLES.md`.
+- **Higher frame rate.** The static town is painted once per level into a texture instead of being redrawn as ~10,000 shapes every frame (draw calls at level start 600-1000 → ~200), and a ~1 ms per-frame rebuild of the level table is gone.
+- **Outside the game:** `analysis/` (Python workload analysis: level and phase differences, task-load drivers, per-player detection, DYWA alignment) and `study/questionnaires/` (offline DYWA and DLR-WAT page).
+- Network protocol unchanged; research schema 4.
+
 ## Study session update (30.10)
 
 - **Withdraw from the call.** Click a call: its card lists every crew sent there (department, crew name, EN ROUTE / ON SCENE). Your own crews have a **WITHDRAW** button; teammates' crews are marked TEAMMATE. The crew card + **V** still works.
@@ -167,6 +176,7 @@ godot --headless --path . --script tests/test_call_card_close.gd
 godot --headless --path . --script tests/test_capture_continuity.gd
 godot --headless --path . --script tests/test_mic_check.gd
 godot --headless --path . --script tests/test_nasa_tlx.gd
+godot --headless --path . --script tests/test_sample_stream.gd
 godot --headless --path . --script tests/test_pc_check.gd
 godot --headless --path . --script tests/test_research_upload.gd
 godot --headless --path . --script tests/test_role_assignment.gd

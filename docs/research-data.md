@@ -9,13 +9,14 @@ Mouse input belongs to that local player; shared game actions identify their
 actor separately with `data.actor_peer`. Voice consent and speaker files are
 managed by the voice recorder.
 
-Behavioral records use schema version 3 and live under Godot's user data folder:
+Behavioral records use schema version 4 (3 up to build 0.9.1) and live under Godot's user data folder:
 
 ```text
 research/<session_id>/
   manifest.json
   session_events.jsonl
   levels/<level_run_id>_events.jsonl
+  levels/<level_run_id>_samples_60hz.csv   (schema 4)
 ```
 
 `session_events.jsonl` is the authoritative timeline for the whole play session.
@@ -111,6 +112,29 @@ NASA-TLX (raw, six subscales 0-100 in steps of 5, `raw_tlx` = mean) is saved as
 `research/<session>/questionnaires/nasa_tlx_<unix_ms>.json` with `source`
 (`after_last_level` or `title_button`), `last_level_number`, `last_level_won`,
 `departments` and `seconds_to_complete`.
+
+## Additions 01.11 (schema 4, build 0.9.2)
+
+Client feedback 01.11. Full definitions of every variable: [VARIABLES.md](VARIABLES.md).
+
+- `levels/<level_run_id>_samples_60hz.csv`: a fixed 60 Hz stream. A separate
+  thread reads the operating-system cursor every 16.667 ms, whatever the frame
+  rate, so every PC writes 60 rows per second, including when nothing happens.
+  Each row also carries the selection, the object under the cursor, the frame
+  rate and the task load below. `held = 1` marks a slot the thread missed.
+  The file is uploaded like the event logs (append mode).
+- Task load per player (in every sample and in a 1 Hz `task_state` row):
+  calls that need the player's own department vs not, own calls dispatched vs
+  decision pending, urgent and critical calls, own idle crews, own road
+  closures, calls waiting for other departments.
+- `crew_selected`, `crew_deselected`, `department_filter`: every crew
+  selection, whatever the input, so decision time (until the crew is chosen)
+  and execution time (until the dispatch is accepted) can be separated.
+- `sampler_started` / `sampler_stopped`, and a `sampler` block in `display`
+  rows: achieved rate, missed slots, read latency, and how far the sampled
+  cursor is from the mouse events (mapping check).
+- `mouse_motion` rows are unchanged. They follow the frame rate; use the
+  60 Hz file for anything rate-based.
 
 ## Collecting the files
 

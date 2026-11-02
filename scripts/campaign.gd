@@ -85,7 +85,20 @@ static func arrival_schedule(index: int, base_interval: float) -> Array[Dictiona
 			at += base_interval * multiplier * timing_rng.randf_range(0.92, 1.08)
 	return result
 
+# The table is deterministic (seeded schedules) and costs ~1 ms to build. It was
+# rebuilt every frame through shift_data() (frame-rate profile 01.11), so it is
+# built once. Callers get copies from shift_data(); do not modify this array.
+static var _shifts_cache: Array[Dictionary] = []
+
 static func shifts() -> Array[Dictionary]:
+	if _shifts_cache.is_empty(): _shifts_cache = _build_shifts()
+	return _shifts_cache
+
+static func shift_title(index: int) -> String:
+	if is_practice(index): return str(practice_data().get("title", ""))
+	return str(shifts()[clampi(index, 0, 5)].get("title", ""))
+
+static func _build_shifts() -> Array[Dictionary]:
 	var scenarios: Array[Dictionary] = [
 		{"title": "FIRST LIGHT", "subtitle": "A small town. A very big heart.", "weather": "clear", "target": 30, "introduction": "Select a call. Send the matching crew. Bring everyone home.", "accent": "66dbc0", "interval": 23.0, "max_active": 4, "weights": [4, 5, 1, 2, 3], "disruptions": [{"at": 112.0, "type": "market", "duration": 35.0, "text": "Morning market • the whole town is out"}, {"at": 224.0, "type": "clear", "duration": 25.0, "text": "Neighbors lend a hand • crews work faster"}]},
 		{"title": "MARKET DAY", "subtitle": "The festival is counting on you.", "weather": "golden", "target": 42, "introduction": "Some calls need two teams. Scout a call for extra breathing room.", "accent": "ffd17b", "interval": 20.5, "max_active": 4, "weights": [4, 5, 2, 3, 5], "disruptions": [{"at": 205.0, "type": "festival", "duration": 48.0, "text": "Festival rush • the whole town is out"}]},

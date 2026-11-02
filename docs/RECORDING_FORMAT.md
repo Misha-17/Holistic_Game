@@ -1,4 +1,4 @@
-# Collection and playback (0.9.0)
+# Collection and playback (0.9.0, sample stream 0.9.2)
 
 Choose **Enable collection** on first level entry, or use Settings > Research. The entry choice is remembered for this launch; nothing is collected by default on the next launch. Mouse/gameplay saving, permission for teammates to save your voice, and local voice saving remain separate switches. The microphone requires **Voice chat** under Sounds. Collection never records Discord, Teams, other apps or system audio.
 
@@ -10,7 +10,10 @@ Use **Open recordings**, then `research/<session_id>/`:
 
 - `session_events.jsonl`: the authoritative session timeline, one JSON object per line.
 - `levels/<level_run_id>_events.jsonl`: the same rows grouped by level attempt.
+- `levels/<level_run_id>_samples_60hz.csv`: fixed 60 Hz samples of the cursor, selection and task load, independent of the frame rate (0.9.2).
 - `manifest.json`: level numbers, names, attempts, file paths and clock descriptions.
+
+Every variable is defined in [VARIABLES.md](VARIABLES.md). DYWA and DLR-WAT questionnaires are outside the game, in `study/questionnaires/`; the analysis scripts are in `analysis/`.
 
 Do not concatenate the session file and level files: the level files mirror the session's sequence IDs. Every input row includes the level, active gameplay clock, monotonic local clock, local player/departments and current event IDs. Mouse records include motion, all button presses/releases and wheel input; context identifies the selection, map position and UI target. Game actions identify the actor; remote actions never manufacture local mouse records.
 

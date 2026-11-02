@@ -5,7 +5,7 @@ extends Node
 signal consent_changed(enabled: bool)
 signal log_error(message: String)
 const LOG_DIRECTORY := "user://research"
-const SCHEMA_VERSION := 3
+const SCHEMA_VERSION := 4
 const MAX_BUFFER_LINES := 128
 var enabled := false
 var session_id := ""
@@ -47,6 +47,11 @@ var _completed_level_elapsed := 0.0
 var _capture_segment := 0
 var _disabled_at_us := -1
 var _disabled_level_elapsed := 0.0
+## Fixed 60 Hz sample stream (research_sampler.gd), one CSV per level attempt.
+var sampler: ResearchSampler
+## Returns the newest game state for the sample stream (set by main.gd).
+var sample_provider: Callable
+var _map_errors := PackedFloat32Array()
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -57,6 +62,7 @@ func _process(delta: float) -> void:
 	_frame_count += 1
 	_frame_time_sum += delta
 	_frame_time_max = maxf(_frame_time_max, delta)
+	_publish_sample_frame(delta)
 	if Time.get_ticks_msec() - _last_display_ms >= int(DISPLAY_INTERVAL_S * 1000.0): _write_display("periodic")
 
 # Frame rate and window state (mid-term report, Table A4): mouse events arrive
@@ -72,6 +78,12 @@ func _write_display(reason: String) -> void:
 		"frame_time_ms_max": _frame_time_max * 1000.0 if _frame_count > 0 else null,
 		"mouse_motion_events_per_s": float(_motion_events) / window_s if window_s > 0.0 else null,
 		"window_s": window_s}, true)
+	if sampler != null and sampler.is_running():
+		var sampled := sampler.stats()
+		info["sampler"] = {"rate_hz": sampled.rate_hz, "achieved_hz": sampled.achieved_hz, "rows": sampled.rows,
+			"held_share": sampled.held_share, "late_p95_us": sampled.get("late_p95_us"), "late_max_us": sampled.late_max_us,
+			"map_check_px_median": _median(_map_errors) if _map_errors.size() > 0 else null, "map_checks": _map_errors.size()}
+	_map_errors = PackedFloat32Array()
 	_write("display", info)
 	_last_display_ms = Time.get_ticks_msec()
 	_frame_count = 0
@@ -110,6 +122,7 @@ func set_enabled(value: bool) -> void:
 	if value:
 		begin_session(session_id if not session_id.is_empty() else _new_id("session"), _context)
 	else:
+		_stop_sampler("collection_disabled")
 		_write("capture_stopped", {"reason": "collection_disabled", "summary": get_summary()})
 		_flush()
 		_write_manifest()
@@ -139,12 +152,13 @@ func _open() -> void:
 	_last_click_us = -1
 	_capture_segment += 1
 	enabled = true
-	_write("capture_started" if _capture_segment == 1 else "capture_resumed", {
+	_write("capture_started" if _capture_segment == 1 else "capture_resumed", {"samples": "levels/<level_run_id>_samples_60hz.csv at %d Hz" % ResearchSampler.RATE_HZ,
 		"local_only": true, "scope": "local_player_game_window", "motion": "every_delivered_event",
 		"coordinates": "1600x900 viewport pixels", "context": _context,
 		"gap_wall_us": Time.get_ticks_usec() - _disabled_at_us if _disabled_at_us >= 0 else 0,
 		"gap_level_start_s": _disabled_level_elapsed if _disabled_at_us >= 0 else null,
 		"gap_level_end_s": _shift_elapsed if _disabled_at_us >= 0 else null})
+	if not _level.is_empty(): _start_sampler()
 	_flush()
 	_write_manifest()
 	if enabled: consent_changed.emit(true)
@@ -167,6 +181,7 @@ func begin_level(level_index: int, metadata: Dictionary = {}, level_run_id: Stri
 		"level_name": str(metadata.get("level_name", metadata.get("name", "Level %d" % level_number))),
 		"level_run_id": run_id, "level_attempt": attempt,
 		"log_path": "%s/%s/levels/%s_events.jsonl" % [LOG_DIRECTORY, session_id, run_id],
+		"samples_path": "%s/%s/levels/%s_samples_60hz.csv" % [LOG_DIRECTORY, session_id, run_id],
 		"capture_started_at_s": _shift_elapsed, "practice": bool(metadata.get("practice", level_number == 0))}
 	_level_file = _open_append(str(_level.log_path))
 	if _level_file == null:
@@ -185,6 +200,7 @@ func begin_level(level_index: int, metadata: Dictionary = {}, level_run_id: Stri
 	_frame_time_max = 0.0
 	_motion_events = 0
 	_write_display("level_started")
+	_start_sampler()
 	_flush()
 	_write_manifest()
 
@@ -198,6 +214,7 @@ func end_level(reason: String = "completed", summary: Dictionary = {}, final_sta
 			_finish_event(key, {"ended_at": _shift_elapsed, "solved": unresolved,
 				"outcome": "level_ended_unsolved" if unresolved != null else "level_ended",
 				"end_reason": reason, "censored": reason not in ["completed", "finished", "won", "lost"]})
+		_stop_sampler(reason)
 		_write("level_ended", {"reason": reason, "summary": summary,
 			"clicks": _level_clicks, "pointer_distance_px": _level_pointer_distance,
 			"events_observed": _closed_events.size(), "capture_duration_s": maxf(0.0, _shift_elapsed - float(_level.capture_started_at_s)),
@@ -209,6 +226,7 @@ func end_level(reason: String = "completed", summary: Dictionary = {}, final_sta
 				recorded["end_reason"] = reason
 		_write_manifest()
 	_completed_level_elapsed += _shift_elapsed
+	_stop_sampler(reason, false)
 	if _level_file != null: _level_file.close()
 	_level_file = null
 	_level_buffer.clear()
@@ -331,6 +349,7 @@ func log_pointer(pos: Vector2, delta: Vector2) -> void:
 	_pointer_distance += delta.length()
 	_level_pointer_distance += delta.length()
 	_motion_events += 1
+	_check_sample_mapping(pos)
 	_write("mouse_motion", {"x": pos.x, "y": pos.y, "dx": delta.x, "dy": delta.y, "distance_px": delta.length()})
 
 func log_mouse_button(event: InputEventMouseButton) -> void:
@@ -510,12 +529,58 @@ func _close_files() -> void:
 	_level_file = null
 
 func _fail_write() -> void:
+	_stop_sampler("write_failed", false)
 	_close_files()
 	enabled = false
 	_buffer.clear()
 	_level_buffer.clear()
 	log_error.emit("Research collection stopped: the local disk could not be written.")
 	consent_changed.emit(false)
+
+func _start_sampler() -> void:
+	if not enabled or _level.is_empty(): return
+	if sampler == null: sampler = ResearchSampler.new()
+	if sampler.is_running(): return
+	if not sampler.start(str(_level.samples_path), _session_start_us, _capture_segment):
+		_write("sampler_error", {"path": _level.samples_path, "reason": "file_open_failed"})
+		return
+	_publish_sample_frame(0.0)
+	_write("sampler_started", {"path": _level.samples_path, "rate_hz": ResearchSampler.RATE_HZ, "segment": _capture_segment,
+		"columns": ResearchSampler.columns(), "clock": "local_elapsed_us = scheduled sample time on this file's monotonic clock",
+		"source": "operating-system cursor read on a dedicated thread; game state from the latest frame"})
+
+func _stop_sampler(reason: String, log_row: bool = true) -> void:
+	if sampler == null or not sampler.is_running(): return
+	var result := sampler.stop()
+	result["reason"] = reason
+	if log_row and enabled: _write("sampler_stopped", result)
+
+func _publish_sample_frame(delta: float) -> void:
+	if sampler == null or not sampler.is_running(): return
+	var viewport := get_viewport()
+	if viewport != null:
+		sampler.publish_mapping(Vector2(DisplayServer.window_get_position()), viewport.get_screen_transform().affine_inverse(), Vector2(DisplayServer.window_get_size()))
+	var state: Dictionary = sample_provider.call() if sample_provider.is_valid() else {}
+	if not state.has("level_elapsed_s"): state["level_elapsed_s"] = _shift_elapsed
+	state["frame_ms"] = delta * 1000.0
+	state["fps"] = Engine.get_frames_per_second()
+	state["window_focused"] = DisplayServer.window_is_focused()
+	sampler.publish_frame(state)
+
+# Compares a delivered mouse event with the sampler's mapping of the operating
+# system cursor at the same moment. A cursor that keeps moving adds a little
+# distance; a wrong mapping shows up as a large, constant offset.
+func _check_sample_mapping(event_position: Vector2) -> void:
+	if sampler == null or not sampler.is_running() or _map_errors.size() >= 2000: return
+	var viewport := get_viewport()
+	if viewport == null: return
+	var window_px := Vector2(DisplayServer.mouse_get_position() - DisplayServer.window_get_position())
+	_map_errors.append((viewport.get_screen_transform().affine_inverse() * window_px).distance_to(event_position))
+
+static func _median(values: PackedFloat32Array) -> float:
+	var sorted := values.duplicate()
+	sorted.sort()
+	return sorted[sorted.size() / 2]
 
 func _new_id(prefix: String) -> String:
 	return "%s_%d_%s" % [prefix, int(Time.get_unix_time_from_system()), Crypto.new().generate_random_bytes(6).hex_encode()]

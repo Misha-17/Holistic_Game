@@ -9,7 +9,7 @@ const FORMAT := "beacon-bay-speaker-session-v1"
 var path := ""
 var bytes_written := 0 # Logical timeline bytes, not the sum of all speaker files.
 var error := ""
-var _tracks: Dictionary = {}
+var _tracks: Dictionary = {} # speaker key -> {writer, identity, file, peer_ids}
 var _manifest: Dictionary = {}
 var _timeline: FileAccess
 var _checkpoint_frames := 0
@@ -44,18 +44,31 @@ func open_file(destination: String, metadata: Dictionary) -> bool:
 	return error.is_empty()
 
 
+## Tracks are kept per person (identity.speaker_key, stable across reconnects;
+## 2.11), not per network id. A player who drops out and rejoins continues in
+## the same file; the time they were away is silence.
+static func speaker_key(peer_id: int, identity: Dictionary) -> String:
+	var key := str(identity.get("speaker_key", ""))
+	return key if not key.is_empty() else "peer_%d" % peer_id
+
+
 func update_speaker(peer_id: int, identity: Dictionary) -> bool:
 	if _closed: return false
-	if _tracks.has(peer_id):
-		var entry: Dictionary = _tracks[peer_id]
+	var key := speaker_key(peer_id, identity)
+	if _tracks.has(key):
+		var entry: Dictionary = _tracks[key]
+		if not (entry.peer_ids as Array).has(peer_id):
+			(entry.peer_ids as Array).append(peer_id)
+			log_metadata("speaker_reconnected", {"speaker_id": key, "peer_id": peer_id})
+			_save_manifest()
 		if entry.identity != identity:
 			entry.identity = identity.duplicate(true)
 			log_metadata("speaker_identity", identity)
 		return error.is_empty()
-	var filename := "peer_%d.wav" % peer_id
+	var filename := "%s.wav" % key.validate_filename()
 	var writer = Wav.new()
 	var details := identity.duplicate(true)
-	details.merge({"session_id": _manifest.get("session_id", ""), "speaker_id": "peer_%d" % peer_id,
+	details.merge({"session_id": _manifest.get("session_id", ""), "speaker_id": key,
 		"peer_id": peer_id, "timeline_start_frame": 0}, true)
 	if not writer.open_file(path.get_base_dir().path_join(filename), details):
 		error = str(writer.error)
@@ -64,7 +77,7 @@ func update_speaker(peer_id: int, identity: Dictionary) -> bool:
 		error = str(writer.error)
 		writer.close_file()
 		return false
-	_tracks[peer_id] = {"writer": writer, "identity": identity.duplicate(true), "file": filename}
+	_tracks[key] = {"writer": writer, "identity": identity.duplicate(true), "file": filename, "peer_ids": [peer_id]}
 	log_metadata("speaker_track_opened", details)
 	return _save_manifest()
 
@@ -74,12 +87,17 @@ func append_speakers(packets: Dictionary, identities: Dictionary, frames: int = 
 	if bytes_written + frames * 2 > Wav.MAX_DATA_BYTES:
 		error = "Voice session reached its recording limit."
 		return false
+	var by_key: Dictionary = {}
 	for peer_id in packets:
-		if not update_speaker(int(peer_id), identities.get(peer_id, {"peer_id": peer_id})): return false
-		_note_activity(int(peer_id), packets[peer_id], frames)
-	for peer_id in _tracks:
-		var writer = _tracks[peer_id].writer
-		var ok: bool = writer.append(packets[peer_id]) if packets.has(peer_id) else writer.append_silence(frames)
+		var identity: Dictionary = identities.get(peer_id, {"peer_id": peer_id})
+		if not update_speaker(int(peer_id), identity): return false
+		var key := speaker_key(int(peer_id), identity)
+		if by_key.has(key): continue # the same person twice in one frame (old and new connection)
+		by_key[key] = packets[peer_id]
+		_note_activity(key, int(peer_id), packets[peer_id], frames)
+	for key in _tracks:
+		var writer = _tracks[key].writer
+		var ok: bool = writer.append(by_key[key]) if by_key.has(key) else writer.append_silence(frames)
 		if not ok:
 			error = str(writer.error)
 			return false
@@ -143,10 +161,10 @@ func publish_checkpoint() -> bool:
 
 func _save_manifest() -> bool:
 	var tracks: Array[Dictionary] = []
-	for peer_id in _tracks:
-		var entry: Dictionary = _tracks[peer_id]
+	for key in _tracks:
+		var entry: Dictionary = _tracks[key]
 		var track: Dictionary = entry.identity.duplicate(true)
-		track.merge({"speaker_id": "peer_%d" % int(peer_id), "peer_id": peer_id,
+		track.merge({"speaker_id": key, "peer_id": int(entry.peer_ids.back()), "peer_ids": entry.peer_ids.duplicate(),
 			"file": entry.file, "start_frame": 0, "frames": int(entry.writer.bytes_written) / 2}, true)
 		tracks.append(track)
 	_manifest.tracks = tracks
@@ -186,7 +204,7 @@ func _end_level_segment() -> void:
 	_segment_open = false
 
 
-func _note_activity(peer_id: int, pcm: PackedByteArray, frames: int) -> void:
+func _note_activity(key: String, peer_id: int, pcm: PackedByteArray, frames: int) -> void:
 	var audible := false
 	for offset in range(0, pcm.size(), 2):
 		if absi(pcm.decode_s16(offset)) >= 256:
@@ -194,12 +212,12 @@ func _note_activity(peer_id: int, pcm: PackedByteArray, frames: int) -> void:
 			break
 	if not audible: return
 	var start := bytes_written / 2
-	var index := int(_last_activity.get(peer_id, -1))
-	if index >= 0 and start - int(_audio_activity[index].end_frame) <= RATE / 5:
+	var index := int(_last_activity.get(key, -1))
+	if index >= 0 and start - int(_audio_activity[index].end_frame) <= RATE / 5 and int(_audio_activity[index].peer_id) == peer_id:
 		_audio_activity[index].end_frame = start + frames
 	else:
-		_last_activity[peer_id] = _audio_activity.size()
-		_audio_activity.append({"speaker_id": "peer_%d" % peer_id, "start_frame": start, "end_frame": start + frames})
+		_last_activity[key] = _audio_activity.size()
+		_audio_activity.append({"speaker_id": key, "peer_id": peer_id, "start_frame": start, "end_frame": start + frames})
 
 
 static func recover_pending(folder: String) -> int:
@@ -222,10 +240,10 @@ static func recover_pending(folder: String) -> int:
 		for track: Dictionary in tracks: known[str(track.get("file", ""))] = true
 		var session_directory := DirAccess.open(session_folder)
 		for filename: String in session_directory.get_files():
-			if not filename.begins_with("peer_") or not filename.ends_with(".wav") or known.has(filename): continue
+			if not (filename.begins_with("peer_") or filename.begins_with("player_")) or not filename.ends_with(".wav") or known.has(filename): continue
 			var id_text := filename.trim_prefix("peer_").trim_suffix(".wav")
-			if not id_text.is_valid_int(): continue
-			var details: Dictionary = {"peer_id": int(id_text), "speaker_id": "peer_" + id_text}
+			if filename.begins_with("peer_") and not id_text.is_valid_int(): continue
+			var details: Dictionary = {"peer_id": int(id_text) if filename.begins_with("peer_") else -1, "speaker_id": filename.get_basename()}
 			var metadata_path := session_folder.path_join(filename.get_basename() + ".jsonl")
 			if FileAccess.file_exists(metadata_path):
 				var lines := FileAccess.get_file_as_string(metadata_path).split("\n", false)
@@ -239,7 +257,7 @@ static func recover_pending(folder: String) -> int:
 		var longest := 0
 		var valid_tracks: Array[Dictionary] = []
 		for track: Dictionary in tracks:
-			if str(track.get("file", "")) != "peer_%d.wav" % int(track.get("peer_id", -1)): continue
+			if str(track.get("file", "")) != "%s.wav" % str(track.get("speaker_id", "")).validate_filename(): continue
 			var file := FileAccess.open(session_folder.path_join(str(track.file)), FileAccess.READ)
 			if file == null or file.get_length() < 44: continue
 			track.frames = mini(Wav.MAX_DATA_BYTES / 2, maxi(0, (int(file.get_length()) - 44) / 2))

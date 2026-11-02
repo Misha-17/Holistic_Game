@@ -217,9 +217,11 @@ Score and level: `shift_started` (`duration` 330 s), `combo`, `combo_supply`,
 
 ## 12. Voice (`research/voice/team_<session>_<id>/`)
 
-`peer_<id>.wav` (16 kHz mono per speaker, all tracks start at frame 0),
+`player_<key>.wav` (16 kHz mono per person, stable across reconnects, all
+tracks start at frame 0; before 02.11 `peer_<id>.wav` per connection),
 `session.json` (tracks, consent per peer, `level_segments` with start/end
-frames, `audio_activity` = speech intervals per speaker in frames),
+frames, `audio_activity` = speech intervals per speaker in frames, with the
+`peer_id` at that moment),
 `timeline.jsonl` (`clock_sync` rows pair `audio_frame` with `level_elapsed_s`
 about once a second; use them to put speech on the level clock).
 

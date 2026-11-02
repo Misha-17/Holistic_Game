@@ -895,7 +895,8 @@ func _draw_station(item: Dictionary) -> void:
 	var bright: bool = chosen or hovered or role_filter == item.kind
 	_panel(rect, Color("234851f0") if bright else Color("17363dda"), GOLD if chosen else (color if bright else Color("5a7473")), 3 if chosen else (2 if bright else 1))
 	_role_icon(str(item.kind), rect.position + Vector2(19, 19), color, 1.2)
-	_text(str(item.ready), rect.position + Vector2(41, 27), 20, CREAM if int(item.ready) > 0 else MUTED)
+	# 2.11: a teammate's station does not show how many of their crews are free.
+	if _owned(str(item.kind)): _text(str(item.ready), rect.position + Vector2(41, 27), 20, CREAM if int(item.ready) > 0 else MUTED)
 	if chosen:
 		var pulse: float = 0.0 if reduced_motion else (sin(_elapsed * 6.0) + 1.0) * 2.0
 		draw_rect(rect.grow(4 + pulse), GOLD, false, 2)
@@ -1116,7 +1117,8 @@ func _draw_crew_rows(item: Dictionary) -> void:
 		var color: Color = ROLE_COLOR.get(kind, CREAM)
 		draw_rect(area, Color(color, .10))
 		draw_rect(Rect2(area.position, Vector2(3, area.size.y)), color)
-		var state := "ON SCENE" if str(unit.state) == "working" else "EN ROUTE"
+		# 2.11: teammates' crews show who is assigned, not where they are.
+		var state := ("ON SCENE" if str(unit.state) == "working" else "EN ROUTE") if bool(row.own) else ""
 		var label := "%s  %s" % [ROLE_SHORT.get(kind, kind.to_upper()), str(unit.get("crew_name", unit.get("name", "Crew")))]
 		var text_width := area.size.x - (100.0 if bool(row.can_withdraw) else 16.0) - 62.0
 		_btext(_fit(label, text_width, 13), area.position + Vector2(9, 17), 13, color)

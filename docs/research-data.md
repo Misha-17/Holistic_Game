@@ -2,9 +2,8 @@
 
 Collection starts only after the player enables it (asked once per session, at
 the first level). Disabling collection stops writing observations immediately.
-Files are written on each recorder's computer. In sessions on the dedicated
-study server they are also uploaded there automatically (see "Collecting the
-files" below).
+Solo: files are written on the player's computer. Co-op (from 02.11): only the
+session leader's computer writes files; see "Collecting the files" below.
 Mouse input belongs to that local player; shared game actions identify their
 actor separately with `data.actor_peer`. Voice consent and speaker files are
 managed by the voice recorder.
@@ -122,7 +121,6 @@ Client feedback 01.11. Full definitions of every variable: [VARIABLES.md](VARIAB
   rate, so every PC writes 60 rows per second, including when nothing happens.
   Each row also carries the selection, the object under the cursor, the frame
   rate and the task load below. `held = 1` marks a slot the thread missed.
-  The file is uploaded like the event logs (append mode).
 - Task load per player (in every sample and in a 1 Hz `task_state` row):
   calls that need the player's own department vs not, own calls dispatched vs
   decision pending, urgent and critical calls, own idle crews, own road
@@ -136,12 +134,48 @@ Client feedback 01.11. Full definitions of every variable: [VARIABLES.md](VARIAB
 - `mouse_motion` rows are unchanged. They follow the frame rate; use the
   60 Hz file for anything rate-based.
 
-## Collecting the files
+## Collecting the files (02.11: session leader only)
 
-On the dedicated server, uploads land in
-`research_uploads/<session_id>/<pc_id>/events/...` and `.../voice/...` next to
-the server executable (or `--research-dir=<path>`). Each computer sends only
-its own files and its own voice track; `pc_id` is a random id per computer.
-Logs and WAV files are sent incrementally after each level, so a session is
-complete on the server shortly after the last level. Download everything with
-`tools/download_research.ps1 -Server <ip>` or `tools/download_research.sh <ip>`.
+In co-op only the **session leader's** computer stores study files: the LAN
+host, or on the Azure server the first player who joined (while they are
+disconnected the next player stands in). Nothing is stored on the server and
+nothing is uploaded. Collect everything from the leader's
+`research/` folder (Settings > Research > OPEN RECORDINGS):
+
+```text
+research/<session_id>/
+  session_events.jsonl, levels/<level_run_id>_events.jsonl,
+  levels/<level_run_id>_samples_60hz.csv, manifest.json   leader: all game events + own input
+  questionnaires/                                         leader's answers
+  players/<player_key>/                                   one folder per other player
+    player.json                                           name, departments, every peer id
+    session_events.jsonl, levels/..., manifest.json       that player's own input only
+    questionnaires/
+research/voice/team_<session_id>_<id>/                    all speakers, one track per person
+```
+
+A non-leader's files hold only rows about that player's own input and view
+(`mouse_motion`, `mouse_button`, `key_input`, `ui_action`, `crew_selected`,
+`crew_deselected`, `department_filter`, `inspection`, `command_requested`,
+`task_state`, `context`, `display`, consent/briefing/microphone rows, plus the
+capture/level/sampler lifecycle) and their 60 Hz samples. Calls, dispatches,
+hazards and outcomes are recorded once, in the leader's files; join on
+`level_run_id` and `level_elapsed_s` (`analysis/beacon_logs.py` merges them
+automatically). Their `manifest.json` has `"own_input_only": true`.
+
+`player_key` is a random id stored on each computer (`user://player_key.txt`)
+and stays the same across reconnects; `peer_id` in the rows is the network id
+at that moment and changes when a player reconnects.
+
+If the leader cannot be reached, a player's data waits in memory (up to 64 MB)
+and is sent when they are back. If the leader leaves for good, the next player
+becomes leader and stores files from then on.
+
+## Reconnects (02.11)
+
+Departments are fixed while a level runs (and on the results screen). A player
+who drops out keeps their seat and departments until the next level starts; on
+rejoin they get them back, and nobody else's departments change. Players who
+did not return are dropped from the split when the next level starts. A new
+player who arrives mid-level has no department until then. The capture of a
+reconnecting player continues in the same level file (same `level_run_id`).

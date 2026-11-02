@@ -63,7 +63,7 @@ def find_speech(level: PlayerLevel, voice_dirs: list[Path]) -> list[tuple[float,
         session = json.loads((folder / "session.json").read_text(encoding="utf-8"))
         own_recorder = int(session.get("peer_id", 0)) == level.peer_id
         consent = session.get("permissions", {}).get(str(level.peer_id), {}).get("consent", False)
-        has_track = any(int(t.get("peer_id", 0)) == level.peer_id for t in session.get("tracks", []))
+        has_track = any(level.peer_id in [int(p) for p in t.get("peer_ids", [t.get("peer_id", 0)])] for t in session.get("tracks", []))
         in_level = any(s.get("level_run_id") == level.level_run_id for s in session.get("level_segments", []))
         if has_track and in_level and (own_recorder or consent):
             return speech_activity(folder, level.level_run_id).get(level.peer_id, [])

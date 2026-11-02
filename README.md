@@ -2,6 +2,14 @@
 
 A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engineering and Police each have four crews in every level; calls need several departments working together.
 
+## Playtest 02.11 update (0.9.3, network protocol 14)
+
+- **Reconnecting keeps everyone's departments.** Each computer has a stable player key (`user://player_key.txt`). If a player drops out during a level (or on the results screen), nobody else's departments change: the missing player's seat and departments wait for them, their crews keep working but get no new orders, and when they rejoin they get the same seat and departments back. Departments are re-split only when the next level starts, if the player has not come back. A new player who arrives mid-level waits for the next level instead of taking anyone's crews. In the lobby, joining and leaving re-split as before.
+- **One voice track per person.** Tracks are named after the player (`player_<key>.wav`), not the network connection, so a player who reconnects continues in the same track (the time they were away is silence). Before, every reconnect opened a new track as long as the whole session.
+- **Only the session leader's computer stores study files.** The leader is the LAN host, or on the Azure server the first player in the room (they stay leader after a dropout; while they are away the next player stands in). The leader saves the game log, all voice tracks and its own input as before. Other players' games save nothing locally: their own mouse, clicks, keys, selections, 60 Hz samples and questionnaire answers are sent over the game connection (through the server) to the leader, into `research/<session>/players/<player key>/` with the same file names. Shared game events are recorded once, by the leader. Make sure the researcher's (most stable) computer joins the room first.
+- **Teammates' crew status is hidden.** Their crew cards in the bottom bar say TEAMMATE instead of READY / EN ROUTE / ON SCENE, their stations on the map show no free-crew count, and on call cards their crews are listed without a state. Their vehicles still drive on the map.
+- **No upload to the Azure server** any more (removed with `tools/download_research.*`). The server stores nothing.
+
 ## Research update (0.9.2, client feedback 01.11)
 
 - **Fixed 60 Hz recording.** Each level also writes `levels/<level_run_id>_samples_60hz.csv`: a background thread reads the cursor 60 times a second on a fixed clock, whatever the frame rate, plus the selection, the object under the cursor and the player's task load. Before, mouse rows came once per rendered frame, so a 30 fps PC recorded half as much as a 75 fps PC, and every PC recorded less when calls piled up.
@@ -19,7 +27,7 @@ A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engi
 - **Microphone check** after enabling voice at level entry, plus an input meter in Settings → Sounds.
 - **Study PC check:** Settings → Research → **CHECK THIS STUDY PC**. Five-second test of window size, scaling, frame rate, microphone and recording, with OK / CHECK / FIX lines; saved to `research/pc_checks/`. During play a `display` row (fps, window, scaling) is logged every 10 s.
 - **NASA-TLX (raw):** opens after the last level (Level 6, won or lost) and from **SURVEY · NASA-TLX** on the title screen. Saved to `research/<session>/questionnaires/`.
-- **Automatic upload to the study server.** In sessions on the dedicated (Azure) server each player's computer sends its own event logs, survey answers and own voice track to the server in the background after each level (slowed down while playing, resumes after disconnects or restarts). Players do nothing. The server stores them in `research_uploads/<session>/<pc_id>/` next to the server executable; the researcher downloads them with `tools/download_research.ps1` (Windows) or `tools/download_research.sh`.
+- ~~Automatic upload to the study server~~ (removed 02.11: only the session leader's computer stores files).
 - **Fullscreen in the editor:** Godot 4.4+ runs the game inside the editor's Game tab, where fullscreen cannot work and the game looks small. Untick **Embed Game on Next Play** in the Game tab's ⋮ menu (or Editor Settings → Run → Window Placement → Game Embed Mode = Disabled). Exported builds are not affected.
 
 ## Menu and camera update (0.9.1)
@@ -136,11 +144,11 @@ Use **Settings → Research** (voice chat itself is under Settings → Sounds). 
 | Setting | Effect |
 | --- | --- |
 | Voice chat | Keeps the microphone open until disabled, including in menus. Starts off each launch. |
-| Allow team recording | Allows teammates to include your transmitted voice in their local files. |
-| Save team voice | Saves one aligned WAV per speaker, with consenting teammates, in a single session folder across levels and retries. |
-| Record my mouse | Saves your own in-game movements, every mouse button press/release and wheel input in a local JSONL file. |
+| Allow team recording | Allows the session leader's computer to include your transmitted voice in its files. |
+| Save team voice | On the session leader's computer (or solo): one aligned WAV per speaker, with consenting teammates, in a single session folder across levels and retries. |
+| Record my mouse | Records your own in-game movements, every mouse button press/release and wheel input. Solo/leader: a local JSONL file. Other players: sent to the session leader's computer. |
 
-**Open recordings** opens the game data folder. Mouse/game logs are under `research/`; audio and its timing sidecar are under `research/voice/`. No recordings upload to Azure. The server relays voice but does not record. Only speech sent using in-game voice is captured; Discord/Teams calls and system audio are not included. Teammates' mouse input is never collected on your computer.
+**Open recordings** opens the game data folder. Mouse/game logs are under `research/`; audio and its timing sidecar are under `research/voice/`. In co-op only the session leader's computer saves files; teammates' own input arrives there under `research/<session>/players/<player key>/`. Nothing is stored on the Azure server: it relays voice and study data but does not record. Only speech sent using in-game voice is captured; Discord/Teams calls and system audio are not included. Teammates' mouse input is stored on your computer only if you are the session leader.
 
 Level 0 can be recorded with consent; the separate legacy guided tutorial is excluded. Every level attempt has a unique ID and a separate mouse/event JSONL file, plus one authoritative session timeline. Events include scheduled/actual starts, ends, responsible crew, and resolved, expired, handed-off or unfinished outcomes. Abandoned or partially observed events are marked explicitly. Consent gaps and late joins are recorded without inventing missing outcomes. See [recording format and playback](docs/RECORDING_FORMAT.md).
 
@@ -156,7 +164,7 @@ The game contains no classifier, workload model, adaptive assistance or required
 
 ## Build and verification
 
-This build uses network protocol **13** (30.10: research upload channel, survey and session consent; 5 ENet channels). All co-op clients and the server must use the same build; redeploy the Azure server.
+This build uses network protocol **14** (02.11: player keys, reserved departments, study data relayed to the session leader; 5 ENet channels). All co-op clients and the server must use the same build; redeploy the Azure server.
 
 Run `powershell -ExecutionPolicy Bypass -File tools/package.ps1` on Windows; pass `-GodotConsole` and `-GodotGui` for other engine paths. It builds the Windows portable package, Linux-server resource pack and clean source ZIP under `artifacts/`. The portable build includes the official Godot runtime because export templates were unavailable locally; its license texts are in `licenses/`.
 
@@ -178,7 +186,8 @@ godot --headless --path . --script tests/test_mic_check.gd
 godot --headless --path . --script tests/test_nasa_tlx.gd
 godot --headless --path . --script tests/test_sample_stream.gd
 godot --headless --path . --script tests/test_pc_check.gd
-godot --headless --path . --script tests/test_research_upload.gd
+godot --headless --path . --script tests/test_reconnect_roles.gd
+godot --headless --path . --script tests/test_leader_storage.gd
 godot --headless --path . --script tests/test_role_assignment.gd
 godot --headless --path . --script tests/test_road_events.gd
 godot --headless --path . --script tests/test_levels.gd
@@ -192,6 +201,7 @@ godot --headless --path . --script tests/test_session_lifecycle.gd
 godot --headless --path . --script tests/test_snapshot_transport.gd
 python tests/run_voice_tests.py --godot /path/to/godot
 python tests/run_main_network_tests.py --godot /path/to/godot
+python tests/run_leader_storage_tests.py --godot /path/to/godot
 python tests/run_main_network_tests.py --briefings --godot /path/to/godot
 ```
 

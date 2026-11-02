@@ -44,7 +44,6 @@ func run() -> void:
 	game.network.hosting = false
 	game.network.dedicated = true # a study session on the dedicated server
 	game.network.roster = {1: 0}
-	game.uploader.enabled = true
 
 	game._receive_snapshot(snapshot("level6_run", 5, 95.0))
 	var session_path: String = game.research.log_path
@@ -65,11 +64,8 @@ func run() -> void:
 	game._receive_snapshot(snapshot("level6_retry", 5, 0.0))
 	check(game.capture_run_id == "level6_retry", "A new run ID starts a new level capture")
 	game._stop_capture()
-	var queued: Array = game.uploader._dirty
-	var remotes: Array[String] = []
-	for local in queued: remotes.append(str(game.uploader._files[local].remote))
-	check(remotes.any(func(r): return r.ends_with("/events/session_events.jsonl")), "Study-server session queues its event log for upload")
-	check(remotes.all(func(r): return r.begins_with(session_path.get_base_dir().get_file() + "/pc_")), "Remote paths are grouped by session and computer")
+	check(FileAccess.file_exists(session_path), "The session leader keeps its log on this computer")
+	check(game.relay.pending_bytes() == 0, "The leader sends nothing anywhere")
 
 	var rows := records(session_path)
 	var level_starts := 0

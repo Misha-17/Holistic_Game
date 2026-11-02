@@ -10,8 +10,16 @@ const MAX_BUFFER_LINES := 128
 var enabled := false
 var session_id := ""
 var log_path := ""
-var _file: FileAccess
-var _level_file: FileAccess
+var _file # FileAccess, or ResearchRelay.RelayFile when this is not the leader's computer
+var _level_file
+## 2.11: set when this computer is not the session leader. Then nothing is
+## written here: this player's own rows go to the leader through the relay, and
+## shared game events (which the leader records once) are skipped.
+var relay: ResearchRelay
+## The rows a non-leader still records: this player's own input and view.
+const LOCAL_EVENTS := ["mouse_motion", "mouse_button", "key_input", "ui_action", "crew_selected", "crew_deselected",
+	"department_filter", "inspection", "command_requested", "task_state", "context", "display", "collection_choice",
+	"briefing_completed", "microphone_check", "pc_check", "voice_recording", "clock_correction", "chaos_state_at_capture_start"]
 var _context: Dictionary = {}
 var _level: Dictionary = {}
 var _levels: Array[Dictionary] = []
@@ -134,7 +142,7 @@ func set_enabled(value: bool) -> void:
 
 func _open() -> void:
 	var directory := "%s/%s/levels" % [LOG_DIRECTORY, session_id]
-	var err := DirAccess.make_dir_recursive_absolute(directory)
+	var err := DirAccess.make_dir_recursive_absolute(directory) if relay == null else OK
 	if err != OK and err != ERR_ALREADY_EXISTS:
 		log_error.emit("Could not create the local research folder.")
 		return
@@ -153,7 +161,8 @@ func _open() -> void:
 	_capture_segment += 1
 	enabled = true
 	_write("capture_started" if _capture_segment == 1 else "capture_resumed", {"samples": "levels/<level_run_id>_samples_60hz.csv at %d Hz" % ResearchSampler.RATE_HZ,
-		"local_only": true, "scope": "local_player_game_window", "motion": "every_delivered_event",
+		"local_only": relay == null, "stored_by": "this computer" if relay == null else "session leader's computer (players/<player key>/)",
+		"own_input_only": relay != null, "scope": "local_player_game_window", "motion": "every_delivered_event",
 		"coordinates": "1600x900 viewport pixels", "context": _context,
 		"gap_wall_us": Time.get_ticks_usec() - _disabled_at_us if _disabled_at_us >= 0 else 0,
 		"gap_level_start_s": _disabled_level_elapsed if _disabled_at_us >= 0 else null,
@@ -263,7 +272,7 @@ func _advance_clock(value: float) -> void:
 	_shift_elapsed = value
 
 func observe_state(state: Dictionary) -> void:
-	if not enabled or _level.is_empty(): return
+	if not enabled or _level.is_empty() or relay != null: return
 	# Saved snapshots wrap numeric values to retain exact precision. Network
 	# snapshots already contain native values; this accepts either form.
 	state = _decode_snapshot(state)
@@ -374,6 +383,7 @@ func log_click(pos: Vector2) -> void:
 
 func log_event(event_type: String, data: Dictionary = {}) -> void:
 	if not enabled: return
+	if relay != null and not LOCAL_EVENTS.has(event_type): return # the leader records shared game events
 	var enriched := data.duplicate(true)
 	var key := _event_key(event_type, data)
 	if not key.is_empty():
@@ -503,7 +513,8 @@ func _flush() -> void:
 
 func _write_manifest() -> void:
 	if not enabled: return
-	var manifest := FileAccess.open("%s/%s/manifest.json" % [LOG_DIRECTORY, session_id], FileAccess.WRITE)
+	var manifest_path := "%s/%s/manifest.json" % [LOG_DIRECTORY, session_id]
+	var manifest = FileAccess.open(manifest_path, FileAccess.WRITE) if relay == null else relay.open_file(manifest_path, false)
 	if manifest == null:
 		_fail_write()
 		return
@@ -511,13 +522,15 @@ func _write_manifest() -> void:
 		"session_events": log_path, "level_files": _levels, "context": _sanitize(_context),
 		"level_files_mirror_session_events": true,
 		"join_key": ["session_id", "sequence"], "voice_join_key": ["capture_session_id", "level_run_id"],
+		"own_input_only": relay != null,
 		"clock": {"level_elapsed_s": "active simulation seconds within this attempt", "session_elapsed_s": "sum of actual level elapsed times, including retries", "local_elapsed_us": "monotonic wall clock since session capture first started"},
 		"updated_utc": Time.get_datetime_string_from_system(true)}, "\t"))
-	var error := manifest.get_error()
+	var error: int = manifest.get_error()
 	manifest.close()
 	if error != OK: _fail_write()
 
-func _open_append(path: String) -> FileAccess:
+func _open_append(path: String):
+	if relay != null: return relay.open_file(path, true)
 	var file := FileAccess.open(path, FileAccess.READ_WRITE if FileAccess.file_exists(path) else FileAccess.WRITE)
 	if file != null: file.seek_end()
 	return file
@@ -541,6 +554,7 @@ func _start_sampler() -> void:
 	if not enabled or _level.is_empty(): return
 	if sampler == null: sampler = ResearchSampler.new()
 	if sampler.is_running(): return
+	sampler.relay = relay
 	if not sampler.start(str(_level.samples_path), _session_start_us, _capture_segment):
 		_write("sampler_error", {"path": _level.samples_path, "reason": "file_open_failed"})
 		return

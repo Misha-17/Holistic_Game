@@ -82,6 +82,14 @@ var tlx_form: Control
 var tlx_source := ""
 var _tlx_started_ms := 0
 var _tlx_offered_key := ""
+## 4.11 (Andrei): leaving to the main menu from the results screen first asks
+## whether to fill in the NASA-TLX, so a session that ends before Level 6 still
+## gets a survey. leave_prompt shows the question; _leaving_after_tlx is set
+## while the survey is open on the way out (the player then ignores the next
+## level a co-op host starts, and leaves once the survey is done or skipped).
+var leave_prompt := false
+var _leaving_after_tlx := false
+var _tlx_submitted_session := ""
 var last_capture_session_id := ""
 var selected := -1
 var selected_unit := -1
@@ -679,8 +687,58 @@ func _open_tlx(source: String) -> void:
 	_update_visibility()
 
 func _close_tlx() -> void:
+	if _leaving_after_tlx:
+		_leave_to_title()
+		return
 	screen = previous_screen if previous_screen in ["title", "results"] else "title"
 	_update_visibility()
+
+func _tlx_session() -> String:
+	return capture_session_id if not capture_session_id.is_empty() else last_capture_session_id
+
+## Ask before leaving only if this session has no survey yet.
+func _should_ask_tlx_on_leave() -> bool:
+	if dedicated_server or tutorial_active: return false
+	var session := _tlx_session()
+	return not session.is_empty() and session != _tlx_submitted_session
+
+## MAIN MENU on the results screen (or in settings opened from it).
+func _request_leave_to_title() -> void:
+	if screen == "settings": screen = "results"
+	if _should_ask_tlx_on_leave():
+		leave_prompt = true
+		_update_visibility()
+		return
+	_leave_to_title()
+
+func _leave_to_title() -> void:
+	leave_prompt = false
+	_submit_rating()
+	screen = "title"
+	_update_visibility()
+	if not network.active:
+		_leaving_after_tlx = false
+		return
+	# Answers relayed to the session leader must leave before the connection closes.
+	var sent: int = relay.flush_now() if relay != null else 0
+	_leaving_after_tlx = true
+	if sent > 0 or (relay != null and relay.pending_bytes() > 0):
+		await get_tree().create_timer(0.6).timeout
+		if relay != null: relay.flush_now()
+		await get_tree().create_timer(0.3).timeout
+	_leave_network()
+	_leaving_after_tlx = false
+
+func _draw_leave_prompt() -> void:
+	buttons.clear()
+	_overlay()
+	var panel := Rect2(400, 290, 640, 300)
+	_panel(panel, INK, TEAL)
+	_text("BEFORE YOU GO", panel.position + Vector2(40, 52), 13, TEAL)
+	_text("Fill in the NASA-TLX survey?", panel.position + Vector2(40, 100), 30, CREAM)
+	_wrap("Six quick sliders about this play session. Please answer them if you are finishing for today.", panel.position + Vector2(40, 140), panel.size.x - 80, 17, MUTED, 25)
+	_button("leave_tlx_no", "NO, GO TO MAIN MENU", Rect2(panel.position + Vector2(40, 222), Vector2(270, 50)), PANEL_LIGHT, CREAM, 15)
+	_button("leave_tlx_yes", "YES, FILL IT IN", Rect2(panel.position + Vector2(330, 222), Vector2(270, 50)), TEAL, INK, 16)
 
 func _draw_tlx() -> void:
 	_draw_page_header("", "STUDY QUESTIONNAIRE · NASA-TLX")
@@ -689,9 +747,10 @@ func _draw_tlx() -> void:
 	_text("Your answers are saved with this session's study files." if not _sends_to_leader() else "Your answers are sent to the session leader's computer with this session's study files.", Vector2(80, 262), 14, MUTED)
 	var done: int = tlx_form.answered_count()
 	var ready: bool = tlx_form.all_answered()
-	_button("tlx_later", "NOT NOW" if tlx_source == "after_last_level" else "<  BACK", Rect2(80, 790, 300, 48), PANEL_LIGHT, CREAM, 15)
+	var later_label := "SKIP, GO TO MAIN MENU" if _leaving_after_tlx else ("NOT NOW" if tlx_source == "after_last_level" else "<  BACK")
+	_button("tlx_later", later_label, Rect2(80, 790, 300, 48), PANEL_LIGHT, CREAM, 15)
 	if ready:
-		_button("tlx_submit", "SUBMIT ANSWERS", Rect2(1060, 790, 300, 48), TEAL, INK, 16)
+		_button("tlx_submit", "SUBMIT AND LEAVE" if _leaving_after_tlx else "SUBMIT ANSWERS", Rect2(1060, 790, 300, 48), TEAL, INK, 16)
 	else:
 		_panel(Rect2(1060, 790, 300, 48), Color(PANEL, 0.6))
 		_text("Answer all six (%d / 6)" % done, Vector2(1104, 821), 15, MUTED)
@@ -699,7 +758,8 @@ func _draw_tlx() -> void:
 func _submit_tlx() -> void:
 	if not tlx_form.all_answered(): return
 	var answers: Dictionary = tlx_form.answers()
-	var session := capture_session_id if not capture_session_id.is_empty() else last_capture_session_id
+	var session := _tlx_session()
+	_tlx_submitted_session = session
 	var record := {"schema": "beacon-bay-nasa-tlx-v1", "instrument": "NASA-TLX raw (unweighted), 0-100 in steps of 5",
 		"capture_session_id": session if not session.is_empty() else null, "source": tlx_source,
 		"peer_id": multiplayer.get_unique_id() if network.active else 1, "departments": network.departments_for(),
@@ -1389,6 +1449,8 @@ func _draw_all(canvas: CanvasItem) -> void:
 			if screen == "pause": _draw_pause()
 			if screen == "results": _draw_results()
 			if screen == "help": _draw_help()
+	if leave_prompt and screen == "results": _draw_leave_prompt()
+	elif leave_prompt: leave_prompt = false # the screen changed underneath (e.g. the host started a level)
 	if toast_left > 0 and screen != "title":
 		var width: float = minf(1040, font.get_string_size(toast_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x + 56)
 		_panel(Rect2((1440-width)/2, 104, width, 40), Color(INK, 0.8), TEAL)
@@ -2478,7 +2540,8 @@ func _input(event: InputEvent) -> void:
 			KEY_F11:
 				_toggle_fullscreen()
 			KEY_ESCAPE:
-				if screen=="game" and _call_card_open(): _close_call_card()
+				if leave_prompt: _action("leave_tlx_cancel")
+				elif screen=="game" and _call_card_open(): _close_call_card()
 				elif screen=="game": _action("pause")
 				elif screen in ["pause","help"]: _action("unpause")
 				elif screen=="settings": _action("settings_back")
@@ -2604,9 +2667,14 @@ func _action(id: String) -> void:
 	match id:
 		"lobby_settings": previous_screen="lobby"; screen="settings"; settings_tab="sounds"
 		"results_settings": previous_screen="results"; screen="settings"
-		"results_title":
-			_submit_rating()
-			screen="title"; _leave_network()
+		"results_title": _request_leave_to_title()
+		"leave_tlx_yes":
+			leave_prompt = false
+			_leaving_after_tlx = true
+			_open_tlx("leaving_session")
+		"leave_tlx_no": _leave_to_title()
+		"leave_tlx_cancel":
+			leave_prompt = false
 		"map_overview": _toggle_overview()
 		"minimap_toggle": minimap_hidden = not minimap_hidden
 		"map_in": _zoom_map(1.0, MAP_VIEW.get_center())
@@ -3250,6 +3318,7 @@ func _dispatch_fx(event: Dictionary) -> void:
 func _receive_snapshot(data: Dictionary) -> void:
 	_route_cache_until = 0
 	if network.hosting: return
+	if _leaving_after_tlx: return # on the way out: the next level does not pull this player in
 	var next_screen:=str(data.get("screen","game"))
 	var incoming_run := str(data.get("level_run_id", ""))
 	if network.active and next_screen == "game" and not capture_run_id.is_empty() and not incoming_run.is_empty() and incoming_run != capture_run_id and not _announced_remote_runs.has(incoming_run):
@@ -3343,6 +3412,12 @@ func _network_ended() -> void:
 	_stop_capture()
 	if screen=="results": _submit_rating()
 	_restore_guest_progress()
+	if _leaving_after_tlx:
+		# The room closed while this player fills in the survey on the way out:
+		# keep the survey open (answers are then saved on this computer).
+		if screen != "tlx": _leaving_after_tlx = false
+		return
+	leave_prompt = false
 	screen="lobby"
 	_toast(network.status)
 

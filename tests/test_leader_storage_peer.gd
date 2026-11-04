@@ -103,6 +103,11 @@ func run_leader() -> void:
 	check(not '"event":"incident_spawned"' in events and not '"event":"dispatch"' in events, "the guest's files hold only their own input")
 	check(has_samples, "the guest's 60 Hz samples are stored")
 	check(FileAccess.file_exists(folder + "/player.json"), "player.json identifies the guest")
+	# 4.11: the guest leaves from the results screen and fills in the survey
+	# on the way out; the answers must arrive here before they disconnect.
+	if await wait_for(func(): return marked("guest_survey"), "guest left with a survey", 20.0):
+		var answers := DirAccess.get_files_at(folder + "/questionnaires") if DirAccess.dir_exists_absolute(folder + "/questionnaires") else PackedStringArray()
+		check(answers.size() == 1, "the guest's NASA-TLX from leaving arrived on the leader's computer (%d)" % answers.size())
 	var own := FileAccess.get_file_as_string(game.research.log_path)
 	check(own.contains('"event":"shift_started"') or own.contains('"event":"level_started"'), "the leader's own log has the shared game events")
 	mark("done")
@@ -138,6 +143,16 @@ func run_guest() -> void:
 	await move_mouse(12)
 	await create_timer(1.2).timeout # one logger flush
 	mark("guest_done")
+	if await wait_for(func(): return game.screen == "results", "results on the guest", 20.0):
+		game._action("results_title")
+		check(game.leave_prompt, "leaving asks about the survey")
+		game._action("leave_tlx_yes")
+		for id in ["mental_demand", "physical_demand", "temporal_demand", "performance", "effort", "frustration"]:
+			game.tlx_form.set_answer(id, 55)
+		game._action("tlx_submit")
+		check(game.screen == "title", "after the survey the guest is on the main menu")
+		await wait_for(func(): return not game.network.active, "guest leaves the room after sending", 5.0)
+		mark("guest_survey")
 	await wait_for(func(): return marked("done"), "leader checked files", 20.0)
 	var sessions := 0
 	if DirAccess.dir_exists_absolute("user://research"):
@@ -145,7 +160,6 @@ func run_guest() -> void:
 			if name.begins_with("session_"): sessions += 1
 	check(sessions == 0, "the guest wrote no research session folder on its own computer")
 	check(game.relay.sent_bytes > 0, "the guest sent its data to the leader")
-	await wait_for(func(): return not game.network.active, "server closes", 10.0)
 
 func finish() -> void:
 	if role != "server":

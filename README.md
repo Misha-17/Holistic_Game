@@ -2,6 +2,11 @@
 
 A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engineering and Police each have four crews in every level; calls need several departments working together.
 
+## Survey on the way out (04.11)
+
+- **MAIN MENU on the results screen asks about the NASA-TLX first** (also from settings opened there): **YES, FILL IT IN** opens the survey and then goes to the main menu (submitted or skipped); **NO, GO TO MAIN MENU** goes straight there; Esc stays on the results screen. Sessions that end before Level 6 no longer depend on players remembering the title-screen survey button. A session that already has a survey (for example after Level 6) is not asked again. The answers are saved with `"source": "leaving_session"`.
+- In co-op a player filling in the survey on the way out is not pulled into the next level the host starts, and stays connected until their answers have reached the session leader's computer.
+
 ## Playtest 02.11 update (0.9.3, network protocol 14)
 
 - **Reconnecting keeps everyone's departments.** Each computer has a stable player key (`user://player_key.txt`). If a player drops out during a level (or on the results screen), nobody else's departments change: the missing player's seat and departments wait for them, their crews keep working but get no new orders, and when they rejoin they get the same seat and departments back. Departments are re-split only when the next level starts, if the player has not come back. A new player who arrives mid-level waits for the next level instead of taking anyone's crews. In the lobby, joining and leaving re-split as before.
@@ -188,6 +193,7 @@ godot --headless --path . --script tests/test_sample_stream.gd
 godot --headless --path . --script tests/test_pc_check.gd
 godot --headless --path . --script tests/test_reconnect_roles.gd
 godot --headless --path . --script tests/test_leader_storage.gd
+godot --headless --path . --script tests/test_leave_survey.gd
 godot --headless --path . --script tests/test_role_assignment.gd
 godot --headless --path . --script tests/test_road_events.gd
 godot --headless --path . --script tests/test_levels.gd

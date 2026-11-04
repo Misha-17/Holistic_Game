@@ -109,7 +109,7 @@ Every row now has `unix_ms` (wall clock, milliseconds) next to the game clock.
 
 NASA-TLX (raw, six subscales 0-100 in steps of 5, `raw_tlx` = mean) is saved as
 `research/<session>/questionnaires/nasa_tlx_<unix_ms>.json` with `source`
-(`after_last_level` or `title_button`), `last_level_number`, `last_level_won`,
+(`after_last_level`, `title_button`, or `leaving_session` when the player chose YES on leaving from the results screen, 04.11), `last_level_number`, `last_level_won`,
 `departments` and `seconds_to_complete`.
 
 ## Additions 01.11 (schema 4, build 0.9.2)

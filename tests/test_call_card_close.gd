@@ -105,6 +105,7 @@ func run() -> void:
 	check((await button_ids()).has("results_title"), "Settings opened from results also has MAIN MENU")
 	game._action("settings_back")
 	game._action("results_title")
+	if game.leave_prompt: game._action("leave_tlx_no") # 4.11: asks about the survey first
 	check(game.screen == "title", "MAIN MENU on the results screen returns to the title")
 	game.previous_screen = "title"
 	game._action("settings")

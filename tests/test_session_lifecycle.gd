@@ -47,8 +47,8 @@ func run() -> void:
 	game.network.active = false
 	game.network.hosting = false
 	game.sim.elapsed = 10.0
-	game.map_zoom = 2.0
-	game._center_map(Vector2(.7, .6))
+	game._center_map(Vector2(.7, .6)) # 4.11: whole town only, so this keeps the fitted view
+	var menu_zoom: float = game.map_zoom
 	var menu_pan: Vector2 = game.map_pan
 	var payload: Dictionary = {"screen": "game", "simulation": game.sim.net_snapshot(), "orders": {}, "speed": 1.0}
 	for menu in ["pause", "help", "settings"]:
@@ -57,7 +57,7 @@ func run() -> void:
 		game._receive_snapshot(payload)
 		game._sync_capture()
 		check(game.screen == menu, "Host snapshots preserve guest " + menu)
-		check(game.map_zoom == 2.0 and game.map_pan == menu_pan, "Routine snapshots preserve the player's camera")
+		check(game.map_zoom == menu_zoom and game.map_pan == menu_pan, "Routine snapshots preserve the player's camera")
 		check(game.capture_run_id == initial_run and game.research.log_path == initial_events and game.voice.recording_path == initial_audio, "Menu does not split recording files: " + menu)
 	# Replays have a distinct level run within the same whole-session recording.
 	game.sim.elapsed = 120.0
@@ -83,12 +83,13 @@ func run() -> void:
 	game.network.hosting = false
 	game.map_zoom = 3.0
 	game.map_pan = Vector2(-200, -300)
-	game._apply_map_layout()
+	game._apply_map_layout() # 4.11: whole town only, so this settles on the fitted view
+	var saved_zoom: float = game.map_zoom
 	var saved_pan: Vector2 = game.map_pan
 	game._begin_tutorial(false)
 	check(is_equal_approx(game.map_zoom, game._fit_map_zoom()), "Tutorial starts with the full map in view")
 	game._end_tutorial(false, false)
-	check(game.map_zoom == 3.0 and game.map_pan == saved_pan, "Tutorial restores the previous map camera")
+	check(is_equal_approx(game.map_zoom, saved_zoom) and game.map_pan == saved_pan, "Tutorial restores the previous map camera")
 	game.voice.shutdown()
 	game.queue_free()
 	await process_frame

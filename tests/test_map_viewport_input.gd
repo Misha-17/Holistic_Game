@@ -63,51 +63,20 @@ func run() -> void:
 		var station_point: Vector2 = game._map_rect().position + Vector2(unit.home) * game._map_rect().size
 		check(game.MAP_VIEW.has_point(station_point), "Initial exploration includes the main " + str(unit.kind) + " station")
 	var point := Vector2(700, 450)
-	game._toggle_overview()
+	# 4.11 (Andrei): the whole town is the only view. Nothing a player does with
+	# the mouse or keyboard zooms in or moves it.
+	var whole_zoom: float = game.map_zoom
 	var before: Vector2 = game.map_pan
 	button(point, true)
 	check(game._map_press_pending, "Real viewport routes map press to gesture handler")
 	check(game._map_press_position.distance_to(point) < .1, "Viewport maps desktop position to game coordinates")
 	motion(point + Vector2(180, 95), Vector2(180, 95))
 	button(point + Vector2(180, 95), false)
-	check(game.map_pan.distance_to(before) > 100, "Real viewport drag visibly pans exploration")
+	check(game.map_pan == before and is_equal_approx(game.map_zoom, whole_zoom), "A real drag leaves the whole town in place")
 	await snapshot("dragged")
-	game._toggle_overview()
-	await snapshot("overview")
-	before = game.map_pan
-	button(point, true)
-	motion(point + Vector2(140, 70), Vector2(140, 70))
-	button(point + Vector2(140, 70), false)
-	check(game._is_map_overview(), "Dragging overview keeps the chosen zoom")
-	check(game.map_pan == before, "Overview drag keeps the whole town in frame")
-	await snapshot("overview-drag")
-	# The minimap (drag view only) jumps to a distant district.
-	game._toggle_overview()
-	game._center_map(Vector2(.3, .3))
-	var destination: Vector2 = game.MINIMAP_RECT.position + game.MINIMAP_RECT.size * Vector2(.82, .8)
-	button(destination, true)
-	button(destination, false)
-	check(not game._is_map_overview(), "Minimap click keeps the drag view")
-	check(game._map_center().x > .6 and game._map_center().y > .6, "Minimap reaches the southeast districts")
-	await snapshot("minimap-southeast")
-	# Two views: wheel down = whole town, wheel up = drag view; nothing in between.
-	button(point, true, MOUSE_BUTTON_WHEEL_DOWN)
-	check(game._is_map_overview(), "Scrolling down shows the whole town")
-	for i in range(4): button(point, true, MOUSE_BUTTON_WHEEL_DOWN)
-	check(game._is_map_overview(), "More scrolling down stays on the whole town")
-	button(point, true, MOUSE_BUTTON_WHEEL_UP)
 	for i in range(4): button(point, true, MOUSE_BUTTON_WHEEL_UP)
-	check(is_equal_approx(game.map_zoom, game._drag_zoom()), "Scrolling up opens the drag view and never zooms further")
-	await snapshot("zoom-floor")
-	var floor_zoom: float = game.map_zoom
-	var floor_center: Vector2 = game._map_center()
-	game._toggle_overview()
-	game._toggle_overview()
-	check(is_equal_approx(game.map_zoom, floor_zoom) and game._map_center().distance_to(floor_center) < .002, "Explore restores the previous zoom even at the wheel floor")
-	game._toggle_overview()
-	button(point, true)
-	button(point, false)
-	check(game._is_map_overview(), "A district click keeps the chosen overview")
+	for i in range(4): button(point, true, MOUSE_BUTTON_WHEEL_DOWN)
+	check(game._is_map_overview() and game.map_pan == before, "The wheel does not zoom")
 	var key := InputEventKey.new()
 	key.keycode = KEY_RIGHT
 	key.pressed = true
@@ -115,11 +84,12 @@ func run() -> void:
 	key = key.duplicate()
 	key.pressed = false
 	Input.parse_input_event(key)
-	check(game._is_map_overview(), "Arrow keys pan without changing zoom")
+	check(game.map_pan == before, "Arrow keys do not move the map")
 	button(point, true, MOUSE_BUTTON_MIDDLE)
 	motion(point + Vector2(80, 40), Vector2(80, 40))
 	button(point + Vector2(80, 40), false, MOUSE_BUTTON_MIDDLE)
-	check(game._is_map_overview(), "Middle-button pan keeps the chosen zoom")
+	check(game._is_map_overview() and game.map_pan == before, "Middle-button drag does not move the map")
+	await snapshot("whole-town")
 	# Exercise the actual window stretch rather than passing preconverted events
 	# straight to _input. An odd aspect ratio also covers letterbox conversion.
 	root.size = Vector2i(1100, 700)
@@ -127,21 +97,16 @@ func run() -> void:
 	game.map_zoom = 1.5
 	game._center_map(Vector2(.5, .5))
 	await frame()
-	before = game.map_pan
+	check(game._is_map_overview(), "Even a requested zoom stays on the whole town after a resize")
 	button(point, true)
 	check(game._map_press_position.distance_to(point) < .1, "Resized desktop pointer keeps correct game coordinates")
-	motion(point + Vector2(-170, -85), Vector2(-170, -85))
-	button(point + Vector2(-170, -85), false)
-	check(game.map_pan.distance_to(before) > 100, "Drag works after desktop resize")
-	await snapshot("resized-drag")
-	# Buttons also travel through the viewport, including their drawn hit rects.
+	button(point, false)
+	await snapshot("resized")
+	# Where the OVERVIEW/EXPLORE button used to be, a click does nothing to the view.
+	before = game.map_pan
 	button(Vector2(-35, 34), true)
 	button(Vector2(-35, 34), false)
-	check(is_equal_approx(game.map_zoom, game._fit_map_zoom()), "Overview button receives resized-window input")
-	await frame()
-	button(Vector2(-35, 34), true)
-	button(Vector2(-35, 34), false)
-	check(game.map_zoom > game._fit_map_zoom() + .2, "Explore button returns from overview after resize")
+	check(game._is_map_overview() and game.map_pan == before, "No zoom button in the top-left corner")
 	# Panning out over the tutorial's controls must never leave a held gesture.
 	game._begin_tutorial(false)
 	await frame()
@@ -161,7 +126,7 @@ func run() -> void:
 	game.queue_free()
 	await process_frame
 	await process_frame
-	if failures.is_empty(): print("PASS: real viewport drag, stable overview, minimap, explicit zoom and resized-window input")
+	if failures.is_empty(): print("PASS: real viewport input on the whole-town-only map: drags, wheel, keys and middle button never move it; resized-window coordinates")
 	else:
 		for failure in failures: printerr("FAIL: ", failure)
 	quit(0 if failures.is_empty() else 1)

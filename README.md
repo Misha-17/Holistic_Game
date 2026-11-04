@@ -2,6 +2,17 @@
 
 A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engineering and Police each have four crews in every level; calls need several departments working together.
 
+## Study consent, withdrawal and one map view (04.11)
+
+- **Consent on the first screen.** When the game starts, players see the study information (what is recorded, where it is stored and analysed, anonymous publication, their rights) and choose **I AGREE · RECORD MY PLAY** or **PLAY WITHOUT DATA COLLECTION**. The answer holds until the game is closed and replaces the old question at the first level of each session. The text is **placeholder wording** in `scripts/study_info.gd` (square brackets mark details to fill in); bump `TEXT_VERSION` there when it changes. Every recorded session logs a `study_consent` row with that version. **STUDY INFORMATION** in Settings → Research shows the text again.
+- **Withdraw after playing.** **WITHDRAW MY DATA** on the main menu (shown after a recorded session, above SETTINGS / QUIT), on the results screen (between SETTINGS and MAIN MENU) and in Settings → Research. Clicking it only opens a confirmation (CANCEL / WITHDRAW AND DELETE; Esc cancels); confirming deletes what was recorded about that player in the session just played and stops recording them:
+  - solo: the whole session folder and its voice folder;
+  - session leader in co-op: their own input rows, 60 Hz samples, survey answers and voice track (the shared game events stay, because teammates' files need them);
+  - other players: while still in the room, a request goes to the session leader's computer, which deletes their `players/<key>/` folder and their voice track. After leaving the room (the usual case on the main menu) the game cannot reach the leader, so it shows a **participant code** (the first 8 characters of their player key, e.g. `ABCD-1234`) to give the researcher, who deletes `players/<key>/` (the folder name starts with the code) and the matching `player_<key>.wav` by hand.
+  `research/withdrawals.jsonl` on the storing computer notes each withdrawal (session, player key, what was deleted) without any recorded data. Sessions from before a restart cannot be withdrawn in the game (the text points to the researcher).
+- **Only the whole-town view.** The EXPLORE / OVERVIEW button, wheel zoom, the drag view, panning (mouse, middle button, arrow keys) and the minimap are gone. Pressing and moving across a crew or call still never dispatches it by accident.
+- **Quitting:** the game now closes the microphone two frames before quitting. "WASAPI: GetBufferSize error" in the console after quitting comes from Godot's Windows audio driver during shutdown; voice files are already closed at that point, so recordings are not affected.
+
 ## Survey on the way out (04.11)
 
 - **MAIN MENU on the results screen asks about the NASA-TLX first** (also from settings opened there): **YES, FILL IT IN** opens the survey and then goes to the main menu (submitted or skipped); **NO, GO TO MAIN MENU** goes straight there; Esc stays on the results screen. Sessions that end before Level 6 no longer depend on players remembering the title-screen survey button. A session that already has a survey (for example after Level 6) is not asked again. The answers are saved with `"source": "leaving_session"`.
@@ -39,7 +50,7 @@ A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engi
 
 The level menu now shows illustrated cards in play order, **00–06**, with Level 0 first, clear completion/lock badges and a separate saved-shift panel. The Training Harbor title and subtitle no longer cover the practice map.
 
-Your camera stays where you leave it when selecting a call, crew or station, scouting, dispatching or cycling through calls. Use the wheel or **EXPLORE / OVERVIEW** to change views. Dragging and arrow keys keep your chosen zoom.
+Your camera stays where you leave it when selecting a call, crew or station, scouting, dispatching or cycling through calls. (Since 04.11 the whole town is the only view.)
 
 ## Level 0 and getting started (0.9.0)
 
@@ -54,8 +65,7 @@ The six existing campaign levels keep their saved indices and difficulty. **Star
 - **Withdraw a crew from a scene:** click the call and press **WITHDRAW** next to the crew on its card, or click its crew card in the bottom bar, then **WITHDRAW** (or **V**). It leaves the incident and returns to standby; you can send it to another call while it returns, once the normal dispatch cooldown has passed. This also cancels a crew en route or clearing a road. Other crews keep working, and the incident still needs a replacement for the withdrawn department.
 - **Change roles between levels:** in the co-op lobby or results screen, click **SWAP** beside a teammate to exchange your department assignments. With two or three players, this swaps the entire department bundle. Roles stay fixed during a level; the host/session leader remains the same player. Joining or leaving redistributes departments to keep every role covered. Solo players already command every department.
 - **Q:** scout. The shared field team needs 8 s between scouts: the **SCOUT** counter in the top bar and the SCOUT button on a ? call show the seconds left (playtest 19.10). **E:** supply a crew on scene. **Space:** coffee boost. **C:** rescue close-up. **R:** ping.
-- **Two views only:** every level **starts on the whole town**. Scroll up or press **EXPLORE** to open the **drag view**; scroll down or press **OVERVIEW** to return to the whole town. Clicking calls, crews or stations preserves your chosen zoom and camera position. There is no further zooming in (no +/- buttons, no F shortcut). Switching to the whole town closes an open call card.
-- In the drag view: **left-drag** pans (middle-drag too), **WASD / arrows** pan, the **minimap** (bottom right, drag view only) jumps; **M** or its HIDE button hides it (music is switched in Settings).
+- **One view:** the whole town is always on screen (04.11: no zoom, no panning, no minimap).
 - The map fills the whole screen; the top bar and crew cards float over it, see-through. Markers are kept out from under them.
 - Crews and stations are picked the moment you press on them, so a press that turns into a drag still selects the crew. Moving vehicles never steal a click meant for a call or station under them. Station buttons are 20% bigger. A crew's route preview is drawn in its department's colour.
 - With a crew selected, clicking a **?** call does **not** send the crew: it opens the call's card with a **SCOUT** button, and the crew stays selected. 1–4 over a ? call also asks you to scout first.
@@ -194,6 +204,7 @@ godot --headless --path . --script tests/test_pc_check.gd
 godot --headless --path . --script tests/test_reconnect_roles.gd
 godot --headless --path . --script tests/test_leader_storage.gd
 godot --headless --path . --script tests/test_leave_survey.gd
+godot --headless --path . --script tests/test_study_consent.gd
 godot --headless --path . --script tests/test_role_assignment.gd
 godot --headless --path . --script tests/test_road_events.gd
 godot --headless --path . --script tests/test_levels.gd

@@ -88,6 +88,23 @@ var _tlx_offered_key := ""
 ## while the survey is open on the way out (the player then ignores the next
 ## level a co-op host starts, and leaves once the survey is done or skipped).
 var leave_prompt := false
+## Study consent (4.11): asked on the first screen at launch. The answer holds
+## until the game is closed (it replaces the old per-session question at the
+## first level). study_info_mode: "launch" (must answer) or "view" (re-read).
+var study_consent_answered := false
+var study_consent_agreed := false
+var study_info_mode := "launch"
+var _study_return := "title"
+var _consent_logged_session := ""
+## Withdrawal after playing (4.11): WITHDRAW MY DATA on the results screen and
+## in Settings > Research deletes this player's recordings of the session.
+var withdraw_prompt := false
+var _withdrawn_session := ""
+var _session_had_collection := false
+## How this computer took part in the last session, and its player key then:
+## a withdrawal from the main menu happens after leaving the room (4.11).
+var _session_role := "solo"
+var _session_key := ""
 var _leaving_after_tlx := false
 var _tlx_submitted_session := ""
 var last_capture_session_id := ""
@@ -223,10 +240,15 @@ func _drag_zoom() -> float:
 	# 5% closer than the old most-zoomed-out level (playtest 15.10).
 	return _explore_min_zoom() * 1.05
 
-func _explore_map_at(normalized: Vector2, anchor: Vector2 = MAP_VIEW.get_center()) -> void:
-	map_zoom = _drag_zoom()
-	map_pan = anchor - normalized.clamp(Vector2.ZERO, Vector2.ONE) * TownView.MAP_SIZE * map_zoom - MAP_ORIGIN
-	_apply_map_layout()
+# 4.11 (Andrei): only the whole-town view is left. There is no zoom (wheel,
+# button) and no panning; these stay as no-ops for old callers and saves.
+func _explore_map_at(_normalized: Vector2, _anchor: Vector2 = MAP_VIEW.get_center()) -> void:
+	_show_whole_town()
+
+func _show_whole_town() -> void:
+	_reset_map_gesture()
+	map_zoom = _fit_map_zoom()
+	_center_map(Vector2(.5, .5))
 
 func _reset_exploration_camera() -> void:
 	_reset_map_gesture()
@@ -241,9 +263,10 @@ func _reset_exploration_camera() -> void:
 			stations[unit.kind] = true
 			center += Vector2(unit.home)
 	_overview_return_center = center / stations.size() if not stations.is_empty() else Vector2(.5, .5)
-	_center_map(_overview_return_center)
-	# Every level starts on the whole town, so nobody has to discover the overview.
-	_toggle_overview()
+	# The whole town, the only view (4.11). A card left open is closed.
+	selected = -1
+	focus_hold_left = 0
+	_show_whole_town()
 
 func _map_center() -> Vector2:
 	return (MAP_VIEW.get_center() - _map_rect().position) / _map_rect().size
@@ -253,7 +276,7 @@ func _center_map(normalized: Vector2) -> void:
 	_apply_map_layout()
 
 func _apply_map_layout() -> void:
-	map_zoom = clampf(map_zoom, _fit_map_zoom(), 3.0)
+	map_zoom = _fit_map_zoom() # whole town only (4.11); a smaller map is centred, so panning has no effect
 	var size := TownView.MAP_SIZE * map_zoom
 	var origin := MAP_ORIGIN + map_pan
 	for axis in range(2):
@@ -269,24 +292,12 @@ func _apply_map_layout() -> void:
 
 # The wheel switches between the two views: up = into the drag view at the
 # cursor, down = back to the whole town.
-func _zoom_map(direction: float, around: Vector2) -> void:
-	if direction > 0 and _is_map_overview():
-		_explore_map_at(_map_world_at(around), around)
-	elif direction < 0 and not _is_map_overview():
-		_toggle_overview()
+# The wheel no longer zooms (4.11): only the whole-town view exists.
+func _zoom_map(_direction: float, _around: Vector2) -> void:
+	pass
 
 func _toggle_overview() -> void:
-	_reset_map_gesture()
-	if _is_map_overview():
-		_explore_map_at(_overview_return_center)
-	else:
-		_overview_return_zoom = map_zoom
-		_overview_return_center = _map_center()
-		map_zoom = _fit_map_zoom()
-		# An open call card would cover the whole-town view: close it.
-		selected = -1
-		focus_hold_left = 0
-		_center_map(Vector2(.5, .5))
+	_show_whole_town()
 
 func _reset_map_gesture() -> void:
 	# Only a drag changes the cursor. _update_visibility() calls this every frame
@@ -340,16 +351,7 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 				var consumed: bool = _map_middle_drag
 				_reset_map_gesture()
 				return consumed
-			if not over_button and not _map_input_blocked(point):
-				_reset_map_gesture()
-				_map_middle_drag = true
-				map_dragging = true
-				_map_last_position = point
-				return true
-		elif event.pressed and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN] and not over_button and not _map_input_blocked(point):
-			_reset_map_gesture()
-			_zoom_map(1.0 if event.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0, point)
-			return true
+			# No middle-button panning and no wheel zoom any more (4.11).
 	elif event is InputEventMouseMotion:
 		if _minimap_drag:
 			_center_map((point - MINIMAP_RECT.position) / MINIMAP_RECT.size)
@@ -358,16 +360,13 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 			if not map_dragging and point.distance_to(_map_press_position) >= DRAG_THRESHOLD:
 				map_dragging = true
 				tactical_map.clear_hover()
-			if map_dragging:
-				map_pan += point - _map_last_position
-				_apply_map_layout()
-				Input.set_default_cursor_shape(Input.CURSOR_DRAG)
+			# Moving the mouse while pressed still cancels the click (so sweeping
+			# across a crew never dispatches it), but the map does not move (4.11).
 			_map_last_position = point
 			return true
 	return false
 
 func _draw_map_tools() -> void:
-	_button("map_overview", "EXPLORE" if _is_map_overview() else "OVERVIEW", Rect2(-62, 18, 106, 34), TEAL if _is_map_overview() else PANEL, INK if _is_map_overview() else CREAM, 12)
 	_draw_minimap()
 
 func _minimap_shown() -> bool:
@@ -462,6 +461,9 @@ func _sync_capture() -> void:
 		capture_run_id = shared_level_run_id if not shared_level_run_id.is_empty() else _new_capture_id("level%d" % BeaconCampaign.level_number(sim.shift_index))
 	if capture_session_id.is_empty():
 		capture_session_id = _new_capture_id("session")
+		_session_had_collection = false
+		_session_role = "solo" if not network.active else ("leader" if network.is_leader() else "guest")
+		_session_key = network.player_key(multiplayer.get_unique_id()) if network.active else network.local_player_key
 		if _sends_to_leader(): last_capture_session_id = capture_session_id
 		else: _remember_session(capture_session_id)
 	var context := _capture_context()
@@ -479,6 +481,11 @@ func _sync_capture() -> void:
 		research.observe_state(sim.net_snapshot())
 		if sim.has_method("chaos_context"): research.log_event("chaos_state_at_capture_start", sim.chaos_context())
 	research.set_clock(sim.elapsed, sim.shift_index)
+	if research.enabled or voice.recording_active: _session_had_collection = true
+	if research.enabled and study_consent_answered and _consent_logged_session != capture_session_id:
+		_consent_logged_session = capture_session_id
+		research.log_event("study_consent", {"agreed": study_consent_agreed, "source": "launch_screen",
+			"text_version": StudyInfo.TEXT_VERSION, "placeholder_text": StudyInfo.IS_PLACEHOLDER})
 	if research.enabled:
 		research.begin_level(sim.shift_index, context, capture_run_id)
 		research.update_context({"screen": screen, "selected_incident_id": selected, "selected_unit_id": selected_unit, "departments": network.departments_for()})
@@ -670,6 +677,185 @@ func _draw_pc_check() -> void:
 func _pc_color(status: String) -> Color:
 	return {"pass": TEAL, "warn": GOLD, "fail": CORAL}.get(status, MUTED)
 
+# ---------------------------------------------------------------- STUDY CONSENT
+# 4.11 (Andrei): consent and transparency at game entry, and withdrawal after
+# playing. The wording is placeholder text in scripts/study_info.gd.
+func _open_study_info(mode: String) -> void:
+	study_info_mode = mode
+	if mode == "view" and screen != "study_info": _study_return = screen
+	screen = "study_info"
+	_update_visibility()
+
+func _answer_study_consent(agreed: bool) -> void:
+	study_consent_answered = true
+	study_consent_agreed = agreed
+	collection_choice_made = true
+	research_enabled = agreed
+	research.exclude_own_input = false
+	if not agreed: research.set_enabled(false)
+	voice.set_recording_consent(agreed)
+	voice.set_recording_enabled(agreed)
+	screen = "title"
+	_save_progress(false)
+	_update_visibility()
+
+func _draw_study_info() -> void:
+	_draw_page_header("", "STUDY INFORMATION AND CONSENT")
+	_text(StudyInfo.TITLE, Vector2(80, 140), 34, CREAM)
+	var y := _wrap(StudyInfo.INTRO, Vector2(80, 186), 1280, 18, CREAM, 26) + 22
+	for i in range(StudyInfo.SECTIONS.size()):
+		var section: Array = StudyInfo.SECTIONS[i]
+		var column := i % 2
+		var top: float = y + (i / 2) * 210.0
+		var x := 80.0 + column * 660.0
+		_text(str(section[0]), Vector2(x, top + 20), 13, TEAL)
+		_wrap(str(section[1]), Vector2(x, top + 50), 620, 16, MUTED, 24)
+	if StudyInfo.IS_PLACEHOLDER: _text(StudyInfo.PLACEHOLDER_NOTE, Vector2(80, 760), 13, GOLD)
+	if study_info_mode == "launch":
+		_button("study_decline", StudyInfo.DECLINE, Rect2(80, 790, 420, 52), PANEL_LIGHT, CREAM, 15)
+		_button("study_agree", StudyInfo.AGREE, Rect2(940, 790, 420, 52), TEAL, INK, 16)
+	else:
+		_button("study_back", "<  BACK", Rect2(80, 790, 220, 52), PANEL_LIGHT, CREAM, 15)
+		var state := ("You agreed to take part." if study_consent_agreed else "You chose to play without data collection.") if study_consent_answered else ""
+		_text(state + "  Change it with Record gameplay & mouse in Settings > Research.", Vector2(330, 823), 14, MUTED)
+
+## A WITHDRAW MY DATA button is offered for the session just played, if
+## anything was recorded and it was not withdrawn yet.
+func _can_withdraw() -> bool:
+	var session := _tlx_session()
+	return not dedicated_server and not session.is_empty() and session != _withdrawn_session and _session_had_collection
+
+## A short code for the researcher, from this player's key (offline teammates).
+func _participant_code() -> String:
+	var key := (_session_key if not _session_key.is_empty() else network.local_player_key).to_upper()
+	return "%s-%s" % [key.substr(0, 4), key.substr(4, 4)] if key.length() >= 8 else key
+
+func _draw_withdraw_prompt() -> void:
+	buttons.clear()
+	_overlay()
+	var panel := Rect2(380, 250, 680, 400)
+	_panel(panel, INK, CORAL)
+	if _session_role == "guest" and not _sends_to_leader():
+		_text("STUDY WITHDRAWAL", panel.position + Vector2(40, 52), 13, CORAL)
+		_text(StudyInfo.WITHDRAW_TITLE, panel.position + Vector2(40, 100), 30, CREAM)
+		var line := _wrap(StudyInfo.WITHDRAW_OFFLINE, panel.position + Vector2(40, 140), panel.size.x - 80, 17, CREAM, 25) + 44
+		_text("Participant code:  " + _participant_code(), Vector2(panel.position.x + 40, line), 22, GOLD)
+		_button("withdraw_cancel", "CLOSE", Rect2(panel.position + Vector2(355, 322), Vector2(285, 50)), PANEL_LIGHT, CREAM, 15)
+		return
+	_text("STUDY WITHDRAWAL", panel.position + Vector2(40, 52), 13, CORAL)
+	_text(StudyInfo.WITHDRAW_TITLE, panel.position + Vector2(40, 100), 30, CREAM)
+	var y := _wrap(StudyInfo.WITHDRAW_TEXT, panel.position + Vector2(40, 140), panel.size.x - 80, 17, CREAM, 25) + 40
+	_wrap(StudyInfo.WITHDRAW_COOP if network.active else StudyInfo.WITHDRAW_LATER, Vector2(panel.position.x + 40, y), panel.size.x - 80, 15, MUTED, 22)
+	_button("withdraw_cancel", "CANCEL", Rect2(panel.position + Vector2(40, 322), Vector2(285, 50)), PANEL_LIGHT, CREAM, 15)
+	_button("withdraw_confirm", "WITHDRAW AND DELETE", Rect2(panel.position + Vector2(355, 322), Vector2(285, 50)), CORAL, INK, 15)
+
+## Delete what was recorded about this player in the last session and stop
+## recording them. Solo: the whole session. Session leader: their own input
+## rows, 60 Hz samples, survey answers and voice track (shared game events stay
+## for the teammates). Other players: a request to the leader, who deletes
+## their folder and voice track.
+func _withdraw_my_data() -> void:
+	withdraw_prompt = false
+	var session := _tlx_session()
+	if session.is_empty(): return
+	var key := _session_key if not _session_key.is_empty() else network.local_player_key
+	var role := _session_role
+	if role == "guest" and not _sends_to_leader():
+		# Left the room already: the data is on the leader's computer and cannot
+		# be reached from here. The dialog shows a code for the researcher.
+		withdraw_prompt = true
+		return
+	_withdrawn_session = session
+	research_enabled = false
+	study_consent_agreed = false
+	voice.set_recording_consent(false)
+	var deleted: Array = []
+	if role == "guest":
+		research.set_enabled(false)
+		voice.set_recording_enabled(false)
+		relay.clear() # do not send anything else about this player
+		relay.enqueue("withdrawal.json", JSON.stringify({"session_id": session, "text_version": StudyInfo.TEXT_VERSION,
+			"utc": Time.get_datetime_string_from_system(true)}).to_utf8_buffer(), "withdraw")
+		_toast("Withdrawal sent to the session leader's computer. Your data there will be deleted.")
+	elif role == "leader":
+		# Keep recording the team while still in the room (teammates' files need
+		# the shared game events), but nothing more about this player.
+		if network.active:
+			research_enabled = true
+			research.withdraw_own_input()
+		else:
+			research.set_enabled(false)
+			voice.set_recording_enabled(false)
+		deleted.append_array(_remove_own_rows(session))
+		deleted.append_array(voice.withdraw_speaker("player_" + key, session))
+		_toast("Your data from this session was deleted. Teammates' data is kept.")
+	else:
+		research.set_enabled(false)
+		voice.set_recording_enabled(false)
+		deleted.append_array(voice.delete_session_folders(session))
+		deleted.append_array(_delete_tree("user://research/%s" % session.validate_filename()))
+		_toast("Your data from this session was deleted.")
+	if role != "guest": _note_withdrawal(session, key, role, deleted)
+	_update_visibility()
+
+## Leader: the shared files keep game events but lose this player's own rows.
+func _remove_own_rows(session: String) -> Array:
+	var removed: Array = []
+	var folder := "user://research/%s" % session.validate_filename()
+	if not DirAccess.dir_exists_absolute(folder): return removed
+	var logs: Array[String] = [folder.path_join("session_events.jsonl")]
+	if DirAccess.dir_exists_absolute(folder.path_join("levels")):
+		for name in DirAccess.get_files_at(folder.path_join("levels")):
+			if name.ends_with("_events.jsonl"): logs.append(folder.path_join("levels").path_join(name))
+			elif name.ends_with("_samples_60hz.csv") and DirAccess.remove_absolute(ProjectSettings.globalize_path(folder.path_join("levels").path_join(name))) == OK:
+				removed.append("levels/" + name)
+	for path in logs:
+		var count := _filter_own_rows(path)
+		if count > 0: removed.append("%s (%d own rows)" % [path.trim_prefix(folder + "/"), count])
+	removed.append_array(_delete_tree(folder.path_join("questionnaires")))
+	return removed
+
+func _filter_own_rows(path: String) -> int:
+	if not FileAccess.file_exists(path): return 0
+	var source := FileAccess.open(path, FileAccess.READ)
+	var target := FileAccess.open(path + ".tmp", FileAccess.WRITE)
+	if source == null or target == null: return 0
+	var removed := 0
+	while not source.eof_reached():
+		var line := source.get_line()
+		if line.is_empty(): continue
+		var at := line.find("\"event\":\"")
+		var event := line.substr(at + 9, line.find("\"", at + 9) - at - 9) if at >= 0 else ""
+		if ResearchLogger.LOCAL_EVENTS.has(event) and event != "study_withdrawal":
+			removed += 1
+			continue
+		target.store_line(line)
+	source.close()
+	target.close()
+	DirAccess.rename_absolute(ProjectSettings.globalize_path(path + ".tmp"), ProjectSettings.globalize_path(path))
+	return removed
+
+func _delete_tree(folder: String) -> Array:
+	var removed: Array = []
+	if not DirAccess.dir_exists_absolute(folder): return removed
+	for child in DirAccess.get_directories_at(folder): removed.append_array(_delete_tree(folder.path_join(child)))
+	for name in DirAccess.get_files_at(folder):
+		if DirAccess.remove_absolute(ProjectSettings.globalize_path(folder.path_join(name))) == OK: removed.append(folder.path_join(name).trim_prefix("user://research/"))
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(folder))
+	return removed
+
+## research/withdrawals.jsonl on the storing computer: that a withdrawal
+## happened and what was deleted, with no recorded data.
+func _note_withdrawal(session: String, key: String, role: String, deleted: Array) -> void:
+	DirAccess.make_dir_recursive_absolute("user://research")
+	var path := "user://research/withdrawals.jsonl"
+	var file := FileAccess.open(path, FileAccess.READ_WRITE if FileAccess.file_exists(path) else FileAccess.WRITE)
+	if file == null: return
+	file.seek_end()
+	file.store_line(JSON.stringify({"utc": Time.get_datetime_string_from_system(true), "unix_ms": int(Time.get_unix_time_from_system() * 1000.0),
+		"session_id": session, "player_key": key, "role": role, "text_version": StudyInfo.TEXT_VERSION, "deleted": deleted}))
+	file.close()
+
 # ---------------------------------------------------------------- NASA-TLX
 func _maybe_offer_tlx() -> void:
 	if dedicated_server or tutorial_active or sim.shift_index != TLX_LAST_LEVEL_INDEX: return
@@ -808,6 +994,12 @@ func _store_relayed(key: String, rel_path: String, data: PackedByteArray, mode: 
 		session = _new_capture_id("session")
 		last_capture_session_id = session
 	var folder := "user://research/%s/players/%s" % [session.validate_filename(), key.validate_filename()]
+	if mode == "withdraw":
+		var deleted := _delete_tree(folder)
+		deleted.append_array(voice.withdraw_speaker("player_" + key, session))
+		_note_withdrawal(session, key, "teammate", deleted)
+		_toast("A teammate withdrew from the study; their data from this session was deleted.")
+		return
 	var target := folder.path_join(rel_path)
 	DirAccess.make_dir_recursive_absolute(target.get_base_dir())
 	var file: FileAccess
@@ -905,7 +1097,7 @@ func _end_level_capture(reason: String = "completed") -> void:
 func _stop_capture() -> void:
 	_end_level_capture("disconnected_or_exit")
 	# A new session (possibly a new participant) is asked again.
-	collection_choice_made = false
+	collection_choice_made = study_consent_answered # 4.11: the launch answer holds until the game closes
 	voice_choice_made = false
 	if voice != null: voice.stop()
 	capture_session_id = ""
@@ -1078,7 +1270,7 @@ func _ready() -> void:
 	if dedicated_server:
 		_start_dedicated_server()
 		return
-	get_window().title = "Beacon Bay 0.9.2"
+	get_window().title = "Beacon Bay " + str(ProjectSettings.get_setting("application/config/version", ""))
 	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 	get_tree().auto_accept_quit = false
 	Input.use_accumulated_input = false
@@ -1212,6 +1404,9 @@ func _ready() -> void:
 			_begin_tutorial(false)
 		if arg.begins_with("--capture="):
 			_capture_later(arg.trim_prefix("--capture="))
+	# 4.11: the first screen is the study information and consent. Test scripts
+	# and --demo runs skip it (they then get the old first-level question).
+	if not test_mode and get_tree().get_script() == null: _open_study_info("launch")
 	_apply_playtest_args()
 	_update_visibility()
 
@@ -1411,8 +1606,20 @@ func _notification(what: int) -> void:
 		if sim != null:
 			_save_progress(screen in ["game","pause","help"] or (screen=="settings" and previous_screen=="pause"))
 		_stop_capture()
-		if voice != null: voice.shutdown()
-		get_tree().quit()
+		_quit_game()
+
+## Close the microphone, then quit two frames later. Quitting in the same frame
+## let Windows' audio driver (WASAPI) query a capture buffer that was already
+## gone: "WASAPI: GetBufferSize error" in the console (4.11). Harmless either way:
+## voice files are finalised by voice.shutdown() before this.
+var _quitting := false
+func _quit_game() -> void:
+	if _quitting: return
+	_quitting = true
+	if voice != null: voice.shutdown()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	get_tree().quit()
 
 func _update_visibility() -> void:
 	if dedicated_server: return
@@ -1443,12 +1650,15 @@ func _draw_all(canvas: CanvasItem) -> void:
 		"lobby": _draw_lobby()
 		"settings": _draw_settings()
 		"tlx": _draw_tlx()
+		"study_info": _draw_study_info()
 		"game", "pause", "results", "help":
 			_draw_game()
 			if screen != "game": buttons.clear()
 			if screen == "pause": _draw_pause()
 			if screen == "results": _draw_results()
 			if screen == "help": _draw_help()
+	if withdraw_prompt and screen in ["title", "settings", "results"]: _draw_withdraw_prompt()
+	elif withdraw_prompt: withdraw_prompt = false
 	if leave_prompt and screen == "results": _draw_leave_prompt()
 	elif leave_prompt: leave_prompt = false # the screen changed underneath (e.g. the host started a level)
 	if toast_left > 0 and screen != "title":
@@ -1480,9 +1690,15 @@ func _draw_title() -> void:
 	_button("co_op", "PLAY WITH FRIENDS", Rect2(74, 575, 280, 54), Color(0.08,0.20,0.25,0.94), CREAM)
 	_button("tutorial", "MEET THE CREW · TUTORIAL", Rect2(74, 643, 280, 48), Color(0.08,0.20,0.25,0.94), GOLD, 14)
 	_button("tlx_title", "SURVEY · NASA-TLX", Rect2(74, 705, 280, 44), Color(0.08,0.20,0.25,0.94), GOLD, 14)
-	_button("settings", "SETTINGS", Rect2(74, 763, 133, 44), Color(0.08,0.20,0.25,0.86), CREAM, 15)
-	_button("quit", "QUIT", Rect2(221, 763, 133, 44), Color(0.08,0.20,0.25,0.86), CREAM, 15)
-	_text("SOLO / 2–4 PLAYER CO-OP", Vector2(74, 835), 13, CREAM)
+	# 4.11 (Andrei): WITHDRAW MY DATA lives on the main menu, shown while the
+	# last session can be withdrawn; SETTINGS / QUIT move down one row.
+	var bottom := 763
+	if _can_withdraw():
+		_button("withdraw_open", "WITHDRAW MY DATA", Rect2(74, 763, 280, 44), Color(0.08,0.20,0.25,0.94), CORAL, 14)
+		bottom = 821
+	_button("settings", "SETTINGS", Rect2(74, bottom, 133, 44), Color(0.08,0.20,0.25,0.86), CREAM, 15)
+	_button("quit", "QUIT", Rect2(221, bottom, 133, 44), Color(0.08,0.20,0.25,0.86), CREAM, 15)
+	if bottom == 763: _text("SOLO / 2–4 PLAYER CO-OP", Vector2(74, 835), 13, CREAM)
 	
 	if not reduced_motion:
 		for i in range(22):
@@ -2197,7 +2413,7 @@ func _draw_settings() -> void:
 			_settings_card("motion", "Reduced motion", "Calmer animation, no screen shake", reduced_motion, 0, y + SETTINGS_STEP)
 			_settings_card("perf", "Show FPS and ping", "Small counter in the corner (F3)", show_perf, 0, y + 2 * SETTINGS_STEP)
 			_settings_heading("KEYS", 1, y)
-			_settings_note([["F11  fullscreen  ·  F3  FPS and ping", 17, CREAM], ["M  minimap  ·  Esc  menu  ·  Right-click  clear selection", 15, MUTED], ["Scroll up / EXPLORE to zoom in; down / OVERVIEW for the whole town.", 15, MUTED]], 1, y, 2 * SETTINGS_STEP + SETTINGS_CARD.y)
+			_settings_note([["F11  fullscreen  ·  F3  FPS and ping", 17, CREAM], ["Esc  menu  ·  Right-click  clear selection", 15, MUTED], ["The whole town is always on screen: click a crew, then a call.", 15, MUTED]], 1, y, 2 * SETTINGS_STEP + SETTINGS_CARD.y)
 		"research":
 			_settings_heading("MY GAMEPLAY", 0, y)
 			_settings_card("research", "Record gameplay & mouse", "Movements, clicks and event outcomes by level", research_enabled, 0, y)
@@ -2208,8 +2424,13 @@ func _draw_settings() -> void:
 			_settings_heading("LOCAL RECORDINGS", 1, y)
 			# The note runs down to the bottom of the STUDY PC button in column 0.
 			var note_h: float = voice_y + 2 * SETTINGS_STEP + 30 + 56 - y - 58
-			_settings_note([["Levels share one session. Mouse and event logs are grouped by level; speaker tracks share the same timeline.", 16, CREAM], ["Solo: files are saved here. Co-op: only the session leader's computer saves files (the LAN host, or the first player in an online room); other players' mouse data and answers are sent to it. Only in-game voice is saved, when Voice chat (Sounds) is on.", 15, MUTED], ["Collection is chosen once per session, at the first level.", 15, MUTED], [str(voice.status), 15, TEAL], [_study_footer(), 15, TEAL]], 1, y, note_h)
+			_settings_note([["Levels share one session. Mouse and event logs are grouped by level; speaker tracks share the same timeline.", 16, CREAM], ["Solo: files are saved here. Co-op: only the session leader's computer saves files (the LAN host, or the first player in an online room); other players' mouse data and answers are sent to it. Only in-game voice is saved, when Voice chat (Sounds) is on.", 15, MUTED], ["Collection is chosen on the study consent screen when the game starts.", 15, MUTED], [str(voice.status), 15, TEAL], [_study_footer(), 15, TEAL]], 1, y, note_h)
 			_button("open_data","OPEN RECORDINGS",Rect2(SETTINGS_COL[1], y + note_h + 10, SETTINGS_CARD.x, 48),PANEL_LIGHT,TEAL,15)
+			var study_y: float = y + note_h + 70
+			var study_w: float = (SETTINGS_CARD.x - 12.0) / 2.0
+			_button("study_view","STUDY INFORMATION",Rect2(SETTINGS_COL[1], study_y, study_w, 48),PANEL_LIGHT,CREAM,15)
+			if _can_withdraw(): _button("withdraw_open","WITHDRAW MY DATA",Rect2(SETTINGS_COL[1] + study_w + 12.0, study_y, study_w, 48),PANEL_LIGHT,CORAL,15)
+			else: _wrap("Nothing recorded to withdraw in this session." if _withdrawn_session != _tlx_session() or _tlx_session().is_empty() else "Your data from the last session was withdrawn.", Vector2(SETTINGS_COL[1] + study_w + 24.0, study_y + 20), study_w - 20, 13, MUTED, 18)
 			var check_y: float = voice_y + 2 * SETTINGS_STEP + 30
 			_settings_heading("STUDY PC", 0, check_y)
 			_button("pc_check_run", "CHECK THIS STUDY PC", Rect2(SETTINGS_COL[0], check_y, SETTINGS_CARD.x, 56), PANEL_LIGHT, TEAL, 16)
@@ -2257,7 +2478,7 @@ func _draw_help() -> void:
 	var tips := [
 		["01", "Send your crews", "Pick a crew, then a call. Or hover a call and press 1–4. Its icons show which departments are still needed."],
 		["02", "Help on scene", "Q scouts. E supplies. SPACE boosts. To leave a scene, select the busy crew in the bottom bar, then WITHDRAW or V."],
-		["03", "Explore the town", "Scroll up or EXPLORE: zoom in. Scroll down or OVERVIEW: whole town. Drag: pan. Clicks keep your view. M: minimap."],
+		["03", "Read the town", "The whole town is always on screen. Click a crew, then a call. Right-click clears your selection."],
 		["04", "Coordinate", "Enable Voice chat in Settings to keep your microphone open. Turn it off there to mute. Recordings are optional and local."]
 	]
 	for i in range(tips.size()):
@@ -2353,9 +2574,13 @@ func _draw_results() -> void:
 	# can be changed here without leaving the room. BACK returns to this screen.
 	# Bottom row: SETTINGS and MAIN MENU side by side (Andrei, 30.10: no way to
 	# the main menu after a level). In co-op, MAIN MENU leaves the room.
-	var half: float = (third.size.x - 12.0) / 2.0
-	_button("results_settings","SETTINGS",Rect2(third.position, Vector2(half, third.size.y)),PANEL_LIGHT,CREAM,15)
-	_button("results_title","LEAVE TO MAIN MENU" if network.active else "MAIN MENU",Rect2(third.position + Vector2(half + 12.0, 0), Vector2(half, third.size.y)),PANEL_LIGHT,CORAL,15)
+	# 4.11: WITHDRAW MY DATA between them while this session can be withdrawn
+	# (also on the main menu and in Settings > Research; all ask to confirm).
+	var count := 3 if _can_withdraw() else 2
+	var part: float = (third.size.x - 12.0 * (count - 1)) / count
+	_button("results_settings","SETTINGS",Rect2(third.position, Vector2(part, third.size.y)),PANEL_LIGHT,CREAM,15)
+	if count == 3: _button("withdraw_open","WITHDRAW MY DATA",Rect2(third.position + Vector2(part + 12.0, 0), Vector2(part, third.size.y)),PANEL_LIGHT,MUTED,14)
+	_button("results_title","LEAVE TO MAIN MENU" if network.active else "MAIN MENU",Rect2(third.position + Vector2((part + 12.0) * (count - 1), 0), Vector2(part, third.size.y)),PANEL_LIGHT,CORAL,15 if count == 2 else 14)
 	# Footer: one row along the bottom edge of the panel.
 	_text(_study_footer(),o+Vector2(m,panel.size.y - 25),13,MUTED)
 	if research_enabled or voice.recording_enabled:
@@ -2522,14 +2747,7 @@ func _input(event: InputEvent) -> void:
 		if screen=="game" and _map_occluded(local_pos):
 			get_viewport().set_input_as_handled()
 			return
-	if screen == "game" and event is InputEventKey and event.pressed and not ip_input.has_focus():
-		var direction: Vector2 = {KEY_W: Vector2.UP, KEY_UP: Vector2.UP, KEY_S: Vector2.DOWN, KEY_DOWN: Vector2.DOWN, KEY_A: Vector2.LEFT, KEY_LEFT: Vector2.LEFT, KEY_D: Vector2.RIGHT, KEY_RIGHT: Vector2.RIGHT}.get(event.keycode, Vector2.ZERO)
-		if direction != Vector2.ZERO:
-			_reset_map_gesture()
-			map_pan -= direction * 72.0
-			_apply_map_layout()
-			get_viewport().set_input_as_handled()
-			return
+	# (Arrow/WASD map panning removed 4.11: the whole town is always shown.)
 	if event is InputEventKey and event.pressed and not event.echo:
 		if ip_input.has_focus() or name_input.has_focus():
 			if event.keycode == KEY_ENTER: _action("join")
@@ -2540,7 +2758,9 @@ func _input(event: InputEvent) -> void:
 			KEY_F11:
 				_toggle_fullscreen()
 			KEY_ESCAPE:
-				if leave_prompt: _action("leave_tlx_cancel")
+				if withdraw_prompt: _action("withdraw_cancel")
+				elif leave_prompt: _action("leave_tlx_cancel")
+				elif screen == "study_info" and study_info_mode == "view": _action("study_back")
 				elif screen=="game" and _call_card_open(): _close_call_card()
 				elif screen=="game": _action("pause")
 				elif screen in ["pause","help"]: _action("unpause")
@@ -2668,6 +2888,15 @@ func _action(id: String) -> void:
 		"lobby_settings": previous_screen="lobby"; screen="settings"; settings_tab="sounds"
 		"results_settings": previous_screen="results"; screen="settings"
 		"results_title": _request_leave_to_title()
+		"study_agree": _answer_study_consent(true)
+		"study_decline": _answer_study_consent(false)
+		"study_view": _open_study_info("view")
+		"study_back":
+			screen = _study_return if _study_return in ["settings", "title", "results"] else "title"
+			_update_visibility()
+		"withdraw_open": withdraw_prompt = true
+		"withdraw_cancel": withdraw_prompt = false
+		"withdraw_confirm": _withdraw_my_data()
 		"leave_tlx_yes":
 			leave_prompt = false
 			_leaving_after_tlx = true
@@ -2675,7 +2904,6 @@ func _action(id: String) -> void:
 		"leave_tlx_no": _leave_to_title()
 		"leave_tlx_cancel":
 			leave_prompt = false
-		"map_overview": _toggle_overview()
 		"minimap_toggle": minimap_hidden = not minimap_hidden
 		"map_in": _zoom_map(1.0, MAP_VIEW.get_center())
 		"map_out": _zoom_map(-1.0, MAP_VIEW.get_center())
@@ -2700,8 +2928,7 @@ func _action(id: String) -> void:
 			if tutorial_active: _end_tutorial(false,false)
 			_save_progress(screen in ["game","pause"])
 			_stop_capture()
-			voice.shutdown()
-			get_tree().quit()
+			_quit_game()
 		"co_op": screen="lobby"
 		"host":
 			network.local_player_name = NetworkSession.clean_player_name(name_input.text)
@@ -3442,6 +3669,9 @@ func _toggle(id: String) -> void:
 		"perf": show_perf = not show_perf
 		"research":
 			research_enabled = not research_enabled
+			if research_enabled:
+				research.exclude_own_input = false
+				study_consent_agreed = true
 			if not research_enabled: research.set_enabled(false)
 			_sync_capture()
 		"mic": voice.set_mic_enabled(not voice.mic_enabled)

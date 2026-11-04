@@ -105,7 +105,7 @@ def load_player_level(path: str | Path, attempt: int = -1) -> PlayerLevel:
 LOCAL_EVENTS = {"mouse_motion", "mouse_button", "key_input", "ui_action", "crew_selected", "crew_deselected",
                 "department_filter", "inspection", "command_requested", "task_state", "context", "display",
                 "collection_choice", "briefing_completed", "microphone_check", "pc_check", "voice_recording",
-                "clock_correction", "chaos_state_at_capture_start"}
+                "clock_correction", "chaos_state_at_capture_start", "study_consent", "study_withdrawal"}
 LIFECYCLE = {"capture_started", "capture_resumed", "capture_stopped", "level_started", "level_ended",
              "sampler_started", "sampler_stopped", "sampler_error", "shift_end"}
 

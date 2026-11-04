@@ -18,6 +18,7 @@ var _level_segments: Array[Dictionary] = []
 var _segment_open := false
 var _audio_activity: Array[Dictionary] = []
 var _last_activity: Dictionary = {}
+var _withdrawn: Dictionary = {} # speaker keys removed after a study withdrawal (4.11)
 
 
 func open_file(destination: String, metadata: Dictionary) -> bool:
@@ -90,8 +91,10 @@ func append_speakers(packets: Dictionary, identities: Dictionary, frames: int = 
 	var by_key: Dictionary = {}
 	for peer_id in packets:
 		var identity: Dictionary = identities.get(peer_id, {"peer_id": peer_id})
+		if _withdrawn.has(speaker_key(int(peer_id), identity)): continue
 		if not update_speaker(int(peer_id), identity): return false
 		var key := speaker_key(int(peer_id), identity)
+		if _withdrawn.has(key): continue # withdrew from the study: never written again
 		if by_key.has(key): continue # the same person twice in one frame (old and new connection)
 		by_key[key] = packets[peer_id]
 		_note_activity(key, int(peer_id), packets[peer_id], frames)
@@ -171,6 +174,7 @@ func _save_manifest() -> bool:
 	if _segment_open: _level_segments.back().end_frame = bytes_written / 2
 	_manifest["level_segments"] = _level_segments
 	_manifest["audio_activity"] = _audio_activity
+	if not _withdrawn.is_empty(): _manifest["withdrawn_speakers"] = _withdrawn.keys()
 	_manifest["audio_activity_threshold_pcm16"] = 256
 	_manifest["player"] = "listen.html"
 	_manifest["frames"] = bytes_written / 2
@@ -218,6 +222,59 @@ func _note_activity(key: String, peer_id: int, pcm: PackedByteArray, frames: int
 	else:
 		_last_activity[key] = _audio_activity.size()
 		_audio_activity.append({"speaker_id": key, "peer_id": peer_id, "start_frame": start, "end_frame": start + frames})
+
+
+## Study withdrawal (4.11): delete this person's track while the session is
+## still recording, and never record them again in this session. Returns the
+## deleted file names.
+func withdraw_speaker(key: String) -> Array:
+	var removed: Array = []
+	_withdrawn[key] = true
+	if _tracks.has(key):
+		var entry: Dictionary = _tracks[key]
+		entry.writer.close_file()
+		_tracks.erase(key)
+		removed = _delete_track_files(path.get_base_dir(), str(entry.file))
+	_audio_activity = _audio_activity.filter(func(a): return str(a.speaker_id) != key)
+	_last_activity.clear()
+	log_metadata("speaker_withdrawn", {"speaker_id": key, "files_deleted": removed})
+	_save_manifest()
+	Player.write_file(path.get_base_dir().path_join("listen.html"), _manifest)
+	return removed
+
+
+## The same for a finished session folder: remove the track from session.json,
+## its activity and its files, and rewrite listen.html.
+static func withdraw_from_folder(folder: String, key: String) -> Array:
+	var manifest_path := folder.path_join("session.json")
+	var info: Variant = JSON.parse_string(FileAccess.get_file_as_string(manifest_path)) if FileAccess.file_exists(manifest_path) else null
+	if not info is Dictionary: return []
+	var removed: Array = []
+	var kept: Array = []
+	for track: Dictionary in info.get("tracks", []):
+		if str(track.get("speaker_id", "")) == key: removed.append_array(_delete_track_files(folder, str(track.get("file", ""))))
+		else: kept.append(track)
+	if removed.is_empty() and kept.size() == (info.get("tracks", []) as Array).size(): return []
+	info["tracks"] = kept
+	info["audio_activity"] = (info.get("audio_activity", []) as Array).filter(func(a): return str(a.get("speaker_id", "")) != key)
+	var withdrawn: Array = info.get("withdrawn_speakers", [])
+	withdrawn.append(key)
+	info["withdrawn_speakers"] = withdrawn
+	var file := FileAccess.open(manifest_path, FileAccess.WRITE)
+	if file != null:
+		file.store_string(JSON.stringify(info, "\t"))
+		file.close()
+	Player.write_file(folder.path_join("listen.html"), info)
+	return removed
+
+
+static func _delete_track_files(folder: String, filename: String) -> Array:
+	var removed: Array = []
+	if filename.is_empty() or "/" in filename or ".." in filename: return removed
+	for name in [filename, filename.get_basename() + ".jsonl", filename + ".tmp"]:
+		var target := folder.path_join(name)
+		if FileAccess.file_exists(target) and DirAccess.remove_absolute(ProjectSettings.globalize_path(target)) == OK: removed.append(name)
+	return removed
 
 
 static func recover_pending(folder: String) -> int:

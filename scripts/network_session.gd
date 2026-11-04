@@ -26,6 +26,8 @@ const RESEARCH_CHANNEL := 4
 const RESEARCH_PACKET_MAX := 1024 * 1024 # compressed bytes per relayed chunk
 const RESEARCH_RAW_MAX := 8 * 1024 * 1024
 const RESEARCH_EXTENSIONS := ["jsonl", "csv", "json"]
+## "withdraw" (4.11): the player withdrew from the study; the leader deletes their data.
+const RELAY_MODES := ["append", "replace", "withdraw"]
 # Every player has the same job: command one (or more) emergency departments.
 # Departments are split automatically by how many people are in the room.
 const DEPARTMENTS: Array[String] = ["fire", "medic", "engineer", "police"]
@@ -948,7 +950,7 @@ func relay_ready() -> bool:
 	return _server_available() and roster.has(multiplayer.get_unique_id()) and leader_peer() > 0
 
 func send_research(rel_path: String, raw: PackedByteArray, mode: String) -> bool:
-	if not relay_ready() or not valid_relay_path(rel_path) or raw.size() > RESEARCH_RAW_MAX: return false
+	if not relay_ready() or not valid_relay_path(rel_path) or mode not in RELAY_MODES or raw.size() > RESEARCH_RAW_MAX: return false
 	var packed := raw.compress(FileAccess.COMPRESSION_ZSTD)
 	if packed.size() > RESEARCH_PACKET_MAX: return false
 	_research_relay.rpc_id(1, rel_path, packed, raw.size(), mode)
@@ -958,7 +960,7 @@ func send_research(rel_path: String, raw: PackedByteArray, mode: String) -> bool
 func _research_relay(rel_path: String, packed: PackedByteArray, size: int, mode: String) -> void:
 	if not active or not hosting: return
 	var sender := multiplayer.get_remote_sender_id()
-	if not roster.has(sender) or not valid_relay_path(rel_path) or mode not in ["append", "replace"]: return
+	if not roster.has(sender) or not valid_relay_path(rel_path) or mode not in RELAY_MODES: return
 	if packed.size() > RESEARCH_PACKET_MAX or size <= 0 or size > RESEARCH_RAW_MAX: return
 	var key := player_key(sender)
 	var leader := leader_peer()
@@ -972,7 +974,7 @@ func _research_relay(rel_path: String, packed: PackedByteArray, size: int, mode:
 @rpc("authority", "call_remote", "reliable", RESEARCH_CHANNEL)
 func _research_deliver(key: String, rel_path: String, packed: PackedByteArray, size: int, mode: String) -> void:
 	if not active or hosting or multiplayer.get_remote_sender_id() != 1 or not is_leader(): return
-	if not valid_relay_path(rel_path) or mode not in ["append", "replace"] or key.length() > 40: return
+	if not valid_relay_path(rel_path) or mode not in RELAY_MODES or key.length() > 40: return
 	if packed.size() > RESEARCH_PACKET_MAX or size <= 0 or size > RESEARCH_RAW_MAX: return
 	var raw := packed.decompress(size, FileAccess.COMPRESSION_ZSTD)
 	if raw.size() == size: research_relay_received.emit(key, rel_path, raw, mode)

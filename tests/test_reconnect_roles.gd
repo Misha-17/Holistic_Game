@@ -134,6 +134,11 @@ func run() -> void:
 	check(await wait_until(func(): return received.size() == 1), "the leader receives it")
 	if received.size() == 1:
 		check(received[0][0] == keys[2] and received[0][1] == "levels/run1_events.jsonl" and received[0][2] == line and received[0][3] == "append", "with the sender's player key, path and bytes")
+	# 4.11: a study withdrawal travels the same way.
+	check(back.send_research("withdrawal.json", "{}".to_utf8_buffer(), "withdraw"), "withdrawal request accepted")
+	check(not back.send_research("withdrawal.json", "{}".to_utf8_buffer(), "erase_everything"), "unknown modes are refused")
+	check(await wait_until(func(): return received.size() == 2), "the leader receives the withdrawal")
+	if received.size() == 2: check(received[1][0] == keys[2] and received[1][3] == "withdraw", "as a withdrawal from that player")
 
 	# LAN: the host is the leader and receives relayed data directly.
 	var host := make_peer("lan_host")

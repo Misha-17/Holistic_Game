@@ -179,3 +179,27 @@ rejoin they get them back, and nobody else's departments change. Players who
 did not return are dropped from the split when the next level starts. A new
 player who arrives mid-level has no department until then. The capture of a
 reconnecting player continues in the same level file (same `level_run_id`).
+
+## Consent and withdrawal (04.11)
+
+- Consent is asked on the first screen at launch (placeholder study text in
+  `scripts/study_info.gd`). Each recorded session logs a `study_consent` row:
+  `agreed`, `source` (`launch_screen`), `text_version`, `placeholder_text`.
+- WITHDRAW MY DATA (main menu, results screen, Settings > Research; always
+  asks to confirm first) deletes the player's data of the session just played (solo:
+  the whole session and its voice folder; session leader: own input rows,
+  `*_samples_60hz.csv`, `questionnaires/` and own voice track, keeping shared
+  game events; other players: `players/<player_key>/` and their voice track on
+  the leader's computer). Voice manifests list removed speakers in
+  `withdrawn_speakers`; `timeline.jsonl` gets a `speaker_withdrawn` row.
+- `research/withdrawals.jsonl` (one line per withdrawal, on the computer that
+  stored the data): `utc`, `unix_ms`, `session_id`, `player_key`, `role`
+  (`solo`, `leader`, `teammate`), `text_version`, `deleted` (file names only).
+- A session leader who withdrew keeps recording shared game events for the
+  team, but no more of their own input (`exclude_own_input`).
+- A teammate who has already left the room cannot reach the leader's computer;
+  the game shows a participant code instead (first 8 hex characters of their
+  player key, shown as `ABCD-1234`). Delete `players/<key>/` whose name starts
+  with those characters and the matching `player_<key>.wav` track by hand,
+  and remove that track's entry from the voice folder's `session.json`.
+

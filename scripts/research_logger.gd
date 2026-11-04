@@ -19,7 +19,12 @@ var relay: ResearchRelay
 ## The rows a non-leader still records: this player's own input and view.
 const LOCAL_EVENTS := ["mouse_motion", "mouse_button", "key_input", "ui_action", "crew_selected", "crew_deselected",
 	"department_filter", "inspection", "command_requested", "task_state", "context", "display", "collection_choice",
-	"briefing_completed", "microphone_check", "pc_check", "voice_recording", "clock_correction", "chaos_state_at_capture_start"]
+	"briefing_completed", "microphone_check", "pc_check", "voice_recording", "clock_correction", "chaos_state_at_capture_start",
+	"study_consent", "study_withdrawal"]
+## 4.11: the session leader withdrew from the study but teammates are still
+## recorded. The leader's game keeps logging shared game events (teammates'
+## files need them) but no longer this player's own input or 60 Hz samples.
+var exclude_own_input := false
 var _context: Dictionary = {}
 var _level: Dictionary = {}
 var _levels: Array[Dictionary] = []
@@ -242,6 +247,11 @@ func end_level(reason: String = "completed", summary: Dictionary = {}, final_sta
 	_level = {}
 	_active_events.clear()
 	_closed_events.clear()
+
+## Stop recording this player's own input from now on (study withdrawal).
+func withdraw_own_input() -> void:
+	exclude_own_input = true
+	_stop_sampler("study_withdrawal", false)
 
 func get_level_context() -> Dictionary:
 	var result: Dictionary = _level.duplicate(true)
@@ -477,6 +487,7 @@ func _instance_id(key: String) -> String:
 
 func _write(event_type: String, data: Dictionary) -> void:
 	if not enabled or _file == null: return
+	if exclude_own_input and LOCAL_EVENTS.has(event_type) and event_type != "study_withdrawal": return
 	_event_count += 1
 	var active_ids: Array[String] = []
 	for key: String in _active_events: active_ids.append(_instance_id(key))
@@ -551,7 +562,7 @@ func _fail_write() -> void:
 	consent_changed.emit(false)
 
 func _start_sampler() -> void:
-	if not enabled or _level.is_empty(): return
+	if not enabled or _level.is_empty() or exclude_own_input: return
 	if sampler == null: sampler = ResearchSampler.new()
 	if sampler.is_running(): return
 	sampler.relay = relay

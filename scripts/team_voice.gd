@@ -248,6 +248,40 @@ func set_storage_allowed(value: bool) -> void:
 	_publish_state()
 	_refresh_status()
 
+## Study withdrawal (4.11): remove one person's voice from every recording of
+## a session on this computer (the open one and any finished folders).
+func withdraw_speaker(key: String, session: String) -> Array:
+	var removed: Array = []
+	var open_folder := recording_path.get_base_dir() if _writer != null and session_id == session else ""
+	if not open_folder.is_empty(): removed.append_array(_writer.withdraw_speaker(key))
+	for folder in session_folders(session):
+		if folder != open_folder: removed.append_array(Session.withdraw_from_folder(folder, key))
+	return removed
+
+## Delete every voice folder of a session (solo withdrawal: only one person).
+func delete_session_folders(session: String) -> Array:
+	if session_id == session and _writer != null: stop()
+	var removed: Array = []
+	for folder in session_folders(session):
+		for name in DirAccess.get_files_at(folder):
+			if DirAccess.remove_absolute(ProjectSettings.globalize_path(folder.path_join(name))) == OK: removed.append(name)
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(folder))
+	return removed
+
+func session_folders(session: String) -> Array[String]:
+	var result: Array[String] = []
+	if session.is_empty() or not DirAccess.dir_exists_absolute(DIRECTORY): return result
+	var safe := ""
+	for character in session.left(64):
+		if character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-": safe += character
+	for name in DirAccess.get_directories_at(DIRECTORY):
+		if name.begins_with("team_%s_" % safe): result.append(DIRECTORY.path_join(name))
+	return result
+
+## The voice key of this computer's player (same as the track name).
+func local_speaker_key() -> String:
+	return _speaker_key(_local_peer)
+
 func _open_recording() -> bool:
 	if _server_only or not _session_active or not recording_enabled or not _capture_active or not storage_allowed: return false
 	_render_audio()

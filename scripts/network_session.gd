@@ -9,11 +9,25 @@ signal message_received(text: String)
 signal disconnected
 signal voice_packet_received(peer_id: int, sequence: int, pcm: PackedByteArray)
 signal voice_participants_changed
+## Study data from another player, delivered to the session leader's game
+## (2.11: only the leader's computer stores files). rel_path is relative to that
+## player's folder; mode is "append" or "replace".
+signal research_relay_received(player_key: String, rel_path: String, data: PackedByteArray, mode: String)
 
 const PORT := 24680
-const PROTOCOL_VERSION := 12 # Owner-controlled start/cancel after entry reminders.
+const PROTOCOL_VERSION := 14 # 2.11: stable player keys, reserved departments, study data relayed to the session leader.
 const MAX_PLAYER_NAME_LENGTH := 20
 const UNRELIABLE_SNAPSHOT_LIMIT := 1100 # Leave room for RPC/ENet headers below the path MTU.
+# ENet channels: 0 control, 1 voice audio, 2 voice state, 3 large state/events,
+# 4 study data relayed to the session leader (its own channel, so it never
+# delays gameplay messages).
+const CHANNELS := 5
+const RESEARCH_CHANNEL := 4
+const RESEARCH_PACKET_MAX := 1024 * 1024 # compressed bytes per relayed chunk
+const RESEARCH_RAW_MAX := 8 * 1024 * 1024
+const RESEARCH_EXTENSIONS := ["jsonl", "csv", "json"]
+## "withdraw" (4.11): the player withdrew from the study; the leader deletes their data.
+const RELAY_MODES := ["append", "replace", "withdraw"]
 # Every player has the same job: command one (or more) emergency departments.
 # Departments are split automatically by how many people are in the room.
 const DEPARTMENTS: Array[String] = ["fire", "medic", "engineer", "police"]
@@ -36,6 +50,24 @@ var roster: Dictionary = {}
 var role_assignments: Dictionary = {}
 var local_player_name := ""
 var player_names: Dictionary = {}
+## A random id stored on this computer (main.gd), sent when joining. The host
+## uses it to recognise a player who reconnects with a new network id: they get
+## their seat and departments back, and their voice continues in the same track.
+var local_player_key := ""
+var player_keys: Dictionary = {} # peer id -> player key (connected players)
+## Number of department bundles in use. Fixed while roles are locked, so a player
+## leaving or joining never moves anyone else's departments (2.11).
+var team_size := 0
+## Host: true except in the co-op lobby. While locked, a departing player's seat
+## and departments are reserved for them, and new arrivals wait for the next level.
+var roles_locked := false
+## Seats and departments of players who dropped out while roles were locked.
+## player key -> {"seat", "rank", "name"}. Host only, but broadcast for the UI.
+var reserved: Dictionary = {}
+## The session leader starts levels and is the one computer that stores study
+## files. On a dedicated server it is the first player who joined; it moves to
+## the next player only while the leader is disconnected.
+var leader_key := ""
 var status := "Offline"
 var _last_snapshot: Dictionary = {}
 var _snapshot_sequence := 0
@@ -75,7 +107,7 @@ func host(server_only: bool = false) -> Error:
 	close()
 	dedicated = server_only
 	var peer := ENetMultiplayerPeer.new()
-	var err := peer.create_server(port, 4 if dedicated else 3, 4)
+	var err := peer.create_server(port, 4 if dedicated else 3, CHANNELS)
 	if err != OK:
 		status = "Could not open port %d (is another copy of the game already hosting?)" % port
 		return err
@@ -88,6 +120,10 @@ func host(server_only: bool = false) -> Error:
 	hosting = true
 	role = -1 if dedicated else 0
 	roster = {} if dedicated else {1: 0}
+	player_keys = {} if dedicated else {1: _clean_key(local_player_key, 1)}
+	reserved.clear()
+	leader_key = "" if dedicated else str(player_keys[1])
+	team_size = 0
 	_reconcile_role_assignments()
 	if not dedicated:
 		player_names[1] = clean_player_name(local_player_name)
@@ -113,7 +149,7 @@ func join(address: String) -> Error:
 		status = "Type the host's IP address first"
 		return ERR_INVALID_PARAMETER
 	var peer := ENetMultiplayerPeer.new()
-	var err := peer.create_client(target, target_port, 4)
+	var err := peer.create_client(target, target_port, CHANNELS)
 	if err != OK:
 		status = "Could not connect to %s" % target
 		return err
@@ -157,6 +193,11 @@ func close() -> void:
 	roster.clear()
 	role_assignments.clear()
 	player_names.clear()
+	player_keys.clear()
+	reserved.clear()
+	leader_key = ""
+	team_size = 0
+	roles_locked = false
 	voice_participants.clear()
 	_voice_windows.clear()
 	_voice_sequences.clear()
@@ -244,8 +285,34 @@ func can_do(action: String, peer_id: int = -1, payload: Dictionary = {}) -> bool
 func can_start_session(peer_id: int = -1) -> bool:
 	if not active or not dedicated or roster.is_empty(): return false
 	var actor := multiplayer.get_unique_id() if peer_id < 0 else peer_id
+	return actor == leader_peer()
+
+## The session leader's network id: the host in a LAN game; on a dedicated
+## server the first player who joined (by player key), or while they are away
+## the earliest-joined player still connected. -1 when nobody is there.
+func leader_peer() -> int:
+	if not active: return 1
+	if not dedicated: return 1
+	for peer_id in player_keys:
+		if roster.has(peer_id) and str(player_keys[peer_id]) == leader_key and not leader_key.is_empty(): return int(peer_id)
 	# Dictionary insertion order keeps this independent of department/seat assignment.
-	return actor == int(roster.keys()[0])
+	return int(roster.keys()[0]) if not roster.is_empty() else -1
+
+## True on the one computer that stores study files for this session (solo
+## players always store their own).
+func is_leader() -> bool:
+	if not active: return true
+	if hosting: return not dedicated
+	return leader_peer() == multiplayer.get_unique_id()
+
+func player_key(peer_id: int) -> String:
+	return str(player_keys.get(peer_id, "peer%d" % peer_id))
+
+static func _clean_key(value: String, peer_id: int) -> String:
+	var result := ""
+	for character in value.left(32):
+		if character in "abcdef0123456789": result += character
+	return result if result.length() >= 8 else "peer%d" % peer_id
 
 func departments_for(peer_id: int = -1) -> Array:
 	if not active:
@@ -253,7 +320,8 @@ func departments_for(peer_id: int = -1) -> Array:
 	var actor := multiplayer.get_unique_id() if peer_id < 0 else peer_id
 	if not roster.has(actor):
 		return []
-	var split: Array = SPLITS.get(clampi(roster.size(), 1, 4), SPLITS[1])
+	var bundles := team_size if team_size > 0 else roster.size()
+	var split: Array = SPLITS.get(clampi(bundles, 1, 4), SPLITS[1])
 	var rank := int(role_assignments.get(actor, -1))
 	if not _valid_role_assignments(roster, role_assignments):
 		# Also supports local fixtures that populate the roster without a handshake.
@@ -268,7 +336,7 @@ func swap_role(peer_id: int, target_peer_id: int) -> bool:
 	# The authoritative game checks whether the level is over before calling.
 	if not active or not hosting or not can_do("change_role", peer_id, {"target_peer_id": target_peer_id}):
 		return false
-	_reconcile_role_assignments()
+	if not role_assignments.has(peer_id) or not role_assignments.has(target_peer_id): _reconcile_role_assignments()
 	var previous := int(role_assignments[peer_id])
 	role_assignments[peer_id] = role_assignments[target_peer_id]
 	role_assignments[target_peer_id] = previous
@@ -278,25 +346,65 @@ func swap_role(peer_id: int, target_peer_id: int) -> bool:
 	return true
 
 func _reconcile_role_assignments() -> void:
-	# Keep the chosen order when players arrive/leave, then redistribute all four
-	# departments using the split for the new player count. Seats stay unchanged.
+	# Full re-split (lobby, or the start of a level): keep the chosen order of
+	# connected players (waiting players last), then share all four departments
+	# with the split for the new player count. Seats stay unchanged.
+	reserved.clear()
 	var peers: Array = roster.keys()
 	peers.sort_custom(func(a, b):
-		var a_rank := int(role_assignments.get(a, 4 + int(roster[a])))
-		var b_rank := int(role_assignments.get(b, 4 + int(roster[b])))
+		var a_rank := int(role_assignments.get(a, -1))
+		var b_rank := int(role_assignments.get(b, -1))
+		if a_rank < 0: a_rank = 4 + int(roster[a])
+		if b_rank < 0: b_rank = 4 + int(roster[b])
 		return int(roster[a]) < int(roster[b]) if a_rank == b_rank else a_rank < b_rank)
 	var updated: Dictionary = {}
 	for rank in peers.size():
 		updated[peers[rank]] = rank
 	role_assignments = updated
+	team_size = peers.size()
+	if dedicated and not roster.is_empty() and not _key_connected(leader_key):
+		leader_key = player_key(int(roster.keys()[0]))
 
-func _valid_role_assignments(data: Dictionary, assignments: Dictionary) -> bool:
+## Host: called when a level starts and when the lobby opens. Players who did not
+## come back lose their reservation; players waiting since mid-level get a
+## department. Returns true if anyone's departments changed.
+func rebalance_roles() -> bool:
+	if not active or not hosting: return false
+	var before := {}
+	for peer_id in roster: before[peer_id] = departments_for(int(peer_id))
+	var had_reserved := not reserved.is_empty()
+	_reconcile_role_assignments()
+	var changed := had_reserved
+	for peer_id in roster:
+		if departments_for(int(peer_id)) != before.get(peer_id, []): changed = true
+	if changed:
+		_broadcast_roster()
+		roster_changed.emit()
+		announce("Departments for this level: %s" % assignment_summary())
+	return changed
+
+## Host: lock roles outside the lobby. Unlocking (back in the lobby) re-splits.
+func set_roles_locked(value: bool) -> void:
+	if roles_locked == value: return
+	roles_locked = value
+	if not value and active and hosting: rebalance_roles()
+
+func _key_connected(key: String) -> bool:
+	if key.is_empty(): return false
+	for peer_id in player_keys:
+		if roster.has(peer_id) and str(player_keys[peer_id]) == key: return true
+	return false
+
+func _valid_role_assignments(data: Dictionary, assignments: Dictionary, bundles: int = -1) -> bool:
 	if data.size() != assignments.size(): return false
+	var size := bundles if bundles > 0 else (team_size if team_size > 0 else data.size())
+	if size < 1 or size > 4: return false
 	var used: Array[int] = []
 	for peer_id in assignments:
 		if not peer_id is int or not data.has(peer_id) or not assignments[peer_id] is int: return false
 		var rank := int(assignments[peer_id])
-		if rank < 0 or rank >= data.size() or used.has(rank): return false
+		if rank == -1: continue # waiting for the next level
+		if rank < 0 or rank >= size or used.has(rank): return false
 		used.append(rank)
 	return true
 
@@ -343,7 +451,8 @@ func departments_text(peer_id: int = -1) -> String:
 	var names: Array[String] = []
 	for kind in departments_for(peer_id):
 		names.append(str(DEPARTMENT_NAMES.get(kind, kind)).to_upper())
-	return " + ".join(names) if not names.is_empty() else "NO DEPARTMENT"
+	if names.is_empty(): return "WAITING FOR NEXT LEVEL" if roster.has(multiplayer.get_unique_id() if peer_id < 0 else peer_id) and active else "NO DEPARTMENT"
+	return " + ".join(names)
 
 func assignment_summary() -> String:
 	var parts: Array[String] = []
@@ -361,8 +470,17 @@ func _peer_disconnected(id: int) -> void:
 	if not roster.has(id): return
 	var label := player_label(id)
 	if hosting and roster.has(id): print(player_log_label(id) + " disconnected")
+	var key := player_key(id)
+	var rank := int(role_assignments.get(id, -1))
+	var kept := hosting and roles_locked and rank >= 0
+	if kept:
+		# 2.11: nobody else's departments change. The seat and departments wait
+		# for this player; their crews keep working but get no new orders.
+		reserved[key] = {"seat": int(roster[id]), "rank": rank, "name": str(player_names.get(id, ""))}
 	roster.erase(id)
-	_reconcile_role_assignments()
+	role_assignments.erase(id)
+	player_keys.erase(id)
+	if not kept: _reconcile_role_assignments()
 	player_names.erase(id)
 	_command_windows.erase(id)
 	voice_participants.erase(id)
@@ -376,19 +494,24 @@ func _peer_disconnected(id: int) -> void:
 		else: _broadcast_roster()
 	roster_changed.emit()
 	if hosting:
-		var text := "%s left. Departments reshuffled. %s" % [label, assignment_summary()]
+		var text := ("%s disconnected. Their departments wait for them; nobody else's change." % label) if kept else ("%s left. Departments reshuffled. %s" % [label, assignment_summary()])
 		announce.call_deferred(text)
 
 func _broadcast_roster() -> void:
 	# Wait until ENet finishes removing disconnected peers before sending.
 	if active and hosting and multiplayer.get_peers().size() > 0:
-		_roster.rpc(roster, dedicated, player_names, role_assignments)
+		_roster.rpc(roster, dedicated, player_names, role_assignments, _roster_extra())
+
+func _roster_extra() -> Dictionary:
+	var names_waiting: Array[String] = []
+	for key in reserved: names_waiting.append(str(reserved[key].get("name", "")))
+	return {"keys": player_keys.duplicate(), "team_size": team_size, "leader_key": leader_key, "reserved": reserved.duplicate(true)}
 
 func _connected() -> void:
 	# Keep the timeout active until the versioned roster handshake succeeds.
 	_connect_started_ms = Time.get_ticks_msec()
 	status = "Checking game version..."
-	_hello.rpc_id(1, PROTOCOL_VERSION, clean_player_name(local_player_name))
+	_hello.rpc_id(1, PROTOCOL_VERSION, clean_player_name(local_player_name), _clean_key(local_player_key, 0))
 
 func _failed() -> void:
 	close()
@@ -396,7 +519,7 @@ func _failed() -> void:
 	disconnected.emit()
 
 @rpc("any_peer", "call_remote", "reliable")
-func _hello(protocol: int = 0, requested_name: String = "") -> void:
+func _hello(protocol: int = 0, requested_name: String = "", requested_key: String = "") -> void:
 	if not active or not hosting:
 		return
 	var sender := multiplayer.get_remote_sender_id()
@@ -410,19 +533,55 @@ func _hello(protocol: int = 0, requested_name: String = "") -> void:
 		return
 	
 	if roster.has(sender):
-		_roster.rpc_id(sender, roster, dedicated, player_names, role_assignments)
+		_roster.rpc_id(sender, roster, dedicated, player_names, role_assignments, _roster_extra())
 		return
+	var key := _clean_key(requested_key, sender)
+	# Two copies of the game on one computer share a key: the second one is a new player.
+	if _key_connected(key): key = "%sp%d" % [key.left(20), sender]
+	var returning: Dictionary = reserved.get(key, {})
+	var used_seats: Array = roster.values()
+	for entry: Dictionary in reserved.values():
+		if entry != returning: used_seats.append(int(entry.seat))
 	var assigned := -1
-	for i in range(0 if dedicated else 1, 4):
-		if not roster.values().has(i):
-			assigned = i
-			break
+	if not returning.is_empty() and not roster.values().has(int(returning.seat)):
+		assigned = int(returning.seat)
+	else:
+		for i in range(0 if dedicated else 1, 4):
+			if not used_seats.has(i):
+				assigned = i
+				break
 	if assigned < 0:
+		_message.rpc_id(sender, "This room is full (seats are kept for players who dropped out until the next level).")
+		get_tree().create_timer(0.4).timeout.connect(func():
+			if active and hosting and multiplayer.get_peers().has(sender):
+				multiplayer.multiplayer_peer.disconnect_peer(sender))
 		return
 	roster[sender] = assigned
-	_reconcile_role_assignments()
+	player_keys[sender] = key
 	player_names[sender] = clean_player_name(requested_name)
-	print("%s joined as %s chief" % [player_log_label(sender), departments_text(sender)])
+	if leader_key.is_empty(): leader_key = key
+	var how := "joined"
+	if not returning.is_empty():
+		# Back after a dropout: same seat, same departments.
+		reserved.erase(key)
+		role_assignments[sender] = int(returning.rank)
+		how = "is back"
+	elif roles_locked:
+		# Mid-session: take a department bundle nobody holds, or wait for the
+		# next level. Nobody else's departments change.
+		var taken: Array = role_assignments.values()
+		for entry: Dictionary in reserved.values(): taken.append(int(entry.rank))
+		role_assignments[sender] = -1
+		for rank in range(maxi(team_size, 1)):
+			if not taken.has(rank):
+				role_assignments[sender] = rank
+				break
+		if team_size <= 0:
+			team_size = 1
+			role_assignments[sender] = 0
+	else:
+		_reconcile_role_assignments()
+	print("%s %s as %s chief" % [player_log_label(sender), how, departments_text(sender)])
 	voice_participants[sender] = {"mic": false, "consent": false, "recording": false}
 	_broadcast_roster()
 	_broadcast_voice_states()
@@ -430,12 +589,19 @@ func _hello(protocol: int = 0, requested_name: String = "") -> void:
 		var raw := var_to_bytes(_last_snapshot)
 		_initial_state.rpc_id(sender, _snapshot_sequence, raw.compress(FileAccess.COMPRESSION_ZSTD), raw.size())
 	roster_changed.emit()
-	announce("%s joined as %s chief. %s" % [player_label(sender), departments_text(sender), assignment_summary()])
+	if how == "is back": announce("%s is back as %s chief." % [player_label(sender), departments_text(sender)])
+	elif roles_locked: announce("%s joined as %s. %s" % [player_label(sender), departments_text(sender), "Nobody else's departments change." if int(role_assignments[sender]) >= 0 else "They get departments at the next level."])
+	else: announce("%s joined as %s chief. %s" % [player_label(sender), departments_text(sender), assignment_summary()])
 
 @rpc("authority", "call_remote", "reliable")
-func _roster(data: Dictionary, server_only: bool = false, names: Dictionary = {}, assignments: Dictionary = {}) -> void:
-	if hosting or multiplayer.get_remote_sender_id() != 1 or not _valid_roster(data, server_only) or not _valid_player_names(data, names) or not _valid_role_assignments(data, assignments):
+func _roster(data: Dictionary, server_only: bool = false, names: Dictionary = {}, assignments: Dictionary = {}, extra: Dictionary = {}) -> void:
+	var bundles := int(extra.get("team_size", 0)) if extra.get("team_size", 0) is int else -1
+	if hosting or multiplayer.get_remote_sender_id() != 1 or not _valid_roster(data, server_only) or not _valid_player_names(data, names) or not _valid_role_assignments(data, assignments, bundles) or not _valid_extra(data, extra):
 		return
+	team_size = bundles
+	player_keys = (extra.get("keys", {}) as Dictionary).duplicate()
+	leader_key = str(extra.get("leader_key", ""))
+	reserved = (extra.get("reserved", {}) as Dictionary).duplicate(true)
 	dedicated = server_only
 	_connect_started_ms = -1
 	status = "Connected to Beacon Bay"
@@ -502,6 +668,15 @@ func announce(text: String) -> void:
 func _message(text: String) -> void:
 	if active and not hosting and multiplayer.get_remote_sender_id() == 1:
 		message_received.emit(text.left(240))
+
+func _valid_extra(data: Dictionary, extra: Dictionary) -> bool:
+	if extra.is_empty(): return true # older fixtures
+	if extra.size() > 4 or not extra.get("keys", {}) is Dictionary or not extra.get("leader_key", "") is String or not extra.get("reserved", {}) is Dictionary: return false
+	var keys: Dictionary = extra.get("keys", {})
+	if keys.size() > 4 or (extra.get("reserved", {}) as Dictionary).size() > 4: return false
+	for peer_id in keys:
+		if not peer_id is int or not data.has(peer_id) or not keys[peer_id] is String or str(keys[peer_id]).length() > 40: return false
+	return true
 
 func _valid_roster(data: Dictionary, server_only: bool = false) -> bool:
 	if data.size() > 4:
@@ -751,3 +926,55 @@ func _voice_rate_allowed(windows: Dictionary, peer_id: int, per_second: float, b
 	if allowed: window.tokens = float(window.tokens) - 1.0
 	windows[peer_id] = window
 	return allowed
+
+
+# ------------------------------------------------------------ study data relay
+# 2.11: only the session leader's computer stores study files. Other players'
+# games send their own data (mouse, clicks, keys, 60 Hz samples, questionnaire
+# answers) here; the host (LAN) or the dedicated server passes it on to the
+# leader, who writes it under research/<session>/players/<player key>/.
+
+static func valid_relay_path(path: String) -> bool:
+	if path.is_empty() or path.length() > 200 or path.begins_with("/") or ".." in path or "\\" in path: return false
+	var parts := path.split("/", false)
+	if parts.is_empty() or parts.size() > 3: return false
+	for part in parts:
+		if part.begins_with("."): return false
+		for character in part:
+			if not character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.": return false
+	return parts[-1].get_extension() in RESEARCH_EXTENSIONS
+
+## Can this game send study data to the leader right now?
+func relay_ready() -> bool:
+	if not active or hosting or is_leader(): return false
+	return _server_available() and roster.has(multiplayer.get_unique_id()) and leader_peer() > 0
+
+func send_research(rel_path: String, raw: PackedByteArray, mode: String) -> bool:
+	if not relay_ready() or not valid_relay_path(rel_path) or mode not in RELAY_MODES or raw.size() > RESEARCH_RAW_MAX: return false
+	var packed := raw.compress(FileAccess.COMPRESSION_ZSTD)
+	if packed.size() > RESEARCH_PACKET_MAX: return false
+	_research_relay.rpc_id(1, rel_path, packed, raw.size(), mode)
+	return true
+
+@rpc("any_peer", "call_remote", "reliable", RESEARCH_CHANNEL)
+func _research_relay(rel_path: String, packed: PackedByteArray, size: int, mode: String) -> void:
+	if not active or not hosting: return
+	var sender := multiplayer.get_remote_sender_id()
+	if not roster.has(sender) or not valid_relay_path(rel_path) or mode not in RELAY_MODES: return
+	if packed.size() > RESEARCH_PACKET_MAX or size <= 0 or size > RESEARCH_RAW_MAX: return
+	var key := player_key(sender)
+	var leader := leader_peer()
+	if leader == sender or leader <= 0: return
+	if not dedicated:
+		var raw := packed.decompress(size, FileAccess.COMPRESSION_ZSTD)
+		if raw.size() == size: research_relay_received.emit(key, rel_path, raw, mode)
+	else:
+		_research_deliver.rpc_id(leader, key, rel_path, packed, size, mode)
+
+@rpc("authority", "call_remote", "reliable", RESEARCH_CHANNEL)
+func _research_deliver(key: String, rel_path: String, packed: PackedByteArray, size: int, mode: String) -> void:
+	if not active or hosting or multiplayer.get_remote_sender_id() != 1 or not is_leader(): return
+	if not valid_relay_path(rel_path) or mode not in RELAY_MODES or key.length() > 40: return
+	if packed.size() > RESEARCH_PACKET_MAX or size <= 0 or size > RESEARCH_RAW_MAX: return
+	var raw := packed.decompress(size, FileAccess.COMPRESSION_ZSTD)
+	if raw.size() == size: research_relay_received.emit(key, rel_path, raw, mode)

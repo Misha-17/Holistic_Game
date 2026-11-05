@@ -1,5 +1,6 @@
 extends Node2D
 
+
 const INK := Color("102832")
 const PANEL := Color("193944")
 const PANEL_LIGHT := Color("214956")
@@ -30,12 +31,19 @@ var town: TownView
 var map_clip: Control
 var audio: AudioDirector
 var research: ResearchLogger
+## 2.11: only the session leader's computer stores study files. On the other
+## players' computers this relay carries their own data to the leader.
+var relay: ResearchRelay
+const PLAYER_KEY_PATH := "user://player_key.txt"
 var network: NetworkSession
 var voice: Node
 var capture_run_id := ""
 var capture_shift := -1
 var capture_session_id := ""
 var collection_choice_made := false
+# Asked once per play session (until disconnect, leaving to the title or exit),
+# not before every level (mid-term report, Table A4).
+var voice_choice_made := false
 var entry_popup := ""
 var briefing_role := "fire"
 var shared_level_run_id := ""
@@ -65,6 +73,41 @@ var screen := "title"
 var previous_screen := "game"
 var settings_tab := "sounds"
 var sound_settings: Control
+# NASA-TLX (Andrei, 30.10): asked once after the last level of a play session
+# (level 6, won or lost) and available from the title screen, for sessions that
+# end early. One survey per session, not per level.
+const TLX_LAST_LEVEL_INDEX := 5
+const TLX_DELAY_S := 2.5 # let the stars and totals appear first
+var tlx_form: Control
+var tlx_source := ""
+var _tlx_started_ms := 0
+var _tlx_offered_key := ""
+## 4.11 (Andrei): leaving to the main menu from the results screen first asks
+## whether to fill in the NASA-TLX, so a session that ends before Level 6 still
+## gets a survey. leave_prompt shows the question; _leaving_after_tlx is set
+## while the survey is open on the way out (the player then ignores the next
+## level a co-op host starts, and leaves once the survey is done or skipped).
+var leave_prompt := false
+## Study consent (4.11): asked on the first screen at launch. The answer holds
+## until the game is closed (it replaces the old per-session question at the
+## first level). study_info_mode: "launch" (must answer) or "view" (re-read).
+var study_consent_answered := false
+var study_consent_agreed := false
+var study_info_mode := "launch"
+var _study_return := "title"
+var _consent_logged_session := ""
+## Withdrawal after playing (4.11): WITHDRAW MY DATA on the results screen and
+## in Settings > Research deletes this player's recordings of the session.
+var withdraw_prompt := false
+var _withdrawn_session := ""
+var _session_had_collection := false
+## How this computer took part in the last session, and its player key then:
+## a withdrawal from the main menu happens after leaving the room (4.11).
+var _session_role := "solo"
+var _session_key := ""
+var _leaving_after_tlx := false
+var _tlx_submitted_session := ""
+var last_capture_session_id := ""
 var selected := -1
 var selected_unit := -1
 var role_filter := ""
@@ -117,6 +160,8 @@ var _tick_left := 0.0
 # Networking smoothness (guests only): dispatches shown before the host confirms them.
 var predicted_dispatches: Array[Dictionary] = []
 var host_speed := 1.0
+# Newest pointer target under the local mouse, for the 60 Hz sample stream.
+var _last_pointer_target: Dictionary = {}
 var dedicated_server := false
 var _dedicated_shift_started := false
 var show_perf := false
@@ -195,10 +240,15 @@ func _drag_zoom() -> float:
 	# 5% closer than the old most-zoomed-out level (playtest 15.10).
 	return _explore_min_zoom() * 1.05
 
-func _explore_map_at(normalized: Vector2, anchor: Vector2 = MAP_VIEW.get_center()) -> void:
-	map_zoom = _drag_zoom()
-	map_pan = anchor - normalized.clamp(Vector2.ZERO, Vector2.ONE) * TownView.MAP_SIZE * map_zoom - MAP_ORIGIN
-	_apply_map_layout()
+# 4.11 (Andrei): only the whole-town view is left. There is no zoom (wheel,
+# button) and no panning; these stay as no-ops for old callers and saves.
+func _explore_map_at(_normalized: Vector2, _anchor: Vector2 = MAP_VIEW.get_center()) -> void:
+	_show_whole_town()
+
+func _show_whole_town() -> void:
+	_reset_map_gesture()
+	map_zoom = _fit_map_zoom()
+	_center_map(Vector2(.5, .5))
 
 func _reset_exploration_camera() -> void:
 	_reset_map_gesture()
@@ -213,9 +263,10 @@ func _reset_exploration_camera() -> void:
 			stations[unit.kind] = true
 			center += Vector2(unit.home)
 	_overview_return_center = center / stations.size() if not stations.is_empty() else Vector2(.5, .5)
-	_center_map(_overview_return_center)
-	# Every level starts on the whole town, so nobody has to discover the overview.
-	_toggle_overview()
+	# The whole town, the only view (4.11). A card left open is closed.
+	selected = -1
+	focus_hold_left = 0
+	_show_whole_town()
 
 func _map_center() -> Vector2:
 	return (MAP_VIEW.get_center() - _map_rect().position) / _map_rect().size
@@ -225,7 +276,7 @@ func _center_map(normalized: Vector2) -> void:
 	_apply_map_layout()
 
 func _apply_map_layout() -> void:
-	map_zoom = clampf(map_zoom, _fit_map_zoom(), 3.0)
+	map_zoom = _fit_map_zoom() # whole town only (4.11); a smaller map is centred, so panning has no effect
 	var size := TownView.MAP_SIZE * map_zoom
 	var origin := MAP_ORIGIN + map_pan
 	for axis in range(2):
@@ -241,32 +292,25 @@ func _apply_map_layout() -> void:
 
 # The wheel switches between the two views: up = into the drag view at the
 # cursor, down = back to the whole town.
-func _zoom_map(direction: float, around: Vector2) -> void:
-	if direction > 0 and _is_map_overview():
-		_explore_map_at(_map_world_at(around), around)
-	elif direction < 0 and not _is_map_overview():
-		_toggle_overview()
+# The wheel no longer zooms (4.11): only the whole-town view exists.
+func _zoom_map(_direction: float, _around: Vector2) -> void:
+	pass
 
 func _toggle_overview() -> void:
-	_reset_map_gesture()
-	if _is_map_overview():
-		_explore_map_at(_overview_return_center)
-	else:
-		_overview_return_zoom = map_zoom
-		_overview_return_center = _map_center()
-		map_zoom = _fit_map_zoom()
-		# An open call card would cover the whole-town view: close it.
-		selected = -1
-		focus_hold_left = 0
-		_center_map(Vector2(.5, .5))
+	_show_whole_town()
 
 func _reset_map_gesture() -> void:
+	# Only a drag changes the cursor. _update_visibility() calls this every frame
+	# on menu screens, so forcing ARROW here made the button hand cursor flicker
+	# back to an arrow after every mouse move (Andrei, 30.10).
+	var was_dragging: bool = map_dragging or _map_middle_drag or _minimap_drag
 	_map_press_pending = false
 	_map_middle_drag = false
 	_minimap_drag = false
 	map_dragging = false
 	_map_press_target.clear()
-	Input.set_default_cursor_shape(Input.CURSOR_ARROW)
+	if was_dragging or Input.get_current_cursor_shape() == Input.CURSOR_DRAG:
+		Input.set_default_cursor_shape(Input.CURSOR_ARROW)
 
 func _map_input_blocked(point: Vector2) -> bool:
 	return not MAP_VIEW.has_point(point) or _hud_rect().has_point(point) or CREW_BAR.has_point(point) or _map_occluded(point)
@@ -307,16 +351,7 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 				var consumed: bool = _map_middle_drag
 				_reset_map_gesture()
 				return consumed
-			if not over_button and not _map_input_blocked(point):
-				_reset_map_gesture()
-				_map_middle_drag = true
-				map_dragging = true
-				_map_last_position = point
-				return true
-		elif event.pressed and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN] and not over_button and not _map_input_blocked(point):
-			_reset_map_gesture()
-			_zoom_map(1.0 if event.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0, point)
-			return true
+			# No middle-button panning and no wheel zoom any more (4.11).
 	elif event is InputEventMouseMotion:
 		if _minimap_drag:
 			_center_map((point - MINIMAP_RECT.position) / MINIMAP_RECT.size)
@@ -325,16 +360,13 @@ func _handle_map_pointer(event: InputEventMouse, over_button: bool) -> bool:
 			if not map_dragging and point.distance_to(_map_press_position) >= DRAG_THRESHOLD:
 				map_dragging = true
 				tactical_map.clear_hover()
-			if map_dragging:
-				map_pan += point - _map_last_position
-				_apply_map_layout()
-				Input.set_default_cursor_shape(Input.CURSOR_DRAG)
+			# Moving the mouse while pressed still cancels the click (so sweeping
+			# across a crew never dispatches it), but the map does not move (4.11).
 			_map_last_position = point
 			return true
 	return false
 
 func _draw_map_tools() -> void:
-	_button("map_overview", "EXPLORE" if _is_map_overview() else "OVERVIEW", Rect2(-62, 18, 106, 34), TEAL if _is_map_overview() else PANEL, INK if _is_map_overview() else CREAM, 12)
 	_draw_minimap()
 
 func _minimap_shown() -> bool:
@@ -427,22 +459,606 @@ func _sync_capture() -> void:
 		_end_level_capture("changed_level")
 		capture_shift = sim.shift_index
 		capture_run_id = shared_level_run_id if not shared_level_run_id.is_empty() else _new_capture_id("level%d" % BeaconCampaign.level_number(sim.shift_index))
-	if capture_session_id.is_empty(): capture_session_id = _new_capture_id("session")
+	if capture_session_id.is_empty():
+		capture_session_id = _new_capture_id("session")
+		_session_had_collection = false
+		_session_role = "solo" if not network.active else ("leader" if network.is_leader() else "guest")
+		_session_key = network.player_key(multiplayer.get_unique_id()) if network.active else network.local_player_key
+		if _sends_to_leader(): last_capture_session_id = capture_session_id
+		else: _remember_session(capture_session_id)
 	var context := _capture_context()
 	voice.set_research_context(context)
 	voice.set_capture_active(entry_popup.is_empty() and not _waiting_for_briefings)
 	voice.set_session_time(sim.elapsed)
 	voice.start(capture_session_id)
 	if research_enabled and not research.enabled:
+		# Decided when the log opens: leader (or solo) writes files here; anyone
+		# else sends their own rows to the leader and writes nothing locally.
+		research.relay = relay if _sends_to_leader() else null
 		research.set_clock(sim.elapsed, sim.shift_index)
-		research.begin_session(capture_session_id, {"peer_id": multiplayer.get_unique_id(), "departments": network.departments_for(), "build": "0.9.1", "map_pixels": TownView.MAP_SIZE})
+		research.begin_session(capture_session_id, {"peer_id": multiplayer.get_unique_id(), "departments": network.departments_for(), "build": "0.9.3", "map_pixels": TownView.MAP_SIZE})
 		research.begin_level(sim.shift_index, context, capture_run_id)
 		research.observe_state(sim.net_snapshot())
 		if sim.has_method("chaos_context"): research.log_event("chaos_state_at_capture_start", sim.chaos_context())
 	research.set_clock(sim.elapsed, sim.shift_index)
+	if research.enabled or voice.recording_active: _session_had_collection = true
+	if research.enabled and study_consent_answered and _consent_logged_session != capture_session_id:
+		_consent_logged_session = capture_session_id
+		research.log_event("study_consent", {"agreed": study_consent_agreed, "source": "launch_screen",
+			"text_version": StudyInfo.TEXT_VERSION, "placeholder_text": StudyInfo.IS_PLACEHOLDER})
 	if research.enabled:
 		research.begin_level(sim.shift_index, context, capture_run_id)
 		research.update_context({"screen": screen, "selected_incident_id": selected, "selected_unit_id": selected_unit, "departments": network.departments_for()})
+
+# Window and screen facts for research "display" rows and the study PC check.
+func _display_info() -> Dictionary:
+	var root_window: Window = get_tree().root
+	var mode := DisplayServer.window_get_mode()
+	var screen := DisplayServer.window_get_current_screen()
+	return {"window_size": DisplayServer.window_get_size(), "viewport_size": get_viewport().get_visible_rect().size,
+		"design_size": Vector2(1600, 900), "content_scale_factor": root_window.content_scale_factor,
+		"stretch_mode": root_window.content_scale_mode, "stretch_aspect": root_window.content_scale_aspect,
+		"window_mode": {DisplayServer.WINDOW_MODE_WINDOWED: "windowed", DisplayServer.WINDOW_MODE_MINIMIZED: "minimized", DisplayServer.WINDOW_MODE_MAXIMIZED: "maximized", DisplayServer.WINDOW_MODE_FULLSCREEN: "fullscreen", DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN: "exclusive_fullscreen"}.get(mode, str(mode)),
+		"screen_size": DisplayServer.screen_get_size(screen), "screen_scale": DisplayServer.screen_get_scale(screen),
+		"screen_dpi": DisplayServer.screen_get_dpi(screen), "refresh_rate_hz": DisplayServer.screen_get_refresh_rate(screen),
+		"vsync_mode": DisplayServer.window_get_vsync_mode(), "fps_engine": Engine.get_frames_per_second(),
+		"max_fps": Engine.max_fps, "embedded_in_editor": Engine.is_embedded_in_editor(),
+		"os": OS.get_name(), "renderer": RenderingServer.get_video_adapter_name()}
+
+# Newest game state for the 60 Hz sample stream (research_sampler.gd). Runs
+# once per frame while a level is recorded; the sampler thread repeats it in
+# every sample until the next frame publishes a newer one.
+func _sample_state() -> Dictionary:
+	var guest := network.active and not network.hosting
+	var hover_type := str(_last_pointer_target.get("type", ""))
+	var hover_id := int(_last_pointer_target.get("id", -1))
+	var ui_button := str(_last_pointer_target.get("ui_button", ""))
+	if hover_type.is_empty() and not ui_button.is_empty():
+		var parts := ui_button.split(":", true, 1)
+		hover_type = "ui:" + parts[0]
+		hover_id = parts[1].to_int() if parts.size() > 1 and parts[1].is_valid_int() else -1
+	return {"level_elapsed_s": sim.elapsed,
+		"clock_running": _simulation_active() and sim.running and not sim.finished and not tutorial_active,
+		"clock_rate": host_speed if guest else 1.0,
+		"screen": screen if entry_popup.is_empty() and not _waiting_for_briefings else "entry",
+		"selected_incident_id": selected, "selected_unit_id": selected_unit,
+		"hover_type": hover_type, "hover_id": hover_id,
+		"task_load": BeaconTaskLoad.compute(sim, network.departments_for())}
+
+# ---------------------------------------------------------------- STUDY PC CHECK
+# Settings > Research > CHECK THIS STUDY PC (Andrei, 30.10: "validate the
+# frame-rate and viewport corrections on every study PC"). Measures the frame
+# rate for PC_CHECK_SECONDS, reads the window and scaling, and listens to the
+# microphone, then saves research/pc_checks/pc_check_<unix_ms>.json.
+const PC_CHECK_SECONDS := 5.0
+const PC_CHECK_MIN_WINDOW := Vector2i(1280, 720)
+var pc_check: Dictionary = {}
+var _pc_check_started_ms := 0
+var _pc_check_active := false
+var _pc_check_start_frame := 0
+var _pc_check_frame_max_ms := 0.0
+var _pc_check_mic := false
+
+func _start_pc_check() -> void:
+	settings_tab = "pc_check"
+	pc_check = {}
+	_pc_check_started_ms = Time.get_ticks_msec()
+	_pc_check_active = true
+	_pc_check_start_frame = Engine.get_process_frames()
+	_pc_check_frame_max_ms = 0.0
+	_pc_check_mic = voice.mic_enabled
+	if _pc_check_mic: voice.begin_mic_check()
+	_update_visibility()
+
+func _pc_check_running() -> bool:
+	return _pc_check_active and pc_check.is_empty()
+
+func _tick_pc_check(delta: float) -> void:
+	var on_page := screen == "settings" and settings_tab == "pc_check"
+	if not on_page:
+		_pc_check_active = false
+		if _pc_check_mic:
+			_pc_check_mic = false
+			voice.end_mic_check()
+		return
+	if not _pc_check_running(): return
+	_pc_check_frame_max_ms = maxf(_pc_check_frame_max_ms, delta * 1000.0)
+	var seconds := (Time.get_ticks_msec() - _pc_check_started_ms) / 1000.0
+	if seconds >= PC_CHECK_SECONDS: _finish_pc_check(seconds)
+
+func _finish_pc_check(seconds: float) -> void:
+	_pc_check_active = false
+	var info := _display_info()
+	var frames := Engine.get_process_frames() - _pc_check_start_frame
+	var fps := frames / maxf(0.001, seconds)
+	var refresh := float(info.refresh_rate_hz)
+	if is_nan(refresh) or refresh < 1.0: refresh = 0.0 # unknown (some drivers, remote desktop)
+	# Target: 55 fps, or the screen's refresh rate if that is lower (vsync caps it).
+	var target := minf(55.0, refresh * 0.92) if refresh > 0.0 else 55.0
+	var window: Vector2i = info.window_size
+	var viewport: Vector2 = info.viewport_size
+	var mic: Dictionary = voice.mic_check_result() if _pc_check_mic else {"verdict": "microphone_off"}
+	var lines: Array = []
+	lines.append(_pc_line("window", "Game window", "%d x %d  %s" % [window.x, window.y, str(info.window_mode)],
+		"fail" if bool(info.embedded_in_editor) else ("pass" if window.x >= PC_CHECK_MIN_WINDOW.x and window.y >= PC_CHECK_MIN_WINDOW.y else "warn"),
+		"Running inside the Godot editor's Game tab: use the exported game." if bool(info.embedded_in_editor) else ("" if window.x >= PC_CHECK_MIN_WINDOW.x else "Window is small: press F11 for fullscreen.")))
+	var scaled_ok: bool = int(info.stretch_mode) != Window.CONTENT_SCALE_MODE_DISABLED and absf(viewport.x / viewport.y - 16.0 / 9.0) < 0.15
+	lines.append(_pc_line("scaling", "Scaling", "%d x %d game area  (screen %s, scale %.2f)" % [roundi(viewport.x), roundi(viewport.y), _size_text(info.screen_size), float(info.screen_scale)],
+		"pass" if scaled_ok else "warn", "" if scaled_ok else "The game area is not 16:9; parts of the map may be cut off."))
+	lines.append(_pc_line("frame_rate", "Frame rate", "%.0f fps  (slowest frame %.0f ms, screen %s)" % [fps, _pc_check_frame_max_ms, ("%.0f Hz" % refresh) if refresh > 0.0 else "? Hz"],
+		"pass" if fps >= target else ("warn" if fps >= 30.0 else "fail"), "" if fps >= target else "Close other programs or plug in the laptop, then run the check again."))
+	var verdict := str(mic.get("verdict", "microphone_off"))
+	var mic_text: String = {"good": "Speech level good (%.0f dB)" % float(mic.get("speech_level_db", 0)), "too_quiet": "Too quiet (%.0f dB)" % float(mic.get("speech_level_db", 0)),
+		"too_loud": "Clipping: too loud", "no_signal": "No sound from the microphone", "waiting": "Not enough speech heard", "microphone_off": "Voice chat is off"}.get(verdict, verdict)
+	var mic_fix: String = {"too_quiet": "Raise the microphone level in Windows sound settings or move it closer.", "too_loud": "Lower the microphone level in Windows sound settings.",
+		"no_signal": "Check the headset is plugged in and selected as the Windows input.", "waiting": "Speak a full sentence during the check.", "microphone_off": "Turn on Voice chat (Sounds) to test the microphone."}.get(verdict, "")
+	lines.append(_pc_line("microphone", "Microphone", mic_text, "pass" if verdict == "good" else ("fail" if verdict in ["no_signal", "too_loud"] else "warn"), mic_fix))
+	lines.append(_pc_line("recording", "Gameplay recording", "On" if research_enabled else "Off", "pass" if research_enabled else "warn", "" if research_enabled else "Turn on Record gameplay & mouse in Research."))
+	var overall := "pass"
+	for line: Dictionary in lines:
+		if line.status == "fail": overall = "fail"
+		elif line.status == "warn" and overall == "pass": overall = "warn"
+	pc_check = {"schema": "beacon-bay-pc-check-v1", "overall": overall, "lines": lines, "fps_measured": snappedf(fps, 0.1),
+		"frame_time_ms_max": snappedf(_pc_check_frame_max_ms, 0.1), "seconds": snappedf(seconds, 0.01), "display": _json_safe(info), "microphone": mic,
+		"game_version": str(ProjectSettings.get_setting("application/config/version", "")), "player_key": network.local_player_key if network != null else "",
+		"utc": Time.get_datetime_string_from_system(true), "unix_ms": int(Time.get_unix_time_from_system() * 1000.0)}
+	if research != null: research.log_event("pc_check", {"overall": overall, "fps_measured": pc_check.fps_measured, "microphone": verdict})
+	if get_tree().get_script() == null: _save_pc_check() # tests call _save_pc_check() with cleanup
+
+func _pc_line(id: String, title: String, value: String, status: String, fix: String) -> Dictionary:
+	return {"id": id, "title": title, "value": value, "status": status, "fix": fix}
+
+func _size_text(value: Variant) -> String:
+	var v: Vector2 = Vector2(value)
+	return "%d x %d" % [roundi(v.x), roundi(v.y)]
+
+func _json_safe(value: Variant) -> Variant:
+	if value is Dictionary:
+		var out: Dictionary = {}
+		for key in value: out[str(key)] = _json_safe(value[key])
+		return out
+	if value is Vector2 or value is Vector2i: return [value.x, value.y]
+	return value
+
+func _save_pc_check() -> String:
+	var folder := "user://research/pc_checks"
+	DirAccess.make_dir_recursive_absolute(folder)
+	var path := folder.path_join("pc_check_%d.json" % int(pc_check.unix_ms))
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null: return ""
+	file.store_string(JSON.stringify(pc_check, "\t"))
+	file.close()
+	pc_check["saved_path"] = path
+	return path
+
+func _draw_pc_check() -> void:
+	var y: float = SETTINGS_TOP
+	_settings_heading("STUDY PC CHECK", 0, y)
+	var panel := Rect2(Vector2(SETTINGS_COL[0], y), Vector2(SETTINGS_CARD.x, 560))
+	_panel(panel, PANEL)
+	if _pc_check_running():
+		var seconds := (Time.get_ticks_msec() - _pc_check_started_ms) / 1000.0
+		_text("Checking this computer…", panel.position + Vector2(24, 44), 24, CREAM)
+		_wrap("Keep the game in front. If Voice chat is on, say a sentence at normal speaking volume now.", panel.position + Vector2(24, 84), panel.size.x - 48, 16, MUTED, 24)
+		var bar := Rect2(panel.position + Vector2(24, 150), Vector2(panel.size.x - 48, 10))
+		draw_rect(bar, PANEL_LIGHT)
+		draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(seconds / PC_CHECK_SECONDS, 0, 1), bar.size.y)), TEAL)
+	elif pc_check.is_empty():
+		_text("Not run yet.", panel.position + Vector2(24, 44), 22, MUTED)
+	else:
+		var overall := str(pc_check.overall)
+		var head: String = {"pass": "This PC is ready for the study", "warn": "Ready, with notes below", "fail": "Fix the red items before playing"}.get(overall, overall)
+		_text(head, panel.position + Vector2(24, 44), 24, _pc_color(overall))
+		var row_y := panel.position.y + 80
+		for line: Dictionary in pc_check.lines:
+			var color := _pc_color(str(line.status))
+			var badge := Rect2(Vector2(panel.position.x + 24, row_y), Vector2(64, 26))
+			_panel(badge, Color(color, .18))
+			_text({"pass": "OK", "warn": "CHECK", "fail": "FIX"}.get(str(line.status), "?"), badge.position + Vector2(badge.size.x * .5 - (10 if str(line.status) == "pass" else 22), 19), 13, color)
+			_text(str(line.title), Vector2(panel.position.x + 104, row_y + 19), 17, CREAM)
+			_text(_short(str(line.value), 46), Vector2(panel.position.x + 290, row_y + 19), 14, MUTED)
+			var next := row_y + 40
+			if str(line.fix) != "": next = _wrap(str(line.fix), Vector2(panel.position.x + 104, row_y + 44), panel.size.x - 128, 13, color, 18) + 14
+			row_y = next + 6
+		if pc_check.has("saved_path"):
+			_text("Saved: research/pc_checks/" + str(pc_check.saved_path).get_file(), Vector2(panel.position.x + 24, panel.end.y - 18), 12, MUTED)
+	_settings_heading("MICROPHONE", 1, y)
+	var mic_panel := Rect2(Vector2(SETTINGS_COL[1], y), Vector2(SETTINGS_CARD.x, 200))
+	_panel(mic_panel, Color(PANEL, 0.55))
+	if voice.mic_enabled:
+		_wrap("When you speak, the bar should pass the white line without turning red.", mic_panel.position + Vector2(20, 36), mic_panel.size.x - 40, 15, CREAM, 22)
+		_draw_mic_meter(Rect2(mic_panel.position + Vector2(20, 96), Vector2(mic_panel.size.x - 40, 18)))
+	else:
+		_wrap("Voice chat is off, so the microphone is not tested. Turn it on in Sounds, then run the check again.", mic_panel.position + Vector2(20, 36), mic_panel.size.x - 40, 15, MUTED, 22)
+	_settings_note([["Run this once on every study PC before the session, in the exported game, at the size players will use.", 15, CREAM], ["During play the game also logs frame rate and window size every 10 s.", 14, MUTED]], 1, y + 230, 200)
+	_button("pc_check_run", "RUN AGAIN" if not pc_check.is_empty() else "RUN CHECK", Rect2(SETTINGS_COL[1], y + 450, 300, 52), TEAL, INK, 16)
+	_button("settings_tab:research", "<  RESEARCH", Rect2(SETTINGS_COL[1] + 320, y + 450, 300, 52), PANEL_LIGHT, CREAM, 16)
+
+func _pc_color(status: String) -> Color:
+	return {"pass": TEAL, "warn": GOLD, "fail": CORAL}.get(status, MUTED)
+
+# ---------------------------------------------------------------- STUDY CONSENT
+# 4.11 (Andrei): consent and transparency at game entry, and withdrawal after
+# playing. The wording is placeholder text in scripts/study_info.gd.
+func _open_study_info(mode: String) -> void:
+	study_info_mode = mode
+	if mode == "view" and screen != "study_info": _study_return = screen
+	screen = "study_info"
+	_update_visibility()
+
+func _answer_study_consent(agreed: bool) -> void:
+	study_consent_answered = true
+	study_consent_agreed = agreed
+	collection_choice_made = true
+	research_enabled = agreed
+	research.exclude_own_input = false
+	if not agreed: research.set_enabled(false)
+	voice.set_recording_consent(agreed)
+	voice.set_recording_enabled(agreed)
+	screen = "title"
+	_save_progress(false)
+	_update_visibility()
+
+func _draw_study_info() -> void:
+	_draw_page_header("", "STUDY INFORMATION AND CONSENT")
+	_text(StudyInfo.TITLE, Vector2(80, 140), 34, CREAM)
+	var y := _wrap(StudyInfo.INTRO, Vector2(80, 186), 1280, 18, CREAM, 26) + 22
+	for i in range(StudyInfo.SECTIONS.size()):
+		var section: Array = StudyInfo.SECTIONS[i]
+		var column := i % 2
+		var top: float = y + (i / 2) * 210.0
+		var x := 80.0 + column * 660.0
+		_text(str(section[0]), Vector2(x, top + 20), 13, TEAL)
+		_wrap(str(section[1]), Vector2(x, top + 50), 620, 16, MUTED, 24)
+	if StudyInfo.IS_PLACEHOLDER: _text(StudyInfo.PLACEHOLDER_NOTE, Vector2(80, 760), 13, GOLD)
+	if study_info_mode == "launch":
+		_button("study_decline", StudyInfo.DECLINE, Rect2(80, 790, 420, 52), PANEL_LIGHT, CREAM, 15)
+		_button("study_agree", StudyInfo.AGREE, Rect2(940, 790, 420, 52), TEAL, INK, 16)
+	else:
+		_button("study_back", "<  BACK", Rect2(80, 790, 220, 52), PANEL_LIGHT, CREAM, 15)
+		var state := ("You agreed to take part." if study_consent_agreed else "You chose to play without data collection.") if study_consent_answered else ""
+		_text(state + "  Change it with Record gameplay & mouse in Settings > Research.", Vector2(330, 823), 14, MUTED)
+
+## A WITHDRAW MY DATA button is offered for the session just played, if
+## anything was recorded and it was not withdrawn yet.
+func _can_withdraw() -> bool:
+	var session := _tlx_session()
+	return not dedicated_server and not session.is_empty() and session != _withdrawn_session and _session_had_collection
+
+## A short code for the researcher, from this player's key (offline teammates).
+func _participant_code() -> String:
+	var key := (_session_key if not _session_key.is_empty() else network.local_player_key).to_upper()
+	return "%s-%s" % [key.substr(0, 4), key.substr(4, 4)] if key.length() >= 8 else key
+
+func _draw_withdraw_prompt() -> void:
+	buttons.clear()
+	_overlay()
+	var panel := Rect2(380, 250, 680, 400)
+	_panel(panel, INK, CORAL)
+	if _session_role == "guest" and not _sends_to_leader():
+		_text("STUDY WITHDRAWAL", panel.position + Vector2(40, 52), 13, CORAL)
+		_text(StudyInfo.WITHDRAW_TITLE, panel.position + Vector2(40, 100), 30, CREAM)
+		var line := _wrap(StudyInfo.WITHDRAW_OFFLINE, panel.position + Vector2(40, 140), panel.size.x - 80, 17, CREAM, 25) + 44
+		_text("Participant code:  " + _participant_code(), Vector2(panel.position.x + 40, line), 22, GOLD)
+		_button("withdraw_cancel", "CLOSE", Rect2(panel.position + Vector2(355, 322), Vector2(285, 50)), PANEL_LIGHT, CREAM, 15)
+		return
+	_text("STUDY WITHDRAWAL", panel.position + Vector2(40, 52), 13, CORAL)
+	_text(StudyInfo.WITHDRAW_TITLE, panel.position + Vector2(40, 100), 30, CREAM)
+	var y := _wrap(StudyInfo.WITHDRAW_TEXT, panel.position + Vector2(40, 140), panel.size.x - 80, 17, CREAM, 25) + 40
+	_wrap(StudyInfo.WITHDRAW_COOP if network.active else StudyInfo.WITHDRAW_LATER, Vector2(panel.position.x + 40, y), panel.size.x - 80, 15, MUTED, 22)
+	_button("withdraw_cancel", "CANCEL", Rect2(panel.position + Vector2(40, 322), Vector2(285, 50)), PANEL_LIGHT, CREAM, 15)
+	_button("withdraw_confirm", "WITHDRAW AND DELETE", Rect2(panel.position + Vector2(355, 322), Vector2(285, 50)), CORAL, INK, 15)
+
+## Delete what was recorded about this player in the last session and stop
+## recording them. Solo: the whole session. Session leader: their own input
+## rows, 60 Hz samples, survey answers and voice track (shared game events stay
+## for the teammates). Other players: a request to the leader, who deletes
+## their folder and voice track.
+func _withdraw_my_data() -> void:
+	withdraw_prompt = false
+	var session := _tlx_session()
+	if session.is_empty(): return
+	var key := _session_key if not _session_key.is_empty() else network.local_player_key
+	var role := _session_role
+	if role == "guest" and not _sends_to_leader():
+		# Left the room already: the data is on the leader's computer and cannot
+		# be reached from here. The dialog shows a code for the researcher.
+		withdraw_prompt = true
+		return
+	_withdrawn_session = session
+	research_enabled = false
+	study_consent_agreed = false
+	voice.set_recording_consent(false)
+	var deleted: Array = []
+	if role == "guest":
+		research.set_enabled(false)
+		voice.set_recording_enabled(false)
+		relay.clear() # do not send anything else about this player
+		relay.enqueue("withdrawal.json", JSON.stringify({"session_id": session, "text_version": StudyInfo.TEXT_VERSION,
+			"utc": Time.get_datetime_string_from_system(true)}).to_utf8_buffer(), "withdraw")
+		_toast("Withdrawal sent to the session leader's computer. Your data there will be deleted.")
+	elif role == "leader":
+		# Keep recording the team while still in the room (teammates' files need
+		# the shared game events), but nothing more about this player.
+		if network.active:
+			research_enabled = true
+			research.withdraw_own_input()
+		else:
+			research.set_enabled(false)
+			voice.set_recording_enabled(false)
+		deleted.append_array(_remove_own_rows(session))
+		deleted.append_array(voice.withdraw_speaker("player_" + key, session))
+		_toast("Your data from this session was deleted. Teammates' data is kept.")
+	else:
+		research.set_enabled(false)
+		voice.set_recording_enabled(false)
+		deleted.append_array(voice.delete_session_folders(session))
+		deleted.append_array(_delete_tree("user://research/%s" % session.validate_filename()))
+		_toast("Your data from this session was deleted.")
+	if role != "guest": _note_withdrawal(session, key, role, deleted)
+	_update_visibility()
+
+## Leader: the shared files keep game events but lose this player's own rows.
+func _remove_own_rows(session: String) -> Array:
+	var removed: Array = []
+	var folder := "user://research/%s" % session.validate_filename()
+	if not DirAccess.dir_exists_absolute(folder): return removed
+	var logs: Array[String] = [folder.path_join("session_events.jsonl")]
+	if DirAccess.dir_exists_absolute(folder.path_join("levels")):
+		for name in DirAccess.get_files_at(folder.path_join("levels")):
+			if name.ends_with("_events.jsonl"): logs.append(folder.path_join("levels").path_join(name))
+			elif name.ends_with("_samples_60hz.csv") and DirAccess.remove_absolute(ProjectSettings.globalize_path(folder.path_join("levels").path_join(name))) == OK:
+				removed.append("levels/" + name)
+	for path in logs:
+		var count := _filter_own_rows(path)
+		if count > 0: removed.append("%s (%d own rows)" % [path.trim_prefix(folder + "/"), count])
+	removed.append_array(_delete_tree(folder.path_join("questionnaires")))
+	return removed
+
+func _filter_own_rows(path: String) -> int:
+	if not FileAccess.file_exists(path): return 0
+	var source := FileAccess.open(path, FileAccess.READ)
+	var target := FileAccess.open(path + ".tmp", FileAccess.WRITE)
+	if source == null or target == null: return 0
+	var removed := 0
+	while not source.eof_reached():
+		var line := source.get_line()
+		if line.is_empty(): continue
+		var at := line.find("\"event\":\"")
+		var event := line.substr(at + 9, line.find("\"", at + 9) - at - 9) if at >= 0 else ""
+		if ResearchLogger.LOCAL_EVENTS.has(event) and event != "study_withdrawal":
+			removed += 1
+			continue
+		target.store_line(line)
+	source.close()
+	target.close()
+	DirAccess.rename_absolute(ProjectSettings.globalize_path(path + ".tmp"), ProjectSettings.globalize_path(path))
+	return removed
+
+func _delete_tree(folder: String) -> Array:
+	var removed: Array = []
+	if not DirAccess.dir_exists_absolute(folder): return removed
+	for child in DirAccess.get_directories_at(folder): removed.append_array(_delete_tree(folder.path_join(child)))
+	for name in DirAccess.get_files_at(folder):
+		if DirAccess.remove_absolute(ProjectSettings.globalize_path(folder.path_join(name))) == OK: removed.append(folder.path_join(name).trim_prefix("user://research/"))
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(folder))
+	return removed
+
+## research/withdrawals.jsonl on the storing computer: that a withdrawal
+## happened and what was deleted, with no recorded data.
+func _note_withdrawal(session: String, key: String, role: String, deleted: Array) -> void:
+	DirAccess.make_dir_recursive_absolute("user://research")
+	var path := "user://research/withdrawals.jsonl"
+	var file := FileAccess.open(path, FileAccess.READ_WRITE if FileAccess.file_exists(path) else FileAccess.WRITE)
+	if file == null: return
+	file.seek_end()
+	file.store_line(JSON.stringify({"utc": Time.get_datetime_string_from_system(true), "unix_ms": int(Time.get_unix_time_from_system() * 1000.0),
+		"session_id": session, "player_key": key, "role": role, "text_version": StudyInfo.TEXT_VERSION, "deleted": deleted}))
+	file.close()
+
+# ---------------------------------------------------------------- NASA-TLX
+func _maybe_offer_tlx() -> void:
+	if dedicated_server or tutorial_active or sim.shift_index != TLX_LAST_LEVEL_INDEX: return
+	var key := "%s|%d|%d|%d" % [last_capture_session_id, sim.shift_index, roundi(sim.elapsed * 1000.0), sim.rescued]
+	if key == _tlx_offered_key: return
+	_tlx_offered_key = key
+	_open_tlx("after_last_level")
+
+func _open_tlx(source: String) -> void:
+	if screen != "tlx": previous_screen = screen
+	tlx_source = source
+	_tlx_started_ms = Time.get_ticks_msec()
+	tlx_form.reset()
+	screen = "tlx"
+	_update_visibility()
+
+func _close_tlx() -> void:
+	if _leaving_after_tlx:
+		_leave_to_title()
+		return
+	screen = previous_screen if previous_screen in ["title", "results"] else "title"
+	_update_visibility()
+
+func _tlx_session() -> String:
+	return capture_session_id if not capture_session_id.is_empty() else last_capture_session_id
+
+## Ask before leaving only if this session has no survey yet.
+func _should_ask_tlx_on_leave() -> bool:
+	if dedicated_server or tutorial_active: return false
+	var session := _tlx_session()
+	return not session.is_empty() and session != _tlx_submitted_session
+
+## MAIN MENU on the results screen (or in settings opened from it).
+func _request_leave_to_title() -> void:
+	if screen == "settings": screen = "results"
+	if _should_ask_tlx_on_leave():
+		leave_prompt = true
+		_update_visibility()
+		return
+	_leave_to_title()
+
+func _leave_to_title() -> void:
+	leave_prompt = false
+	_submit_rating()
+	screen = "title"
+	_update_visibility()
+	if not network.active:
+		_leaving_after_tlx = false
+		return
+	# Answers relayed to the session leader must leave before the connection closes.
+	var sent: int = relay.flush_now() if relay != null else 0
+	_leaving_after_tlx = true
+	if sent > 0 or (relay != null and relay.pending_bytes() > 0):
+		await get_tree().create_timer(0.6).timeout
+		if relay != null: relay.flush_now()
+		await get_tree().create_timer(0.3).timeout
+	_leave_network()
+	_leaving_after_tlx = false
+
+func _draw_leave_prompt() -> void:
+	buttons.clear()
+	_overlay()
+	var panel := Rect2(400, 290, 640, 300)
+	_panel(panel, INK, TEAL)
+	_text("BEFORE YOU GO", panel.position + Vector2(40, 52), 13, TEAL)
+	_text("Fill in the NASA-TLX survey?", panel.position + Vector2(40, 100), 30, CREAM)
+	_wrap("Six quick sliders about this play session. Please answer them if you are finishing for today.", panel.position + Vector2(40, 140), panel.size.x - 80, 17, MUTED, 25)
+	_button("leave_tlx_no", "NO, GO TO MAIN MENU", Rect2(panel.position + Vector2(40, 222), Vector2(270, 50)), PANEL_LIGHT, CREAM, 15)
+	_button("leave_tlx_yes", "YES, FILL IT IN", Rect2(panel.position + Vector2(330, 222), Vector2(270, 50)), TEAL, INK, 16)
+
+func _draw_tlx() -> void:
+	_draw_page_header("", "STUDY QUESTIONNAIRE · NASA-TLX")
+	_text("How was this play session?", Vector2(80, 150), 34, CREAM)
+	_wrap("Think about all the levels you played in this session. Move each slider to the point that matches your experience. There are no right or wrong answers.", Vector2(80, 196), 1260, 17, CREAM, 25)
+	_text("Your answers are saved with this session's study files." if not _sends_to_leader() else "Your answers are sent to the session leader's computer with this session's study files.", Vector2(80, 262), 14, MUTED)
+	var done: int = tlx_form.answered_count()
+	var ready: bool = tlx_form.all_answered()
+	var later_label := "SKIP, GO TO MAIN MENU" if _leaving_after_tlx else ("NOT NOW" if tlx_source == "after_last_level" else "<  BACK")
+	_button("tlx_later", later_label, Rect2(80, 790, 300, 48), PANEL_LIGHT, CREAM, 15)
+	if ready:
+		_button("tlx_submit", "SUBMIT AND LEAVE" if _leaving_after_tlx else "SUBMIT ANSWERS", Rect2(1060, 790, 300, 48), TEAL, INK, 16)
+	else:
+		_panel(Rect2(1060, 790, 300, 48), Color(PANEL, 0.6))
+		_text("Answer all six (%d / 6)" % done, Vector2(1104, 821), 15, MUTED)
+
+func _submit_tlx() -> void:
+	if not tlx_form.all_answered(): return
+	var answers: Dictionary = tlx_form.answers()
+	var session := _tlx_session()
+	_tlx_submitted_session = session
+	var record := {"schema": "beacon-bay-nasa-tlx-v1", "instrument": "NASA-TLX raw (unweighted), 0-100 in steps of 5",
+		"capture_session_id": session if not session.is_empty() else null, "source": tlx_source,
+		"peer_id": multiplayer.get_unique_id() if network.active else 1, "departments": network.departments_for(),
+		"co_op": network.active, "last_level_number": BeaconCampaign.level_number(sim.shift_index),
+		"last_level_won": sim.won if sim.finished else null, "answers": answers,
+		"seconds_to_complete": snappedf((Time.get_ticks_msec() - _tlx_started_ms) / 1000.0, 0.1),
+		"utc": Time.get_datetime_string_from_system(true), "unix_ms": int(Time.get_unix_time_from_system() * 1000.0)}
+	if _sends_to_leader():
+		# Stored on the session leader's computer with this player's other data.
+		relay.send_file("questionnaires/nasa_tlx_%d.json" % int(record.unix_ms), JSON.stringify(record, "\t"))
+		_toast("Thank you. Your answers are saved on the session leader's computer.")
+		_close_tlx()
+		return
+	var folder := "user://research/%s/questionnaires" % (session if not session.is_empty() else "no_session")
+	DirAccess.make_dir_recursive_absolute(folder)
+	var path := folder.path_join("nasa_tlx_%d.json" % int(record.unix_ms))
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		_toast("Could not save the survey answers on this computer.")
+		return
+	file.store_string(JSON.stringify(record, "\t"))
+	file.close()
+	_toast("Thank you. Your answers are saved.")
+	_close_tlx()
+
+# ------------------------------------------------------------ study data storage
+# 2.11 (Andrei): "Only the host stores files", and no upload to the Azure server.
+# Solo and the session leader (LAN host, or the first player in an Azure room)
+# write all files. Other players' games send only their own data to the leader.
+func _sends_to_leader() -> bool:
+	return network != null and network.active and not network.is_leader()
+
+func _study_footer() -> String:
+	if not network.active: return "Progress saved locally"
+	if network.is_leader(): return "Study files are saved on this computer (session leader)"
+	var waiting: int = relay.pending_bytes() if relay != null else 0
+	if waiting > 0: return "Study data waiting for the session leader: %.1f MB" % (float(waiting) / 1048576.0)
+	return "Your study data is saved on the session leader's computer"
+
+## Leader: another player's data arrived. It goes into this computer's current
+## session folder, players/<player key>/, keeping that player's file names.
+func _store_relayed(key: String, rel_path: String, data: PackedByteArray, mode: String) -> void:
+	if dedicated_server or not NetworkSession.valid_relay_path(rel_path): return
+	var session := capture_session_id if not capture_session_id.is_empty() else last_capture_session_id
+	if session.is_empty():
+		session = _new_capture_id("session")
+		last_capture_session_id = session
+	var folder := "user://research/%s/players/%s" % [session.validate_filename(), key.validate_filename()]
+	if mode == "withdraw":
+		var deleted := _delete_tree(folder)
+		deleted.append_array(voice.withdraw_speaker("player_" + key, session))
+		_note_withdrawal(session, key, "teammate", deleted)
+		_toast("A teammate withdrew from the study; their data from this session was deleted.")
+		return
+	var target := folder.path_join(rel_path)
+	DirAccess.make_dir_recursive_absolute(target.get_base_dir())
+	var file: FileAccess
+	if mode == "append" and FileAccess.file_exists(target):
+		file = FileAccess.open(target, FileAccess.READ_WRITE)
+		if file != null: file.seek_end()
+	else:
+		file = FileAccess.open(target, FileAccess.WRITE)
+	if file == null: return
+	file.store_buffer(data)
+	file.close()
+	_note_player_folder(folder, key)
+
+## players/<key>/player.json: who this key is (name, seat, departments, every
+## network id they had in this session; ids change when someone reconnects).
+func _note_player_folder(folder: String, key: String) -> void:
+	var path := folder.path_join("player.json")
+	var info: Dictionary = {}
+	if FileAccess.file_exists(path):
+		var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+		if parsed is Dictionary: info = parsed
+	var peer := -1
+	for peer_id in network.player_keys:
+		if str(network.player_keys[peer_id]) == key: peer = int(peer_id)
+	var ids: Array = info.get("peer_ids", [])
+	if not info.is_empty() and (peer <= 0 or ids.has(peer)): return # nothing new to note
+	if peer > 0: ids.append(peer)
+	info.merge({"player_key": key, "peer_ids": ids, "display_name": network.player_log_label(peer) if peer > 0 else str(info.get("display_name", "")),
+		"departments": network.departments_for(peer) if peer > 0 else info.get("departments", []),
+		"updated_utc": Time.get_datetime_string_from_system(true)}, true)
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null: return
+	file.store_string(JSON.stringify(info, "\t"))
+	file.close()
+
+## A random id for this computer's player, kept between launches (2.11). The
+## host recognises a reconnecting player by it.
+func _load_player_key() -> String:
+	var key := FileAccess.get_file_as_string(PLAYER_KEY_PATH).strip_edges() if FileAccess.file_exists(PLAYER_KEY_PATH) else ""
+	if key.length() >= 8 and key.is_valid_hex_number(): return key.to_lower()
+	key = Crypto.new().generate_random_bytes(8).hex_encode()
+	if get_tree().get_script() == null: # never overwrite a real key from a test run
+		var file := FileAccess.open(PLAYER_KEY_PATH, FileAccess.WRITE)
+		if file != null:
+			file.store_string(key)
+			file.close()
+	return key
+
+func _remember_session(session_id: String) -> void:
+	last_capture_session_id = session_id
+	DirAccess.make_dir_recursive_absolute("user://research")
+	var file := FileAccess.open("user://research/last_session.json", FileAccess.WRITE)
+	if file == null: return
+	file.store_string(JSON.stringify({"capture_session_id": session_id, "utc": Time.get_datetime_string_from_system(true)}))
+	file.close()
+
+func _read_last_session_id() -> String:
+	var data: Variant = JSON.parse_string(FileAccess.get_file_as_string("user://research/last_session.json")) if FileAccess.file_exists("user://research/last_session.json") else null
+	return str(data.get("capture_session_id", "")) if data is Dictionary else ""
 
 func _new_capture_id(prefix: String) -> String:
 	return "%s_%d_%s" % [prefix, int(Time.get_unix_time_from_system()), Crypto.new().generate_random_bytes(6).hex_encode()]
@@ -450,7 +1066,7 @@ func _new_capture_id(prefix: String) -> String:
 func _capture_context() -> Dictionary:
 	return {"capture_session_id": capture_session_id, "level_run_id": capture_run_id,
 		"level_index": sim.shift_index, "level_number": BeaconCampaign.level_number(sim.shift_index),
-		"level_name": BeaconCampaign.shift_data(sim.shift_index).get("title", ""),
+		"level_name": BeaconCampaign.shift_title(sim.shift_index),
 		"level_elapsed_s": sim.elapsed, "elapsed": sim.elapsed, "practice": BeaconCampaign.is_practice(sim.shift_index),
 		"departments": network.departments_for(), "peer_id": multiplayer.get_unique_id()}
 
@@ -480,6 +1096,9 @@ func _end_level_capture(reason: String = "completed") -> void:
 
 func _stop_capture() -> void:
 	_end_level_capture("disconnected_or_exit")
+	# A new session (possibly a new participant) is asked again.
+	collection_choice_made = study_consent_answered # 4.11: the launch answer holds until the game closes
+	voice_choice_made = false
 	if voice != null: voice.stop()
 	capture_session_id = ""
 	entry_popup = ""
@@ -494,7 +1113,7 @@ func _voice_recording_changed(active: bool, path: String) -> void:
 	if research != null: research.log_event("voice_recording", {"active": active, "path": path, "shift_elapsed_s": sim.elapsed})
 
 const ROLE_BRIEFINGS := {
-	"fire": ["Pick a red Fire crew, then click a confirmed call that needs FIRE.", "Send Fire to burning roads to reopen them for the whole team.", "Calls with several badges need teammates too; ask for the missing crews.", "Scout ? calls first (Q). Select a crew and press V to withdraw it."],
+	"fire": ["Pick a red Fire crew, then click a confirmed call that needs FIRE.", "Send Fire to burning roads to reopen them for the whole team.", "Calls with several badges need teammates too; ask for the missing crews.", "Scout ? calls first (Q). Click a call to see its crews; WITHDRAW sends one back."],
 	"medic": ["Pick a green Medical crew, then click a confirmed call that needs MED.", "Send Medical to road accidents to treat people and reopen the street.", "Coordinate with Fire, Engineering and Police on calls with several badges.", "Scout ? calls first (Q). Supply a crew on scene with E."],
 	"engineer": ["Pick a yellow Engineering crew, then click a call that needs ENG.", "Send Engineering to debris or a blackout's yellow substation badge.", "Clearing debris and restoring power helps every department reach calls.", "Scout ? calls first (Q). Flooded bridges and storms clear on their own."],
 	"police": ["Pick a purple Police crew, then click a confirmed call that needs POL.", "Send Police to a traffic jam's badge to reopen the street for everyone.", "Watch the other badges on a call and ask teammates for missing crews.", "Scout ? calls first (Q). Press R on a selected call to request help."]
@@ -504,7 +1123,7 @@ func _begin_level_entry() -> void:
 	if dedicated_server or test_mode: return
 	var mine: Array = network.departments_for()
 	briefing_role = str(mine[0]) if not mine.is_empty() else "fire"
-	entry_popup = "consent"
+	entry_popup = "briefing" if collection_choice_made and voice_choice_made else ("voice" if collection_choice_made else "consent")
 	_reset_map_gesture()
 	_update_visibility()
 
@@ -544,12 +1163,35 @@ func _check_level_ready() -> void:
 
 func _choose_voice(enabled: bool) -> void:
 	voice.set_mic_enabled(enabled)
-	entry_popup = "briefing"
-	if enabled:
-		previous_screen = "game"
-		screen = "settings"
-		settings_tab = "sounds"
+	if enabled and voice.mic_enabled:
+		# Stay on this step: the microphone check runs until CONTINUE.
+		entry_popup = "voice"
+		voice.begin_mic_check()
+	else:
+		_finish_voice_step()
 	_update_visibility()
+
+func _finish_voice_step() -> void:
+	voice_choice_made = true
+	if voice.mic_enabled:
+		var result: Dictionary = voice.end_mic_check()
+		research.log_event("microphone_check", result)
+	else:
+		research.log_event("microphone_check", {"verdict": "microphone_off"})
+	entry_popup = "briefing"
+	_update_visibility()
+
+func _draw_mic_meter(rect: Rect2) -> void:
+	cv.draw_rect(rect, Color("0b242e"))
+	var db: float = voice.input_level_db if voice.mic_enabled else -120.0
+	var span := 60.0
+	var fill := clampf((db + span) / span, 0.0, 1.0)
+	var color: Color = CORAL if db >= voice.MIC_CLIP_DB else (TEAL if db >= voice.MIC_GOOD_DB else GOLD)
+	cv.draw_rect(Rect2(rect.position, Vector2(rect.size.x * fill, rect.size.y)), color)
+	var peak := clampf((voice.input_peak_db() + span) / span, 0.0, 1.0)
+	cv.draw_rect(Rect2(rect.position + Vector2(rect.size.x * peak - 1, 0), Vector2(2, rect.size.y)), Color(CREAM, .6))
+	var target_x: float = rect.position.x + rect.size.x * (voice.MIC_GOOD_DB + span) / span
+	cv.draw_line(Vector2(target_x, rect.position.y - 5), Vector2(target_x, rect.end.y + 5), CREAM, 2)
 
 func _request_entry_action(action: String) -> void:
 	var payload := {"level_run_id": shared_level_run_id}
@@ -565,17 +1207,38 @@ func _draw_entry_popup() -> void:
 		_text("OPTIONAL DATA COLLECTION", Vector2(382, 276), 14, TEAL)
 		_text("Save this play session?", Vector2(382, 320), 29, CREAM)
 		_wrap("Save your mouse movements, clicks and game events by level. Save in-game team voice as separate, labelled speaker tracks in one session.", Vector2(382, 365), 670, 18, CREAM, 27)
-		_wrap("Enabling also lets teammates record your voice. Only consenting speakers are saved. Files stay on each recorder's computer; nothing is uploaded.", Vector2(382, 450), 670, 16, MUTED, 24)
+		_wrap("Enabling also lets teammates record your voice. Only consenting speakers are saved. In co-op, only the session leader's computer saves the voice tracks.", Vector2(382, 450), 670, 16, MUTED, 24)
 		_wrap("The next step lets you choose voice chat. Change any choice in Settings > Research. Both choices let you play.", Vector2(382, 530), 670, 15, MUTED, 23)
 		_button("collection_no", "PLAY WITHOUT COLLECTION", Rect2(382, 600, 326, 44), PANEL_LIGHT, CREAM, 14)
 		_button("collection_yes", "ENABLE COLLECTION", Rect2(724, 600, 326, 44), TEAL, INK, 14)
+	elif entry_popup == "voice" and voice.mic_enabled:
+		# Microphone check (mid-term report, Table A4: one microphone was very quiet).
+		_text("MICROPHONE CHECK", Vector2(382, 276), 14, TEAL)
+		_text("Say a sentence at your normal volume", Vector2(382, 320), 27, CREAM)
+		_wrap("For example: \"Fire crew ready on the east side.\" The bar should pass the white line while you speak.", Vector2(382, 364), 670, 17, MUTED, 25)
+		_draw_mic_meter(Rect2(382, 424, 668, 22))
+		var check: Dictionary = voice.mic_check_result()
+		var verdict := str(check.verdict)
+		var level_text := "%d dB" % roundi(float(check.speech_level_db))
+		var lines := {
+			"waiting": ["Listening… keep talking for a few seconds.", MUTED],
+			"good": ["Good level (%s). Your team will hear you clearly." % level_text, TEAL],
+			"too_quiet": ["Too quiet (%s). Move the microphone closer, or raise its level in Windows: Settings > System > Sound > Input." % level_text, CORAL],
+			"too_loud": ["Too loud: your voice is clipping. Lower the input level in Windows sound settings.", CORAL],
+			"no_signal": ["No sound from the microphone. Check the input device in Windows sound settings and that apps may use the microphone.", CORAL],
+			"microphone_off": ["The microphone is off.", MUTED]}
+		var line: Array = lines.get(verdict, lines.waiting)
+		_wrap(str(line[0]), Vector2(382, 488), 670, 17, line[1], 25)
+		_wrap("Use headphones so teammates don't hear themselves. Voice stays on until you switch it off in Settings > Sounds.", Vector2(382, 560), 670, 15, MUTED, 22)
+		_button("entry_voice_settings", "SOUND SETTINGS", Rect2(382, 600, 326, 44), PANEL_LIGHT, CREAM, 14)
+		_button("entry_voice_done", "CONTINUE" if verdict == "good" else "CONTINUE ANYWAY", Rect2(724, 600, 326, 44), TEAL if verdict == "good" else PANEL_LIGHT, INK if verdict == "good" else CREAM, 14)
 	elif entry_popup == "voice":
 		_text("TEAM VOICE CHECK", Vector2(382, 276), 14, TEAL)
 		_text("Talk with your team", Vector2(382, 320), 29, CREAM)
-		_wrap("Enable voice chat for hands-free communication. Before starting, say hello and check that everyone can hear each other.", Vector2(382, 375), 670, 20, CREAM, 30)
+		_wrap("Enable voice chat for hands-free communication. The next step checks that your microphone is loud enough, then say hello to make sure everyone can hear each other.", Vector2(382, 375), 670, 20, CREAM, 30)
 		_wrap("Use headphones and adjust teammate volumes in Settings > Sounds. Voice stays on until you switch it off. This choice is separate from recording permission.", Vector2(382, 480), 670, 17, MUTED, 26)
 		_button("entry_voice_no", "CONTINUE WITH VOICE OFF", Rect2(382, 600, 326, 44), PANEL_LIGHT, CREAM, 14)
-		_button("entry_voice_yes", "ENABLE & OPEN SOUNDS", Rect2(724, 600, 326, 44), TEAL, INK, 14)
+		_button("entry_voice_yes", "ENABLE MICROPHONE", Rect2(724, 600, 326, 44), TEAL, INK, 14)
 	elif entry_popup == "briefing":
 		_text("LEVEL %d  /  YOUR ROLE" % BeaconCampaign.level_number(sim.shift_index), Vector2(382, 270), 13, TEAL)
 		_text("Ready, %s?" % str(KIND_NAME[briefing_role]).capitalize(), Vector2(382, 311), 28, CREAM)
@@ -607,7 +1270,7 @@ func _ready() -> void:
 	if dedicated_server:
 		_start_dedicated_server()
 		return
-	get_window().title = "Beacon Bay 0.9.1"
+	get_window().title = "Beacon Bay " + str(ProjectSettings.get_setting("application/config/version", ""))
 	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 	get_tree().auto_accept_quit = false
 	Input.use_accumulated_input = false
@@ -646,14 +1309,16 @@ func _ready() -> void:
 	tactical_map.unit_selected.connect(_select_unit)
 	tactical_map.dispatch_requested.connect(_dispatch_selected)
 	tactical_map.close_requested.connect(func():
-		selected = -1
-		focus_hold_left = 0
+		_close_call_card(true) # the CLOSE button keeps a selected crew
 		audio.play_cue("click"))
 	tactical_map.scout_requested.connect(func(id: int):
 		if screen != "game": return
 		selected = id
 		_action("scout"))
 	tactical_map.road_event_selected.connect(_select_road_event)
+	tactical_map.withdraw_requested.connect(func(id: int):
+		if screen != "game" or tutorial_active: return
+		_action("withdraw:%d" % id))
 	_center_map(Vector2(.5, .5))
 	field_focus = preload("res://scripts/incident_focus.gd").new()
 	field_focus.position = FOCUS_RECT.position
@@ -682,6 +1347,11 @@ func _ready() -> void:
 	research = ResearchLogger.new()
 	add_child(research)
 	_initialize_network()
+	network.local_player_key = _load_player_key()
+	relay = ResearchRelay.new()
+	relay.network = network
+	add_child(relay)
+	network.research_relay_received.connect(_store_relayed)
 	voice = preload("res://scripts/team_voice.gd").new()
 	add_child(voice)
 	voice.configure(network, false)
@@ -692,9 +1362,16 @@ func _ready() -> void:
 	add_child(sound_settings)
 	sound_settings.build(audio, network)
 	sound_settings.visible = false
+	tlx_form = preload("res://scripts/nasa_tlx_form.gd").new()
+	add_child(tlx_form)
+	tlx_form.build()
+	tlx_form.visible = false
+	last_capture_session_id = _read_last_session_id()
 	voice.voice_error.connect(_toast)
 	voice.recording_changed.connect(_voice_recording_changed)
 	research.log_error.connect(func(message: String): research_enabled=false; _toast(message))
+	research.display_provider = _display_info
+	research.sample_provider = _sample_state
 	ip_input = LineEdit.new()
 	ip_input.position = Vector2(452, 379)
 	ip_input.size = Vector2(536, 52)
@@ -727,6 +1404,9 @@ func _ready() -> void:
 			_begin_tutorial(false)
 		if arg.begins_with("--capture="):
 			_capture_later(arg.trim_prefix("--capture="))
+	# 4.11: the first screen is the study information and consent. Test scripts
+	# and --demo runs skip it (they then get the old first-level question).
+	if not test_mode and get_tree().get_script() == null: _open_study_info("launch")
 	_apply_playtest_args()
 	_update_visibility()
 
@@ -782,6 +1462,7 @@ func _start_dedicated_server() -> void:
 		return
 	screen = "lobby"
 	print("Beacon Bay dedicated server: UDP ", network.port, "; waiting for a player to start (1-4 players).")
+	print("Study files are saved on the session leader's computer, not on this server.")
 
 func _process(delta: float) -> void:
 	elapsed_ui += delta
@@ -794,7 +1475,11 @@ func _process(delta: float) -> void:
 			results_stars_played = 0
 		elif screen != "results":
 			results_since = -1.0
+		if screen == "results" and results_since >= 0.0 and elapsed_ui - results_since >= TLX_DELAY_S: _maybe_offer_tlx()
 	toast_left = maxf(0, toast_left - delta)
+	_tick_pc_check(delta)
+	if network.active and network.hosting: network.set_roles_locked(screen != "lobby")
+	if voice != null: voice.set_storage_allowed(not network.active or network.is_leader())
 	action_feedback_left = maxf(0, action_feedback_left - delta)
 	focused_unit_left = maxf(0, focused_unit_left - delta)
 	if focused_unit_left<=0: focused_unit=-1
@@ -832,6 +1517,11 @@ func _process(delta: float) -> void:
 			for call in active_calls:
 				if call.deadline < 20: urgent_count += 1
 			research.update_context({"shift":sim.shift_index,"role":network.role,"active_incidents":active_calls.size(),"urgent_incidents":urgent_count,"reputation":sim.reputation})
+			# Task load from this player's point of view, once a second (client feedback 01.11).
+			if research.enabled and sim.running:
+				var departments: Array = network.departments_for()
+				research.log_event("task_state", {"departments": departments, "counts": BeaconTaskLoad.compute(sim, departments),
+					"calls": BeaconTaskLoad.incidents(sim, departments), "at": sim.elapsed})
 		var about_to_fail := false
 		for call in _active_incidents():
 			if float(call.deadline) < 10.0 and _missing_crews(call) > 0:
@@ -872,6 +1562,7 @@ func _process(delta: float) -> void:
 	tactical_map.role_filter = role_filter
 	tactical_map.focused_unit_id = focused_unit
 	var planned: Dictionary = sim.get_unit(selected_unit)
+	tactical_map.withdraw_enabled = not tutorial_active and screen == "game"
 	tactical_map.dispatch_enabled = not planned.is_empty() and network.owns(str(planned.kind)) and sim._unit_available(planned)
 	tactical_map.owned_kinds = network.departments_for()
 	var owners: Dictionary = {}
@@ -915,8 +1606,20 @@ func _notification(what: int) -> void:
 		if sim != null:
 			_save_progress(screen in ["game","pause","help"] or (screen=="settings" and previous_screen=="pause"))
 		_stop_capture()
-		if voice != null: voice.shutdown()
-		get_tree().quit()
+		_quit_game()
+
+## Close the microphone, then quit two frames later. Quitting in the same frame
+## let Windows' audio driver (WASAPI) query a capture buffer that was already
+## gone: "WASAPI: GetBufferSize error" in the console (4.11). Harmless either way:
+## voice files are finalised by voice.shutdown() before this.
+var _quitting := false
+func _quit_game() -> void:
+	if _quitting: return
+	_quitting = true
+	if voice != null: voice.shutdown()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	get_tree().quit()
 
 func _update_visibility() -> void:
 	if dedicated_server: return
@@ -935,6 +1638,7 @@ func _update_visibility() -> void:
 	ip_input.visible = screen == "lobby" and not network.active
 	name_input.visible = ip_input.visible
 	sound_settings.visible = screen == "settings" and settings_tab == "sounds"
+	if tlx_form != null: tlx_form.visible = screen == "tlx"
 
 func _draw_all(canvas: CanvasItem) -> void:
 	cv = canvas
@@ -945,12 +1649,18 @@ func _draw_all(canvas: CanvasItem) -> void:
 		"campaign": _draw_campaign()
 		"lobby": _draw_lobby()
 		"settings": _draw_settings()
+		"tlx": _draw_tlx()
+		"study_info": _draw_study_info()
 		"game", "pause", "results", "help":
 			_draw_game()
 			if screen != "game": buttons.clear()
 			if screen == "pause": _draw_pause()
 			if screen == "results": _draw_results()
 			if screen == "help": _draw_help()
+	if withdraw_prompt and screen in ["title", "settings", "results"]: _draw_withdraw_prompt()
+	elif withdraw_prompt: withdraw_prompt = false
+	if leave_prompt and screen == "results": _draw_leave_prompt()
+	elif leave_prompt: leave_prompt = false # the screen changed underneath (e.g. the host started a level)
 	if toast_left > 0 and screen != "title":
 		var width: float = minf(1040, font.get_string_size(toast_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x + 56)
 		_panel(Rect2((1440-width)/2, 104, width, 40), Color(INK, 0.8), TEAL)
@@ -979,9 +1689,16 @@ func _draw_title() -> void:
 	_button("play", "CONTINUE" if unlocked > 0 or has_resume else "PLAY SOLO", Rect2(74, 497, 280, 64), TEAL, INK)
 	_button("co_op", "PLAY WITH FRIENDS", Rect2(74, 575, 280, 54), Color(0.08,0.20,0.25,0.94), CREAM)
 	_button("tutorial", "MEET THE CREW · TUTORIAL", Rect2(74, 643, 280, 48), Color(0.08,0.20,0.25,0.94), GOLD, 14)
-	_button("settings", "SETTINGS", Rect2(74, 705, 133, 44), Color(0.08,0.20,0.25,0.86), CREAM, 15)
-	_button("quit", "QUIT", Rect2(221, 705, 133, 44), Color(0.08,0.20,0.25,0.86), CREAM, 15)
-	_text("SOLO / 2–4 PLAYER CO-OP", Vector2(74, 835), 13, CREAM)
+	_button("tlx_title", "SURVEY · NASA-TLX", Rect2(74, 705, 280, 44), Color(0.08,0.20,0.25,0.94), GOLD, 14)
+	# 4.11 (Andrei): WITHDRAW MY DATA lives on the main menu, shown while the
+	# last session can be withdrawn; SETTINGS / QUIT move down one row.
+	var bottom := 763
+	if _can_withdraw():
+		_button("withdraw_open", "WITHDRAW MY DATA", Rect2(74, 763, 280, 44), Color(0.08,0.20,0.25,0.94), CORAL, 14)
+		bottom = 821
+	_button("settings", "SETTINGS", Rect2(74, bottom, 133, 44), Color(0.08,0.20,0.25,0.86), CREAM, 15)
+	_button("quit", "QUIT", Rect2(221, bottom, 133, 44), Color(0.08,0.20,0.25,0.86), CREAM, 15)
+	if bottom == 763: _text("SOLO / 2–4 PLAYER CO-OP", Vector2(74, 835), 13, CREAM)
 	
 	if not reduced_motion:
 		for i in range(22):
@@ -1159,6 +1876,24 @@ func _crew_on_scene(call: Dictionary) -> bool:
 		if int(unit.target)==int(call.id) and unit.state=="working" and bool(unit.get("assignment_suitable",true)): return true
 	return false
 
+# Esc and the card's CLOSE button: close the open call card completely, in
+# one press, whatever else is selected (Andrei, 30.10). Before, Esc first only
+# dropped a selected crew, left a card the mouse was over open as a hover
+# preview, and kept a just-resolved call's close-up for 2.2 s.
+func _close_call_card(keep_crew: bool = false) -> void:
+	var closing: int = selected if selected >= 0 else tactical_map.hovered_incident_id
+	selected = -1
+	if not keep_crew: selected_unit = -1
+	role_filter = ""
+	focused_unit = -1
+	focus_hold_left = 0
+	tactical_map.selected_id = -1
+	tactical_map.dismiss_call(closing)
+
+func _call_card_open() -> bool:
+	var hover_preview: bool = tactical_map.hovered_incident_id >= 0 and tactical_map.hovered_incident_id != tactical_map.dismissed_incident_id
+	return selected >= 0 or selected_unit >= 0 or focus_hold_left > 0 or hover_preview
+
 func _clear_selection() -> void:
 	if selected_unit>=0:
 		selected_unit=-1
@@ -1276,6 +2011,7 @@ func _select_unit(id: int) -> void:
 		return
 	if selected_unit==id:
 		selected_unit=-1
+		if not tutorial_active: research.log_event("crew_deselected", {"unit_id": id, "kind": str(unit.kind), "reason": "toggled", "selected_incident_id": selected, "at": sim.elapsed})
 		return
 	if unit.state not in ["idle","return"] and (tutorial_active or not sim.can_withdraw(id)):
 		_toast("%s is resting. Pick another crew." % unit.get("crew_name",unit.name))
@@ -1285,12 +2021,16 @@ func _select_unit(id: int) -> void:
 		_toast("%s can take another call in %ds." % [unit.get("crew_name",unit.name),ceili(wait_left)])
 		return
 	if tutorial_active and not tutorial.can_action("select_unit",{"unit_id":id,"incident_id":selected,"kind":unit.kind}): return
+	var replaced := selected_unit
 	selected_unit=id
 	focused_unit=-1
 	focused_unit_left=0
 	if tutorial_active:
 		tutorial.on_action("select_unit",{"unit_id":id,"incident_id":selected,"kind":unit.kind})
 		_sync_tutorial()
+	else:
+		research.log_event("crew_selected", {"unit_id": id, "kind": str(unit.kind), "unit_state": str(unit.state),
+			"selected_incident_id": selected, "replaced_unit_id": replaced, "at": sim.elapsed})
 	audio.play_cue("select")
 
 func _plan_kind(kind: String) -> void:
@@ -1299,10 +2039,13 @@ func _plan_kind(kind: String) -> void:
 	if tutorial_active and not tutorial.can_action("plan:"+kind,{"incident_id":selected,"kind":kind}):
 		_toast(str(tutorial.current().objective))
 		return
+	if not tutorial_active and selected_unit >= 0:
+		research.log_event("crew_deselected", {"unit_id": selected_unit, "kind": str(sim.get_unit(selected_unit).get("kind", "")), "reason": "department_filter", "selected_incident_id": selected, "at": sim.elapsed})
 	role_filter = kind
 	selected_unit=-1
 	focused_unit=-1
 	focused_unit_left=0
+	if not tutorial_active: research.log_event("department_filter", {"kind": kind, "selected_incident_id": selected, "at": sim.elapsed})
 	if tutorial_active:
 		tutorial.on_action("plan:"+kind,{"incident_id":selected,"kind":kind})
 		_sync_tutorial()
@@ -1364,7 +2107,9 @@ func _draw_crew_cards() -> void:
 		for unit in sim.units:
 			if unit.kind == kind: total += 1
 		var available := _available_units(kind)
-		_text("%d/%d READY" % [available,total], rect.position + Vector2(rect.size.x - 78,18), 10, TEAL if available>0 else GOLD)
+		# 2.11 (Andrei): teammates' crew status is hidden; ask them over voice.
+		var hidden_status: bool = network.active and not mine
+		if not hidden_status: _text("%d/%d READY" % [available,total], rect.position + Vector2(rect.size.x - 78,18), 10, TEAL if available>0 else GOLD)
 		var idx := 0
 		var slot: float = (rect.size.x - 12) / maxi(1,total)
 		for unit in sim.units:
@@ -1375,7 +2120,7 @@ func _draw_crew_cards() -> void:
 			if int(unit.id)==selected_unit:
 				cv.draw_rect(card_area, Color(GOLD, 0.18))
 				cv.draw_rect(card_area, GOLD, false, 2)
-			if fx != null and fx.card_pulse.has(int(unit.id)):
+			if fx != null and fx.card_pulse.has(int(unit.id)) and not hidden_status:
 				# Just dispatched: the card flashes in the department colour.
 				var pulse: float = clampf(float(fx.card_pulse[int(unit.id)]) / 0.7, 0.0, 1.0)
 				cv.draw_rect(card_area.grow(3.0 * pulse), Color(KIND_COLOR[kind], 0.35 * pulse))
@@ -1386,7 +2131,8 @@ func _draw_crew_cards() -> void:
 			if unit.state=="travel": status="ARRIVE %ds" % ceili(sim.unit_eta(unit))
 			var ready_in: float = maxf(float(unit.get("divert_after",0.0)),float(unit.get("dispatch_guard_until",0.0))) - sim.elapsed
 			if unit.state in ["idle","return"] and ready_in>0: status="READY IN %ds" % ceili(ready_in)
-			_text(status, rect.position + Vector2(x + 34, 52), 10, KIND_COLOR[kind] if unit.state in ["travel","working","clearing"] else MUTED)
+			if hidden_status: status = "TEAMMATE"
+			_text(status, rect.position + Vector2(x + 34, 52), 10, MUTED if hidden_status else (KIND_COLOR[kind] if unit.state in ["travel","working","clearing"] else MUTED))
 			idx += 1
 
 func _draw_campaign() -> void:
@@ -1410,7 +2156,9 @@ func _draw_campaign() -> void:
 func _draw_campaign_card(area: Rect2, index: int) -> void:
 	var practice := BeaconCampaign.is_practice(index)
 	var data: Dictionary = BeaconCampaign.shift_data(index)
-	var is_open := practice or index <= unlocked
+	# All six levels are open in solo too, as in co-op (Andrei, 30.10): a team
+	# can move on after a lost level. "UP NEXT" still marks campaign progress.
+	var is_open := true
 	var complete := not practice and best_scores.has(str(index))
 	var accent: Color = TEAL if practice else [Color("95cdb4"), GOLD, BLUE, VIOLET, Color("e6b183"), CORAL][index]
 	var hover := area.has_point(get_local_mouse_position()) and is_open
@@ -1642,19 +2390,30 @@ func _settings_note(lines: Array, column: int, y: float, height: float) -> void:
 func _draw_settings() -> void:
 	_draw_page_header("", "SETTINGS")
 	_button("settings_back","<  BACK",Rect2(80,91,125,38),PANEL,CREAM,14)
+	# Opened from the pause menu during a level: leave to the main menu from
+	# here too (Andrei, 30.10). Same action as the pause menu's button.
+	if previous_screen == "pause":
+		_button("save_exit", "LEAVE TO MAIN MENU" if network.active else "SAVE & MAIN MENU", Rect2(221,91,240,38), PANEL, CORAL, 14)
+	elif previous_screen == "results":
+		_button("results_title", "LEAVE TO MAIN MENU" if network.active else "MAIN MENU", Rect2(221,91,240,38), PANEL, CORAL, 14)
 	for i in range(SETTINGS_TABS.size()):
 		var tab: Array = SETTINGS_TABS[i]
-		var picked: bool = settings_tab == tab[0]
+		var picked: bool = settings_tab == tab[0] or (settings_tab == "pc_check" and tab[0] == "research")
 		_button("settings_tab:" + str(tab[0]), str(tab[1]), Rect2(80 + i * 216, 143, 200, 54), TEAL if picked else PANEL, INK if picked else CREAM, 27)
 	var y: float = SETTINGS_TOP
 	match settings_tab:
 		"video":
 			_settings_heading("DISPLAY", 0, y)
-			_settings_card("fullscreen", "Fullscreen", "Fill the whole screen (F11)", DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN, 0, y)
+			if Engine.is_embedded_in_editor():
+				# Godot 4.4+ can run the game inside the editor's Game tab; there the
+				# window mode cannot change. Exported builds are never embedded.
+				_settings_card("fullscreen", "Fullscreen", "Not available inside the Godot editor's Game tab", false, 0, y)
+			else:
+				_settings_card("fullscreen", "Fullscreen", "Fill the whole screen (F11)", DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN, 0, y)
 			_settings_card("motion", "Reduced motion", "Calmer animation, no screen shake", reduced_motion, 0, y + SETTINGS_STEP)
 			_settings_card("perf", "Show FPS and ping", "Small counter in the corner (F3)", show_perf, 0, y + 2 * SETTINGS_STEP)
 			_settings_heading("KEYS", 1, y)
-			_settings_note([["F11  fullscreen  ·  F3  FPS and ping", 17, CREAM], ["M  minimap  ·  Esc  menu  ·  Right-click  clear selection", 15, MUTED], ["Scroll up / EXPLORE to zoom in; down / OVERVIEW for the whole town.", 15, MUTED]], 1, y, 2 * SETTINGS_STEP + SETTINGS_CARD.y)
+			_settings_note([["F11  fullscreen  ·  F3  FPS and ping", 17, CREAM], ["Esc  menu  ·  Right-click  clear selection", 15, MUTED], ["The whole town is always on screen: click a crew, then a call.", 15, MUTED]], 1, y, 2 * SETTINGS_STEP + SETTINGS_CARD.y)
 		"research":
 			_settings_heading("MY GAMEPLAY", 0, y)
 			_settings_card("research", "Record gameplay & mouse", "Movements, clicks and event outcomes by level", research_enabled, 0, y)
@@ -1663,9 +2422,22 @@ func _draw_settings() -> void:
 			_settings_card("voice_consent", "Allow team recording", "Let teammates include my voice in their files", voice.recording_consent, 0, voice_y)
 			_settings_card("voice_record", "Save team voice", "One session with a separate track per speaker", voice.recording_enabled, 0, voice_y + SETTINGS_STEP)
 			_settings_heading("LOCAL RECORDINGS", 1, y)
-			var note_h: float = voice_y + 2 * SETTINGS_STEP - 10 - y - 58
-			_settings_note([["Levels share one session. Mouse and event logs are grouped by level; speaker tracks share the same timeline.", 16, CREAM], ["Files stay here. Only in-game voice is saved, when Voice chat (Sounds) is on. During a level, voice also records in personal menus.", 15, MUTED], ["Collection starts off each launch. Choose on first level entry.", 15, MUTED], [str(voice.status), 15, TEAL]], 1, y, note_h)
+			# The note runs down to the bottom of the STUDY PC button in column 0.
+			var note_h: float = voice_y + 2 * SETTINGS_STEP + 30 + 56 - y - 58
+			_settings_note([["Levels share one session. Mouse and event logs are grouped by level; speaker tracks share the same timeline.", 16, CREAM], ["Solo: files are saved here. Co-op: only the session leader's computer saves files (the LAN host, or the first player in an online room); other players' mouse data and answers are sent to it. Only in-game voice is saved, when Voice chat (Sounds) is on.", 15, MUTED], ["Collection is chosen on the study consent screen when the game starts.", 15, MUTED], [str(voice.status), 15, TEAL], [_study_footer(), 15, TEAL]], 1, y, note_h)
 			_button("open_data","OPEN RECORDINGS",Rect2(SETTINGS_COL[1], y + note_h + 10, SETTINGS_CARD.x, 48),PANEL_LIGHT,TEAL,15)
+			var study_y: float = y + note_h + 70
+			var study_w: float = (SETTINGS_CARD.x - 12.0) / 2.0
+			_button("study_view","STUDY INFORMATION",Rect2(SETTINGS_COL[1], study_y, study_w, 48),PANEL_LIGHT,CREAM,15)
+			if _can_withdraw(): _button("withdraw_open","WITHDRAW MY DATA",Rect2(SETTINGS_COL[1] + study_w + 12.0, study_y, study_w, 48),PANEL_LIGHT,CORAL,15)
+			else: _wrap("Nothing recorded to withdraw in this session." if _withdrawn_session != _tlx_session() or _tlx_session().is_empty() else "Your data from the last session was withdrawn.", Vector2(SETTINGS_COL[1] + study_w + 24.0, study_y + 20), study_w - 20, 13, MUTED, 18)
+			var check_y: float = voice_y + 2 * SETTINGS_STEP + 30
+			_settings_heading("STUDY PC", 0, check_y)
+			_button("pc_check_run", "CHECK THIS STUDY PC", Rect2(SETTINGS_COL[0], check_y, SETTINGS_CARD.x, 56), PANEL_LIGHT, TEAL, 16)
+			if not pc_check.is_empty():
+				_text("Last check: " + {"pass": "ready", "warn": "ready, with notes", "fail": "needs fixes"}.get(str(pc_check.overall), ""), Vector2(SETTINGS_COL[0], check_y + 82), 14, _pc_color(str(pc_check.overall)))
+		"pc_check":
+			_draw_pc_check()
 		_:
 			_settings_heading("GAME AUDIO", 0, y)
 			_settings_card("music", "Music", "Background soundtrack", music_enabled, 0, y)
@@ -1674,6 +2446,9 @@ func _draw_settings() -> void:
 			_settings_heading("VOICE CHAT", 0, chat_y)
 			_settings_card("mic", "Voice chat", "Open microphone while on · headphones recommended", voice.mic_enabled, 0, chat_y)
 			_wrap(str(voice.status), Vector2(SETTINGS_COL[0] + 20, chat_y + SETTINGS_CARD.y + 30), SETTINGS_CARD.x - 40, 15, TEAL, 22)
+			if voice.mic_enabled:
+				_text("INPUT LEVEL: when you speak, the bar should pass the white line", Vector2(SETTINGS_COL[0], chat_y + SETTINGS_CARD.y + 64), 12, TEAL)
+				_draw_mic_meter(Rect2(SETTINGS_COL[0], chat_y + SETTINGS_CARD.y + 76, SETTINGS_CARD.x, 16))
 			_settings_heading("VOLUME", 1, y)
 			# The sliders are real controls (sound_settings.gd), placed in this column.
 			# Below the fourth slider (game sound + three teammates in a 4-player room).
@@ -1703,7 +2478,7 @@ func _draw_help() -> void:
 	var tips := [
 		["01", "Send your crews", "Pick a crew, then a call. Or hover a call and press 1–4. Its icons show which departments are still needed."],
 		["02", "Help on scene", "Q scouts. E supplies. SPACE boosts. To leave a scene, select the busy crew in the bottom bar, then WITHDRAW or V."],
-		["03", "Explore the town", "Scroll up or EXPLORE: zoom in. Scroll down or OVERVIEW: whole town. Drag: pan. Clicks keep your view. M: minimap."],
+		["03", "Read the town", "The whole town is always on screen. Click a crew, then a call. Right-click clears your selection."],
 		["04", "Coordinate", "Enable Voice chat in Settings to keep your microphone open. Turn it off there to mute. Recordings are optional and local."]
 	]
 	for i in range(tips.size()):
@@ -1797,9 +2572,17 @@ func _draw_results() -> void:
 		_button("results_levels","CHOOSE ANOTHER LEVEL",second,PANEL_LIGHT,GOLD,15)
 	# Settings between levels (playtest 19.10): sound, voice chat and recordings
 	# can be changed here without leaving the room. BACK returns to this screen.
-	_button("results_settings","SETTINGS",third,PANEL_LIGHT,CREAM,15)
+	# Bottom row: SETTINGS and MAIN MENU side by side (Andrei, 30.10: no way to
+	# the main menu after a level). In co-op, MAIN MENU leaves the room.
+	# 4.11: WITHDRAW MY DATA between them while this session can be withdrawn
+	# (also on the main menu and in Settings > Research; all ask to confirm).
+	var count := 3 if _can_withdraw() else 2
+	var part: float = (third.size.x - 12.0 * (count - 1)) / count
+	_button("results_settings","SETTINGS",Rect2(third.position, Vector2(part, third.size.y)),PANEL_LIGHT,CREAM,15)
+	if count == 3: _button("withdraw_open","WITHDRAW MY DATA",Rect2(third.position + Vector2(part + 12.0, 0), Vector2(part, third.size.y)),PANEL_LIGHT,MUTED,14)
+	_button("results_title","LEAVE TO MAIN MENU" if network.active else "MAIN MENU",Rect2(third.position + Vector2((part + 12.0) * (count - 1), 0), Vector2(part, third.size.y)),PANEL_LIGHT,CORAL,15 if count == 2 else 14)
 	# Footer: one row along the bottom edge of the panel.
-	_text("Progress saved locally",o+Vector2(m,panel.size.y - 25),13,MUTED)
+	_text(_study_footer(),o+Vector2(m,panel.size.y - 25),13,MUTED)
 	if research_enabled or voice.recording_enabled:
 		_button("open_data", "OPEN RECORDINGS", Rect2(o + Vector2(panel.size.x - m - 240, panel.size.y - 50), Vector2(240, 36)), PANEL_LIGHT, TEAL, 14)
 	if network.active: _draw_role_picker(Rect2(Vector2(panel.end.x + RESULTS_GAP, panel.position.y), Vector2(ROLES_WIDTH, panel.size.y)))
@@ -1908,6 +2691,8 @@ func _input(event: InputEvent) -> void:
 			input_context["ui_button"] = ""
 			for button in buttons:
 				if button.rect.has_point(event.position - global_position): input_context["ui_button"] = button.id
+			_last_pointer_target = (input_context.pointer_target as Dictionary).duplicate()
+			_last_pointer_target["ui_button"] = str(input_context.ui_button)
 		research.update_context(input_context)
 		if event is InputEventMouseMotion: research.log_pointer(event.position, event.relative)
 		elif event is InputEventMouseButton: research.log_mouse_button(event)
@@ -1962,14 +2747,7 @@ func _input(event: InputEvent) -> void:
 		if screen=="game" and _map_occluded(local_pos):
 			get_viewport().set_input_as_handled()
 			return
-	if screen == "game" and event is InputEventKey and event.pressed and not ip_input.has_focus():
-		var direction: Vector2 = {KEY_W: Vector2.UP, KEY_UP: Vector2.UP, KEY_S: Vector2.DOWN, KEY_DOWN: Vector2.DOWN, KEY_A: Vector2.LEFT, KEY_LEFT: Vector2.LEFT, KEY_D: Vector2.RIGHT, KEY_RIGHT: Vector2.RIGHT}.get(event.keycode, Vector2.ZERO)
-		if direction != Vector2.ZERO:
-			_reset_map_gesture()
-			map_pan -= direction * 72.0
-			_apply_map_layout()
-			get_viewport().set_input_as_handled()
-			return
+	# (Arrow/WASD map panning removed 4.11: the whole town is always shown.)
 	if event is InputEventKey and event.pressed and not event.echo:
 		if ip_input.has_focus() or name_input.has_focus():
 			if event.keycode == KEY_ENTER: _action("join")
@@ -1980,10 +2758,14 @@ func _input(event: InputEvent) -> void:
 			KEY_F11:
 				_toggle_fullscreen()
 			KEY_ESCAPE:
-				if screen=="game" and (selected_unit>=0 or selected>=0): _clear_selection()
+				if withdraw_prompt: _action("withdraw_cancel")
+				elif leave_prompt: _action("leave_tlx_cancel")
+				elif screen == "study_info" and study_info_mode == "view": _action("study_back")
+				elif screen=="game" and _call_card_open(): _close_call_card()
 				elif screen=="game": _action("pause")
 				elif screen in ["pause","help"]: _action("unpause")
 				elif screen=="settings": _action("settings_back")
+				elif screen=="tlx": _action("tlx_later")
 				elif screen in ["campaign","upgrades","lobby"]: _action("title")
 			KEY_ENTER:
 				if screen=="title": _action("play")
@@ -2023,6 +2805,15 @@ func _action(id: String) -> void:
 	if id in ["entry_voice_yes", "entry_voice_no"]:
 		_choose_voice(id == "entry_voice_yes")
 		return
+	if id == "entry_voice_done":
+		_finish_voice_step()
+		return
+	if id == "entry_voice_settings":
+		previous_screen = "game"
+		screen = "settings"
+		settings_tab = "sounds"
+		_update_visibility()
+		return
 	if id == "collection_yes" or id == "collection_no":
 		_choose_collection(id == "collection_yes")
 		return
@@ -2032,6 +2823,9 @@ func _action(id: String) -> void:
 	if id.begins_with("briefing_role:"):
 		var kind := id.trim_prefix("briefing_role:")
 		if kind in network.departments_for(): briefing_role = kind
+		return
+	if id == "pc_check_run":
+		_start_pc_check()
 		return
 	if id.begins_with("settings_tab:"):
 		settings_tab = id.trim_prefix("settings_tab:")
@@ -2093,7 +2887,23 @@ func _action(id: String) -> void:
 	match id:
 		"lobby_settings": previous_screen="lobby"; screen="settings"; settings_tab="sounds"
 		"results_settings": previous_screen="results"; screen="settings"
-		"map_overview": _toggle_overview()
+		"results_title": _request_leave_to_title()
+		"study_agree": _answer_study_consent(true)
+		"study_decline": _answer_study_consent(false)
+		"study_view": _open_study_info("view")
+		"study_back":
+			screen = _study_return if _study_return in ["settings", "title", "results"] else "title"
+			_update_visibility()
+		"withdraw_open": withdraw_prompt = true
+		"withdraw_cancel": withdraw_prompt = false
+		"withdraw_confirm": _withdraw_my_data()
+		"leave_tlx_yes":
+			leave_prompt = false
+			_leaving_after_tlx = true
+			_open_tlx("leaving_session")
+		"leave_tlx_no": _leave_to_title()
+		"leave_tlx_cancel":
+			leave_prompt = false
 		"minimap_toggle": minimap_hidden = not minimap_hidden
 		"map_in": _zoom_map(1.0, MAP_VIEW.get_center())
 		"map_out": _zoom_map(-1.0, MAP_VIEW.get_center())
@@ -2109,14 +2919,16 @@ func _action(id: String) -> void:
 			screen="title"; _leave_network()
 		"campaign": screen="campaign"
 		"settings": previous_screen=screen; screen="settings"
+		"tlx_title": _open_tlx("title_button")
+		"tlx_submit": _submit_tlx()
+		"tlx_later": _close_tlx()
 		"settings_back": screen=previous_screen; _save_progress(screen=="pause")
 		"pause_settings": previous_screen="pause"; screen="settings"
 		"quit":
 			if tutorial_active: _end_tutorial(false,false)
 			_save_progress(screen in ["game","pause"])
 			_stop_capture()
-			voice.shutdown()
-			get_tree().quit()
+			_quit_game()
 		"co_op": screen="lobby"
 		"host":
 			network.local_player_name = NetworkSession.clean_player_name(name_input.text)
@@ -2334,6 +3146,9 @@ func _begin_shift(index: int) -> void:
 	_end_level_capture("restarted" if sim.running else "changed_level")
 	var previous_run := shared_level_run_id
 	shared_level_run_id = _new_capture_id("level%d" % BeaconCampaign.level_number(index))
+	# 2.11: departments only change between levels. Players who dropped out and
+	# did not return lose their reservation now; late arrivals get departments.
+	if network.active and network.hosting: network.rebalance_roles()
 	if network.active and network.hosting:
 		# This reliable marker follows every event from the previous level. A
 		# snapshot on another channel must not move a guest past those events.
@@ -2730,6 +3545,7 @@ func _dispatch_fx(event: Dictionary) -> void:
 func _receive_snapshot(data: Dictionary) -> void:
 	_route_cache_until = 0
 	if network.hosting: return
+	if _leaving_after_tlx: return # on the way out: the next level does not pull this player in
 	var next_screen:=str(data.get("screen","game"))
 	var incoming_run := str(data.get("level_run_id", ""))
 	if network.active and next_screen == "game" and not capture_run_id.is_empty() and not incoming_run.is_empty() and incoming_run != capture_run_id and not _announced_remote_runs.has(incoming_run):
@@ -2749,14 +3565,19 @@ func _receive_snapshot(data: Dictionary) -> void:
 	var keep_menu := _session_screen() and screen != "game"
 	var next_run_id := str(data.get("level_run_id", shared_level_run_id))
 	var run_changed := not next_run_id.is_empty() and next_run_id != shared_level_run_id
-	if run_changed or int(data.get("simulation", {}).get("shift_index", sim.shift_index)) != sim.shift_index or float(data.get("simulation", {}).get("elapsed", sim.elapsed)) + 1.0 < sim.elapsed:
+	# A host that sends run IDs marks every new level and retry with a new ID.
+	# Then a snapshot clock that is behind the guest's own clock is only a
+	# correction (the guest ran ahead during a stall), never a new level.
+	# Playtest 22.10: a 1.3 s server stall restarted a level 6 capture.
+	var clock_went_back: bool = not data.has("level_run_id") and float(data.get("simulation", {}).get("elapsed", sim.elapsed)) + 1.0 < sim.elapsed
+	if run_changed or int(data.get("simulation", {}).get("shift_index", sim.shift_index)) != sim.shift_index or clock_went_back:
 		_end_level_capture("completed" if _completed_remote_runs.has(capture_run_id) else "changed_level")
 		_pending_results_snapshot = {}
 	shared_level_run_id = next_run_id
 	_waiting_for_briefings = bool(data.get("waiting_for_briefings", false))
 	_level_ready_peers = data.get("level_ready_peers", {}).duplicate()
 	sim.apply_snapshot(data.get("simulation",{}))
-	var restarting := run_changed or sim.shift_index != previous_shift or sim.elapsed + 1.0 < previous_elapsed
+	var restarting := run_changed or sim.shift_index != previous_shift or (not data.has("level_run_id") and sim.elapsed + 1.0 < previous_elapsed)
 	if restarting and not data.has("level_run_id"): shared_level_run_id = _new_capture_id("received_level")
 	if next_screen == "game" and (entering_session or restarting): _begin_level_entry()
 	if next_screen == "game" and (entering_session or restarting): audio.reset_session(sim.incidents)
@@ -2777,6 +3598,8 @@ func _receive_snapshot(data: Dictionary) -> void:
 		if not (screen == "settings" and previous_screen == "lobby"): screen = "lobby"
 	elif next_screen == "results" and screen == "settings" and previous_screen == "results":
 		pass # A guest's settings opened from the results screen stay open until BACK.
+	elif next_screen == "results" and screen == "tlx":
+		pass # A guest's survey stays open while the host shows results.
 	elif next_screen in ["game","pause","results","help"]:
 		if next_screen != "game" or not keep_menu: screen=next_screen
 	if next_screen == "results":
@@ -2816,6 +3639,12 @@ func _network_ended() -> void:
 	_stop_capture()
 	if screen=="results": _submit_rating()
 	_restore_guest_progress()
+	if _leaving_after_tlx:
+		# The room closed while this player fills in the survey on the way out:
+		# keep the survey open (answers are then saved on this computer).
+		if screen != "tlx": _leaving_after_tlx = false
+		return
+	leave_prompt = false
 	screen="lobby"
 	_toast(network.status)
 
@@ -2826,6 +3655,9 @@ func _restore_guest_progress() -> void:
 	if is_instance_valid(audio): audio.reset_session(sim.incidents)
 
 func _toggle_fullscreen() -> void:
+	if Engine.is_embedded_in_editor():
+		_toast("Fullscreen is not available while the game runs inside the Godot editor. In the Game tab's ⋮ menu, untick \"Embed Game on Next Play\".")
+		return
 	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED if DisplayServer.window_get_mode()==DisplayServer.WINDOW_MODE_FULLSCREEN else DisplayServer.WINDOW_MODE_FULLSCREEN)
 
 func _toggle(id: String) -> void:
@@ -2837,6 +3669,9 @@ func _toggle(id: String) -> void:
 		"perf": show_perf = not show_perf
 		"research":
 			research_enabled = not research_enabled
+			if research_enabled:
+				research.exclude_own_input = false
+				study_consent_agreed = true
 			if not research_enabled: research.set_enabled(false)
 			_sync_capture()
 		"mic": voice.set_mic_enabled(not voice.mic_enabled)

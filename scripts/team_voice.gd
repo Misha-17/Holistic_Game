@@ -19,6 +19,9 @@ var recording_enabled := false
 var recording_consent := false
 var recording_active := false
 var recording_path := ""
+## 2.11: in co-op only the session leader's computer saves voice tracks (main.gd
+## sets this every frame). Other players still hear and send voice as before.
+var storage_allowed := true
 var status := "Voice chat disabled"
 var playback_level := 50
 var peer_playback_gains: Dictionary = {}
@@ -138,6 +141,7 @@ func set_capture_active(value: bool) -> void:
 	recording_active = value and recording_enabled and _session_active and _writer != null
 	if value and recording_enabled and _session_active and _writer == null: _open_recording()
 	_log("capture_resumed" if value else "capture_suspended", _timing())
+	if not value and _writer != null and _writer.has_method("publish_checkpoint"): _writer.publish_checkpoint()
 	_publish_state()
 	recording_changed.emit(recording_active, recording_path)
 	_refresh_status()
@@ -158,6 +162,8 @@ func set_mic_enabled(value: bool) -> void:
 		_resample_position = 0.0
 		_recording_source_cutoff = 0
 		_mixer.remove_peer(_local_peer)
+		input_level_db = -120.0
+		_meter_peak_db = -120.0
 	mic_enabled = value
 	_publish_state()
 	_log("microphone", {"enabled": value})
@@ -223,8 +229,61 @@ func _process(_delta: float) -> void:
 		voice_error.emit("No microphone samples received. Check the selected input and system microphone permission.")
 
 
+## Follows the session leader: the leader starts saving (if Save team voice is
+## on); a computer that stops being the leader closes its files.
+func set_storage_allowed(value: bool) -> void:
+	if _server_only or storage_allowed == value: return
+	storage_allowed = value
+	if not value and _writer != null:
+		_render_audio()
+		_flush_recorded_tail()
+		_writer.log_metadata("session_stopped", _timing().merged({"reason": "no_longer_session_leader"}, true))
+		_writer.close_file()
+		_writer = null
+		recording_active = false
+		recording_path = ""
+		recording_changed.emit(false, recording_path)
+	elif value and _session_active and recording_enabled and _capture_active and _writer == null:
+		_open_recording()
+	_publish_state()
+	_refresh_status()
+
+## Study withdrawal (4.11): remove one person's voice from every recording of
+## a session on this computer (the open one and any finished folders).
+func withdraw_speaker(key: String, session: String) -> Array:
+	var removed: Array = []
+	var open_folder := recording_path.get_base_dir() if _writer != null and session_id == session else ""
+	if not open_folder.is_empty(): removed.append_array(_writer.withdraw_speaker(key))
+	for folder in session_folders(session):
+		if folder != open_folder: removed.append_array(Session.withdraw_from_folder(folder, key))
+	return removed
+
+## Delete every voice folder of a session (solo withdrawal: only one person).
+func delete_session_folders(session: String) -> Array:
+	if session_id == session and _writer != null: stop()
+	var removed: Array = []
+	for folder in session_folders(session):
+		for name in DirAccess.get_files_at(folder):
+			if DirAccess.remove_absolute(ProjectSettings.globalize_path(folder.path_join(name))) == OK: removed.append(name)
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(folder))
+	return removed
+
+func session_folders(session: String) -> Array[String]:
+	var result: Array[String] = []
+	if session.is_empty() or not DirAccess.dir_exists_absolute(DIRECTORY): return result
+	var safe := ""
+	for character in session.left(64):
+		if character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-": safe += character
+	for name in DirAccess.get_directories_at(DIRECTORY):
+		if name.begins_with("team_%s_" % safe): result.append(DIRECTORY.path_join(name))
+	return result
+
+## The voice key of this computer's player (same as the track name).
+func local_speaker_key() -> String:
+	return _speaker_key(_local_peer)
+
 func _open_recording() -> bool:
-	if _server_only or not _session_active or not recording_enabled or not _capture_active: return false
+	if _server_only or not _session_active or not recording_enabled or not _capture_active or not storage_allowed: return false
 	_render_audio()
 	var safe_id := ""
 	for character in session_id.left(64):
@@ -317,11 +376,17 @@ func _capture_microphone() -> void:
 		var source_recordable := _resample_position >= _recording_source_cutoff
 		var pcm := PackedByteArray()
 		pcm.resize(FRAMES * 2)
+		var energy := 0.0
+		var peak := 0
 		for index in range(FRAMES):
 			var position := _resample_position + index * step
 			var base := int(position)
 			var stereo: Vector2 = _source[base].lerp(_source[base + 1], position - base)
-			pcm.encode_s16(index * 2, clampi(roundi((stereo.x + stereo.y) * 0.5 * 32768.0), -32768, 32767))
+			var sample := clampi(roundi((stereo.x + stereo.y) * 0.5 * 32768.0), -32768, 32767)
+			pcm.encode_s16(index * 2, sample)
+			energy += float(sample * sample)
+			peak = maxi(peak, absi(sample))
+		_meter_packet(sqrt(energy / FRAMES), peak)
 		_resample_position += FRAMES * step
 		_sequence += 1
 		_send_microphone_packet(pcm, source_recordable)
@@ -332,6 +397,75 @@ func _capture_microphone() -> void:
 		_resample_position -= consumed
 		_recording_source_cutoff = maxi(0, _recording_source_cutoff - consumed)
 
+
+# Microphone level, in dBFS (0 = digital maximum). The meter shows the live
+# level; a microphone check collects the loudest 20 ms frames while the player
+# speaks (mid-term report, Table A4: one microphone was very quiet).
+const MIC_GOOD_DB := -30.0 # loudest speech frames should reach this
+const MIC_SILENT_DB := -55.0 # below this nothing usable was heard
+const MIC_CLIP_DB := -0.5
+var input_level_db := -120.0
+var _meter_peak_db := -120.0
+var _meter_peak_ms := 0
+var _check_active := false
+var _check_frames := 0
+var _check_speech_frames := 0
+var _check_clipped_frames := 0
+var _check_loudest_db := -120.0
+var _check_levels: PackedFloat32Array = PackedFloat32Array()
+
+static func level_db(value: float) -> float:
+	return 20.0 * log(maxf(value, 1.0) / 32768.0) / log(10.0)
+
+func _meter_packet(rms: float, peak: int) -> void:
+	var db := level_db(rms)
+	# Fast attack, slow release, like a normal level meter.
+	input_level_db = db if db > input_level_db else lerpf(input_level_db, db, 0.15)
+	var peak_db := level_db(float(peak))
+	if peak_db >= _meter_peak_db or Time.get_ticks_msec() - _meter_peak_ms > 1500:
+		_meter_peak_db = peak_db
+		_meter_peak_ms = Time.get_ticks_msec()
+	if not _check_active: return
+	_check_frames += 1
+	_check_loudest_db = maxf(_check_loudest_db, db)
+	if db > MIC_SILENT_DB + 10.0:
+		_check_speech_frames += 1
+		_check_levels.append(db)
+	if peak_db >= MIC_CLIP_DB: _check_clipped_frames += 1
+
+func input_peak_db() -> float:
+	return _meter_peak_db if Time.get_ticks_msec() - _meter_peak_ms <= 1500 else input_level_db
+
+func begin_mic_check() -> void:
+	_check_active = true
+	_check_frames = 0
+	_check_speech_frames = 0
+	_check_clipped_frames = 0
+	_check_loudest_db = -120.0
+	_check_levels = PackedFloat32Array()
+
+# Verdict on what was heard since begin_mic_check(). The speech level is the
+# 90th percentile of active 20 ms frames, so one cough cannot pass the check.
+func mic_check_result() -> Dictionary:
+	var levels := _check_levels.duplicate()
+	levels.sort()
+	var speech_db: float = levels[int(levels.size() * 0.9)] if levels.size() >= 10 else _check_loudest_db
+	var verdict := "waiting"
+	if not mic_enabled: verdict = "microphone_off"
+	elif _check_frames == 0: verdict = "no_signal"
+	elif _check_speech_frames < 10: verdict = "waiting" if _check_loudest_db > MIC_SILENT_DB else "no_signal"
+	elif _check_clipped_frames > maxi(3, _check_speech_frames / 20): verdict = "too_loud"
+	elif speech_db < MIC_GOOD_DB: verdict = "too_quiet"
+	else: verdict = "good"
+	return {"verdict": verdict, "speech_level_db": snappedf(speech_db, 0.1), "loudest_frame_db": snappedf(_check_loudest_db, 0.1),
+		"speech_frames": _check_speech_frames, "frames": _check_frames, "clipped_frames": _check_clipped_frames,
+		"good_threshold_db": MIC_GOOD_DB}
+
+func end_mic_check() -> Dictionary:
+	var result := mic_check_result()
+	_check_active = false
+	_log("microphone_check", result)
+	return result
 
 func _seal_microphone_capture() -> void:
 	# Drain queued microphone samples using the old permission. A packet that
@@ -441,8 +575,16 @@ func _timing() -> Dictionary:
 	return context
 
 
+## One track per person, even when they reconnect with a new network id (2.11:
+## a dropping player used to get a new full-length track for every reconnect).
+func _speaker_key(peer_id: int) -> String:
+	if _network != null and _network.player_keys.has(peer_id): return "player_" + str(_network.player_keys[peer_id])
+	if peer_id == _local_peer and _network != null and not _network.active and not _network.local_player_key.is_empty():
+		return "player_" + _network.local_player_key
+	return "peer_%d" % peer_id
+
 func _speaker_identity(peer_id: int) -> Dictionary:
-	return {"peer_id": peer_id, "speaker_id": "peer_%d" % peer_id,
+	return {"peer_id": peer_id, "speaker_id": _speaker_key(peer_id), "speaker_key": _speaker_key(peer_id),
 		"display_name": _network.player_log_label(peer_id) if _network != null else "Player %d" % peer_id,
 		"departments": _network.departments_for(peer_id) if _network != null else [],
 		"local": peer_id == _local_peer}
@@ -464,6 +606,7 @@ func _refresh_status() -> void:
 		for peer_id in _network.voice_participants:
 			if int(peer_id) != _local_peer and bool(_network.voice_participants[peer_id].recording): recorders += 1
 	if recorders > 0: text += " | %d teammate(s) recording" % recorders
+	if recording_enabled and not storage_allowed: text += " | Voice is saved on the session leader's computer"
 	_set_status(text)
 
 

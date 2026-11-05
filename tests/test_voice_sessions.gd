@@ -118,6 +118,10 @@ func run() -> void:
 	voice._receive_voice(3, 1, packet(9999))
 	await wait_ms(180)
 	voice.set_capture_active(false)
+	# Every level end publishes a complete manifest and player (Table A4).
+	var level_manifest: Variant = JSON.parse_string(FileAccess.get_file_as_string(session_path))
+	check(level_manifest is Dictionary and level_manifest.has("last_checkpoint_utc") and not level_manifest.get("tracks", []).is_empty(), "level end publishes a complete session manifest")
+	check(FileAccess.file_exists(session_path.get_base_dir().path_join("listen.html")), "level end writes the offline player")
 	voice._receive_voice(2, 2, packet(7777))
 	await wait_ms(30)
 	voice.set_research_context({"level_run_id": "first", "level_id": 1, "level_elapsed_s": 0.0})

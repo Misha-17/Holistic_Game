@@ -5,13 +5,26 @@ extends Node
 signal consent_changed(enabled: bool)
 signal log_error(message: String)
 const LOG_DIRECTORY := "user://research"
-const SCHEMA_VERSION := 3
+const SCHEMA_VERSION := 4
 const MAX_BUFFER_LINES := 128
 var enabled := false
 var session_id := ""
 var log_path := ""
-var _file: FileAccess
-var _level_file: FileAccess
+var _file # FileAccess, or ResearchRelay.RelayFile when this is not the leader's computer
+var _level_file
+## 2.11: set when this computer is not the session leader. Then nothing is
+## written here: this player's own rows go to the leader through the relay, and
+## shared game events (which the leader records once) are skipped.
+var relay: ResearchRelay
+## The rows a non-leader still records: this player's own input and view.
+const LOCAL_EVENTS := ["mouse_motion", "mouse_button", "key_input", "ui_action", "crew_selected", "crew_deselected",
+	"department_filter", "inspection", "command_requested", "task_state", "context", "display", "collection_choice",
+	"briefing_completed", "microphone_check", "pc_check", "voice_recording", "clock_correction", "chaos_state_at_capture_start",
+	"study_consent", "study_withdrawal"]
+## 4.11: the session leader withdrew from the study but teammates are still
+## recorded. The leader's game keeps logging shared game events (teammates'
+## files need them) but no longer this player's own input or 60 Hz samples.
+var exclude_own_input := false
 var _context: Dictionary = {}
 var _level: Dictionary = {}
 var _levels: Array[Dictionary] = []
@@ -30,17 +43,66 @@ var _last_click_us := -1
 var _last_flush_ms := 0
 var _last_context_ms := 0
 var _shift_elapsed := 0.0
+const CLOCK_CORRECTION_LOG_S := 0.25
+var _clock_corrections := 0
+var _clock_held_total_s := 0.0
+var _clock_holding := false
+const DISPLAY_INTERVAL_S := 10.0
+## Returns window/screen facts for "display" rows (set by main.gd).
+var display_provider: Callable
+var _last_display_ms := 0
+var _frame_count := 0
+var _frame_time_sum := 0.0
+var _frame_time_max := 0.0
+var _motion_events := 0
 var _shift_index := 0
 var _completed_level_elapsed := 0.0
 var _capture_segment := 0
 var _disabled_at_us := -1
 var _disabled_level_elapsed := 0.0
+## Fixed 60 Hz sample stream (research_sampler.gd), one CSV per level attempt.
+var sampler: ResearchSampler
+## Returns the newest game state for the sample stream (set by main.gd).
+var sample_provider: Callable
+var _map_errors := PackedFloat32Array()
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if enabled and Time.get_ticks_msec() - _last_flush_ms >= 1000: _flush()
+	if not enabled or _level.is_empty(): return
+	_frame_count += 1
+	_frame_time_sum += delta
+	_frame_time_max = maxf(_frame_time_max, delta)
+	_publish_sample_frame(delta)
+	if Time.get_ticks_msec() - _last_display_ms >= int(DISPLAY_INTERVAL_S * 1000.0): _write_display("periodic")
+
+# Frame rate and window state (mid-term report, Table A4): mouse events arrive
+# once per frame, so their spacing depends on each PC's frame rate, and 5.4% of
+# one player's cursor positions lay outside the 1600x900 view. Logged at every
+# level start and every DISPLAY_INTERVAL_S seconds, with the input rate.
+func _write_display(reason: String) -> void:
+	var info: Dictionary = display_provider.call() if display_provider.is_valid() else {}
+	var window_s := maxf(0.001, float(Time.get_ticks_msec() - _last_display_ms) / 1000.0) if _last_display_ms > 0 else 0.0
+	info.merge({"reason": reason, "frames": _frame_count,
+		"fps_measured": float(_frame_count) / window_s if window_s > 0.0 else null,
+		"frame_time_ms_mean": _frame_time_sum * 1000.0 / _frame_count if _frame_count > 0 else null,
+		"frame_time_ms_max": _frame_time_max * 1000.0 if _frame_count > 0 else null,
+		"mouse_motion_events_per_s": float(_motion_events) / window_s if window_s > 0.0 else null,
+		"window_s": window_s}, true)
+	if sampler != null and sampler.is_running():
+		var sampled := sampler.stats()
+		info["sampler"] = {"rate_hz": sampled.rate_hz, "achieved_hz": sampled.achieved_hz, "rows": sampled.rows,
+			"held_share": sampled.held_share, "late_p95_us": sampled.get("late_p95_us"), "late_max_us": sampled.late_max_us,
+			"map_check_px_median": _median(_map_errors) if _map_errors.size() > 0 else null, "map_checks": _map_errors.size()}
+	_map_errors = PackedFloat32Array()
+	_write("display", info)
+	_last_display_ms = Time.get_ticks_msec()
+	_frame_count = 0
+	_frame_time_sum = 0.0
+	_frame_time_max = 0.0
+	_motion_events = 0
 
 func begin_session(run_id: String, metadata: Dictionary = {}) -> void:
 	var requested_id := run_id.validate_filename()
@@ -73,6 +135,7 @@ func set_enabled(value: bool) -> void:
 	if value:
 		begin_session(session_id if not session_id.is_empty() else _new_id("session"), _context)
 	else:
+		_stop_sampler("collection_disabled")
 		_write("capture_stopped", {"reason": "collection_disabled", "summary": get_summary()})
 		_flush()
 		_write_manifest()
@@ -84,7 +147,7 @@ func set_enabled(value: bool) -> void:
 
 func _open() -> void:
 	var directory := "%s/%s/levels" % [LOG_DIRECTORY, session_id]
-	var err := DirAccess.make_dir_recursive_absolute(directory)
+	var err := DirAccess.make_dir_recursive_absolute(directory) if relay == null else OK
 	if err != OK and err != ERR_ALREADY_EXISTS:
 		log_error.emit("Could not create the local research folder.")
 		return
@@ -102,12 +165,14 @@ func _open() -> void:
 	_last_click_us = -1
 	_capture_segment += 1
 	enabled = true
-	_write("capture_started" if _capture_segment == 1 else "capture_resumed", {
-		"local_only": true, "scope": "local_player_game_window", "motion": "every_delivered_event",
+	_write("capture_started" if _capture_segment == 1 else "capture_resumed", {"samples": "levels/<level_run_id>_samples_60hz.csv at %d Hz" % ResearchSampler.RATE_HZ,
+		"local_only": relay == null, "stored_by": "this computer" if relay == null else "session leader's computer (players/<player key>/)",
+		"own_input_only": relay != null, "scope": "local_player_game_window", "motion": "every_delivered_event",
 		"coordinates": "1600x900 viewport pixels", "context": _context,
 		"gap_wall_us": Time.get_ticks_usec() - _disabled_at_us if _disabled_at_us >= 0 else 0,
 		"gap_level_start_s": _disabled_level_elapsed if _disabled_at_us >= 0 else null,
 		"gap_level_end_s": _shift_elapsed if _disabled_at_us >= 0 else null})
+	if not _level.is_empty(): _start_sampler()
 	_flush()
 	_write_manifest()
 	if enabled: consent_changed.emit(true)
@@ -120,6 +185,9 @@ func begin_level(level_index: int, metadata: Dictionary = {}, level_run_id: Stri
 	if not _level.is_empty(): end_level("level_changed")
 	_shift_index = level_index
 	_shift_elapsed = float(metadata.get("elapsed", metadata.get("level_elapsed_s", 0.0)))
+	_clock_corrections = 0
+	_clock_held_total_s = 0.0
+	_clock_holding = false
 	var level_number := int(metadata.get("level_number", metadata.get("level_id", level_index + 1)))
 	var attempt := int(_attempts.get(str(level_number), 0)) + 1
 	_attempts[str(level_number)] = attempt
@@ -127,6 +195,7 @@ func begin_level(level_index: int, metadata: Dictionary = {}, level_run_id: Stri
 		"level_name": str(metadata.get("level_name", metadata.get("name", "Level %d" % level_number))),
 		"level_run_id": run_id, "level_attempt": attempt,
 		"log_path": "%s/%s/levels/%s_events.jsonl" % [LOG_DIRECTORY, session_id, run_id],
+		"samples_path": "%s/%s/levels/%s_samples_60hz.csv" % [LOG_DIRECTORY, session_id, run_id],
 		"capture_started_at_s": _shift_elapsed, "practice": bool(metadata.get("practice", level_number == 0))}
 	_level_file = _open_append(str(_level.log_path))
 	if _level_file == null:
@@ -139,6 +208,13 @@ func begin_level(level_index: int, metadata: Dictionary = {}, level_run_id: Stri
 	_active_events.clear()
 	_closed_events.clear()
 	_write("level_started", {"metadata": metadata, "capture_started_midlevel": _shift_elapsed > 0.0})
+	_last_display_ms = 0
+	_frame_count = 0
+	_frame_time_sum = 0.0
+	_frame_time_max = 0.0
+	_motion_events = 0
+	_write_display("level_started")
+	_start_sampler()
 	_flush()
 	_write_manifest()
 
@@ -152,9 +228,11 @@ func end_level(reason: String = "completed", summary: Dictionary = {}, final_sta
 			_finish_event(key, {"ended_at": _shift_elapsed, "solved": unresolved,
 				"outcome": "level_ended_unsolved" if unresolved != null else "level_ended",
 				"end_reason": reason, "censored": reason not in ["completed", "finished", "won", "lost"]})
+		_stop_sampler(reason)
 		_write("level_ended", {"reason": reason, "summary": summary,
 			"clicks": _level_clicks, "pointer_distance_px": _level_pointer_distance,
-			"events_observed": _closed_events.size(), "capture_duration_s": maxf(0.0, _shift_elapsed - float(_level.capture_started_at_s))})
+			"events_observed": _closed_events.size(), "capture_duration_s": maxf(0.0, _shift_elapsed - float(_level.capture_started_at_s)),
+			"clock_corrections": _clock_corrections, "clock_held_total_s": _clock_held_total_s})
 		_flush()
 		for recorded: Dictionary in _levels:
 			if recorded.level_run_id == _level.level_run_id:
@@ -162,12 +240,18 @@ func end_level(reason: String = "completed", summary: Dictionary = {}, final_sta
 				recorded["end_reason"] = reason
 		_write_manifest()
 	_completed_level_elapsed += _shift_elapsed
+	_stop_sampler(reason, false)
 	if _level_file != null: _level_file.close()
 	_level_file = null
 	_level_buffer.clear()
 	_level = {}
 	_active_events.clear()
 	_closed_events.clear()
+
+## Stop recording this player's own input from now on (study withdrawal).
+func withdraw_own_input() -> void:
+	exclude_own_input = true
+	_stop_sampler("study_withdrawal", false)
 
 func get_level_context() -> Dictionary:
 	var result: Dictionary = _level.duplicate(true)
@@ -177,15 +261,32 @@ func get_level_context() -> Dictionary:
 	return result
 
 func set_clock(shift_elapsed: float, shift_index: int) -> void:
-	_shift_elapsed = shift_elapsed
 	_shift_index = shift_index
+	_advance_clock(shift_elapsed)
+
+# The level clock never moves backwards inside one level attempt. A guest that
+# ran ahead of the host during a network stall is corrected by the next
+# snapshot; the logged clock holds until the game catches up (playtest 22.10).
+func _advance_clock(value: float) -> void:
+	if not _level.is_empty() and value < _shift_elapsed:
+		if not _clock_holding:
+			# One record per correction, not one per update while it catches up.
+			_clock_holding = true
+			var behind := _shift_elapsed - value
+			_clock_held_total_s += behind
+			if behind >= CLOCK_CORRECTION_LOG_S:
+				_clock_corrections += 1
+				_write("clock_correction", {"held_at_s": _shift_elapsed, "game_clock_s": value, "behind_s": behind})
+		return
+	_clock_holding = false
+	_shift_elapsed = value
 
 func observe_state(state: Dictionary) -> void:
-	if not enabled or _level.is_empty(): return
+	if not enabled or _level.is_empty() or relay != null: return
 	# Saved snapshots wrap numeric values to retain exact precision. Network
 	# snapshots already contain native values; this accepts either form.
 	state = _decode_snapshot(state)
-	_shift_elapsed = float(state.get("elapsed", _shift_elapsed))
+	_advance_clock(float(state.get("elapsed", _shift_elapsed)))
 	var snapshot_summary: Dictionary = {}
 	for key: String in ["score", "reputation", "rescued", "resolved_count", "failed_count", "roads_cleared", "supplies", "chaos_phase", "running", "finished", "won"]:
 		if state.has(key): snapshot_summary[key] = state[key]
@@ -266,6 +367,8 @@ func log_pointer(pos: Vector2, delta: Vector2) -> void:
 	if not enabled: return
 	_pointer_distance += delta.length()
 	_level_pointer_distance += delta.length()
+	_motion_events += 1
+	_check_sample_mapping(pos)
 	_write("mouse_motion", {"x": pos.x, "y": pos.y, "dx": delta.x, "dy": delta.y, "distance_px": delta.length()})
 
 func log_mouse_button(event: InputEventMouseButton) -> void:
@@ -290,6 +393,7 @@ func log_click(pos: Vector2) -> void:
 
 func log_event(event_type: String, data: Dictionary = {}) -> void:
 	if not enabled: return
+	if relay != null and not LOCAL_EVENTS.has(event_type): return # the leader records shared game events
 	var enriched := data.duplicate(true)
 	var key := _event_key(event_type, data)
 	if not key.is_empty():
@@ -383,6 +487,7 @@ func _instance_id(key: String) -> String:
 
 func _write(event_type: String, data: Dictionary) -> void:
 	if not enabled or _file == null: return
+	if exclude_own_input and LOCAL_EVENTS.has(event_type) and event_type != "study_withdrawal": return
 	_event_count += 1
 	var active_ids: Array[String] = []
 	for key: String in _active_events: active_ids.append(_instance_id(key))
@@ -390,7 +495,7 @@ func _write(event_type: String, data: Dictionary) -> void:
 	var record := {"schema": SCHEMA_VERSION, "session_id": session_id, "capture_session_id": session_id,
 		"sequence": _event_count, "capture_segment": _capture_segment,
 		"local_elapsed_us": Time.get_ticks_usec() - _session_start_us,
-		"utc": Time.get_datetime_string_from_system(true), "shift_index": _shift_index,
+		"utc": Time.get_datetime_string_from_system(true), "unix_ms": int(Time.get_unix_time_from_system() * 1000.0), "shift_index": _shift_index,
 		"shift_elapsed_s": _shift_elapsed, "level_elapsed_s": _shift_elapsed,
 		"session_elapsed_s": _completed_level_elapsed + (_shift_elapsed if not _level.is_empty() else 0.0),
 		"level_id": _level.get("level_id"), "level_number": _level.get("level_number"),
@@ -419,7 +524,8 @@ func _flush() -> void:
 
 func _write_manifest() -> void:
 	if not enabled: return
-	var manifest := FileAccess.open("%s/%s/manifest.json" % [LOG_DIRECTORY, session_id], FileAccess.WRITE)
+	var manifest_path := "%s/%s/manifest.json" % [LOG_DIRECTORY, session_id]
+	var manifest = FileAccess.open(manifest_path, FileAccess.WRITE) if relay == null else relay.open_file(manifest_path, false)
 	if manifest == null:
 		_fail_write()
 		return
@@ -427,13 +533,15 @@ func _write_manifest() -> void:
 		"session_events": log_path, "level_files": _levels, "context": _sanitize(_context),
 		"level_files_mirror_session_events": true,
 		"join_key": ["session_id", "sequence"], "voice_join_key": ["capture_session_id", "level_run_id"],
+		"own_input_only": relay != null,
 		"clock": {"level_elapsed_s": "active simulation seconds within this attempt", "session_elapsed_s": "sum of actual level elapsed times, including retries", "local_elapsed_us": "monotonic wall clock since session capture first started"},
 		"updated_utc": Time.get_datetime_string_from_system(true)}, "\t"))
-	var error := manifest.get_error()
+	var error: int = manifest.get_error()
 	manifest.close()
 	if error != OK: _fail_write()
 
-func _open_append(path: String) -> FileAccess:
+func _open_append(path: String):
+	if relay != null: return relay.open_file(path, true)
 	var file := FileAccess.open(path, FileAccess.READ_WRITE if FileAccess.file_exists(path) else FileAccess.WRITE)
 	if file != null: file.seek_end()
 	return file
@@ -445,12 +553,59 @@ func _close_files() -> void:
 	_level_file = null
 
 func _fail_write() -> void:
+	_stop_sampler("write_failed", false)
 	_close_files()
 	enabled = false
 	_buffer.clear()
 	_level_buffer.clear()
 	log_error.emit("Research collection stopped: the local disk could not be written.")
 	consent_changed.emit(false)
+
+func _start_sampler() -> void:
+	if not enabled or _level.is_empty() or exclude_own_input: return
+	if sampler == null: sampler = ResearchSampler.new()
+	if sampler.is_running(): return
+	sampler.relay = relay
+	if not sampler.start(str(_level.samples_path), _session_start_us, _capture_segment):
+		_write("sampler_error", {"path": _level.samples_path, "reason": "file_open_failed"})
+		return
+	_publish_sample_frame(0.0)
+	_write("sampler_started", {"path": _level.samples_path, "rate_hz": ResearchSampler.RATE_HZ, "segment": _capture_segment,
+		"columns": ResearchSampler.columns(), "clock": "local_elapsed_us = scheduled sample time on this file's monotonic clock",
+		"source": "operating-system cursor read on a dedicated thread; game state from the latest frame"})
+
+func _stop_sampler(reason: String, log_row: bool = true) -> void:
+	if sampler == null or not sampler.is_running(): return
+	var result := sampler.stop()
+	result["reason"] = reason
+	if log_row and enabled: _write("sampler_stopped", result)
+
+func _publish_sample_frame(delta: float) -> void:
+	if sampler == null or not sampler.is_running(): return
+	var viewport := get_viewport()
+	if viewport != null:
+		sampler.publish_mapping(Vector2(DisplayServer.window_get_position()), viewport.get_screen_transform().affine_inverse(), Vector2(DisplayServer.window_get_size()))
+	var state: Dictionary = sample_provider.call() if sample_provider.is_valid() else {}
+	if not state.has("level_elapsed_s"): state["level_elapsed_s"] = _shift_elapsed
+	state["frame_ms"] = delta * 1000.0
+	state["fps"] = Engine.get_frames_per_second()
+	state["window_focused"] = DisplayServer.window_is_focused()
+	sampler.publish_frame(state)
+
+# Compares a delivered mouse event with the sampler's mapping of the operating
+# system cursor at the same moment. A cursor that keeps moving adds a little
+# distance; a wrong mapping shows up as a large, constant offset.
+func _check_sample_mapping(event_position: Vector2) -> void:
+	if sampler == null or not sampler.is_running() or _map_errors.size() >= 2000: return
+	var viewport := get_viewport()
+	if viewport == null: return
+	var window_px := Vector2(DisplayServer.mouse_get_position() - DisplayServer.window_get_position())
+	_map_errors.append((viewport.get_screen_transform().affine_inverse() * window_px).distance_to(event_position))
+
+static func _median(values: PackedFloat32Array) -> float:
+	var sorted := values.duplicate()
+	sorted.sort()
+	return sorted[sorted.size() / 2]
 
 func _new_id(prefix: String) -> String:
 	return "%s_%d_%s" % [prefix, int(Time.get_unix_time_from_system()), Crypto.new().generate_random_bytes(6).hex_encode()]

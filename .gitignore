@@ -23,3 +23,7 @@ beacon_bay_save.json
 /assets/**/*.import
 export_presets.cfg
 /scripts/deploy/
+
+# Questionnaire answers exported from the study page (participant data)
+study/**/*.json
+study/**/*.csv

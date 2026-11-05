@@ -14,7 +14,8 @@ func _initialize() -> void:
 func run() -> void:
 	_test_task_load()
 	await _test_stream()
-	if failures.is_empty(): print("PASS: 60 Hz sample stream on a fixed grid, task load per player, crew selection events")
+	await _test_next_level_clock()
+	if failures.is_empty(): print("PASS: 60 Hz sample stream on a fixed grid, task load per player, crew selection events, clock reset between levels")
 	else:
 		for failure in failures: printerr("FAIL: ", failure)
 	quit(0 if failures.is_empty() else 1)
@@ -111,6 +112,41 @@ func _test_stream() -> void:
 		events[record.event] = int(events.get(record.event, 0)) + 1
 	check(int(events.get("sampler_started", 0)) == 1 and int(events.get("sampler_stopped", 0)) == 1, "Sampler start and stop are logged")
 	check(int(events.get("crew_selected", 0)) == 1 and int(events.get("crew_deselected", 0)) == 1, "Crew selection and deselection are logged")
+	game.voice.shutdown()
+	game.queue_free()
+	await process_frame
+
+# Playtest 02.11: after a level restart the sample file kept the previous
+# level's end time in level_elapsed_s. The next level must start near 0.
+func _test_next_level_clock() -> void:
+	var game = load("res://scripts/main.gd").new()
+	game.test_mode = true
+	root.add_child(game)
+	game.set_process(false)
+	game.audio.set_music_enabled(false)
+	game.audio.set_sfx_enabled(false)
+	game.research_enabled = true
+	game._begin_shift(4)
+	game._process_events()
+	var started := Time.get_ticks_msec()
+	while Time.get_ticks_msec() - started < 300:
+		game.sim.tick(1.0)
+		await process_frame
+	check(game.sim.elapsed > 10.0, "The first level ran for a while (%.1f s)" % game.sim.elapsed)
+	game._begin_shift(3)
+	game._process_events()
+	var second_path: String = game.research.get_level_context().get("samples_path", "")
+	started = Time.get_ticks_msec()
+	while Time.get_ticks_msec() - started < 400:
+		await process_frame
+	game._stop_capture()
+	var rows := FileAccess.get_file_as_string(second_path).split("\n", false)
+	var header := rows[0].split(",")
+	var col := header.find("level_elapsed_s")
+	var highest := 0.0
+	for i in range(1, rows.size()):
+		highest = maxf(highest, float(rows[i].split(",")[col]))
+	check(rows.size() > 10 and highest < 5.0, "The next level's sample clock starts at 0, not at the previous level's end (max %.1f s)" % highest)
 	game.voice.shutdown()
 	game.queue_free()
 	await process_frame

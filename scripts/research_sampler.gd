@@ -18,6 +18,9 @@ extends RefCounted
 const RATE_HZ := 60
 const FLUSH_ROWS := 30
 const MAX_EXTRAPOLATE_S := 1.0
+## A step back in the level clock up to this size is held (frame jitter, host
+## correction); a larger one is a new clock (next level, restart) and is taken.
+const MAX_HOLD_S := 5.0
 
 ## Columns before the task-load block (BeaconTaskLoad.KEYS follow them).
 const BASE_COLUMNS: Array[String] = ["segment", "sample", "local_elapsed_us", "unix_ms", "level_elapsed_s",
@@ -70,6 +73,12 @@ func start(csv_path: String, session_start_us: int, segment: int) -> bool:
 	_unix_at_start_ms = int(Time.get_unix_time_from_system() * 1000.0)
 	_slot = 0
 	_last_level_s = 0.0
+	# The sampler is reused across levels. Without this, the first slot of a new
+	# level read the previous level's last frame, and the hold below then kept
+	# the previous level's end time in level_elapsed_s (playtest 02.11).
+	_mutex.lock()
+	_frame = {}
+	_mutex.unlock()
 	_stats = {"held": 0, "late_over_4ms": 0, "late_max_us": 0, "rows": 0}
 	_late_samples = PackedInt32Array()
 	_running = true
@@ -179,9 +188,9 @@ func _row(slot: int, due_us: int, read_us: int, held: bool) -> String:
 	var level_s := float(frame.get("level_elapsed_s", 0.0))
 	if bool(frame.get("clock_running", false)) and frame_us > 0:
 		level_s += minf(MAX_EXTRAPOLATE_S, float(due_us - frame_us) / 1e6) * float(frame.get("clock_rate", 1.0))
-	# Like the JSONL level clock, the sampled clock never moves backwards: a frame
-	# that lands slightly behind the extrapolation (or a host correction) holds it.
-	level_s = maxf(level_s, _last_level_s)
+	# Like the JSONL level clock, small steps back are held: a frame that lands
+	# slightly behind the extrapolation, or a host correction.
+	if level_s < _last_level_s and _last_level_s - level_s <= MAX_HOLD_S: level_s = _last_level_s
 	_last_level_s = level_s
 	var values: Array = [_segment, slot, due_us - _session_start_us,
 		_unix_at_start_ms + int((due_us - _start_us) / 1000), "%.4f" % maxf(0.0, level_s),

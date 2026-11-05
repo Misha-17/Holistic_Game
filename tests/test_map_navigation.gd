@@ -1,7 +1,11 @@
 extends SceneTree
 
+# 4.11 (Andrei): only the whole-town view is left: no OVERVIEW/EXPLORE button,
+# no wheel zoom, no panning. Clicking, selecting and dispatching work as before.
 var failures: Array[String] = []
 var game: Node
+var sent_buttons := 0
+var sent_moves := 0
 
 func check(ok: bool, message: String) -> void:
 	if not ok: failures.append(message)
@@ -15,6 +19,7 @@ func button(at: Vector2, pressed: bool, index: MouseButton = MOUSE_BUTTON_LEFT) 
 	event.global_position = event.position
 	event.button_index = index
 	event.pressed = pressed
+	sent_buttons += 1
 	Input.parse_input_event(event)
 
 func motion(at: Vector2, relative: Vector2) -> void:
@@ -22,6 +27,7 @@ func motion(at: Vector2, relative: Vector2) -> void:
 	event.position = root.get_final_transform() * (at + game.global_position)
 	event.global_position = event.position
 	event.relative = root.get_final_transform().basis_xform(relative)
+	sent_moves += 1
 	Input.parse_input_event(event)
 
 func refresh_map() -> void:
@@ -40,9 +46,8 @@ func check_camera(zoom: float, pan: Vector2, label: String) -> void:
 func test_selection_preserves_view() -> void:
 	game.research_enabled = false
 	game.buttons.clear()
-	for overview: bool in [true, false]:
+	for overview: bool in [true]:
 		game._begin_shift(0)
-		if not overview: game._toggle_overview()
 		game._center_map(Vector2(.55, .55))
 		var zoom: float = game.map_zoom
 		var pan: Vector2 = game.map_pan
@@ -116,8 +121,22 @@ func run() -> void:
 	game.research_enabled = true
 	game._begin_shift(0)
 	check(game._is_map_overview(), "A level starts on the whole town")
+	var whole_zoom: float = game.map_zoom
+	var whole_pan: Vector2 = game.map_pan
+	check(is_equal_approx(whole_zoom, game._fit_map_zoom()), "The whole town fits the screen")
+	check(game._map_rect().size.x <= game.MAP_VIEW.size.x + 1 and game._map_rect().size.y <= game.MAP_VIEW.size.y + 1, "Every edge of the town is visible")
+	# Old ways into a closer view do nothing now.
 	game.map_zoom = game._drag_zoom()
-	game._center_map(Vector2(.5, .5))
+	game._center_map(Vector2(.8, .8))
+	check(is_equal_approx(game.map_zoom, whole_zoom) and game.map_pan == whole_pan, "The map cannot be zoomed in or moved")
+	game._toggle_overview()
+	game._zoom_map(1, Vector2(690, 390))
+	check(is_equal_approx(game.map_zoom, whole_zoom), "Neither the old toggle nor the wheel zooms in")
+	game.hud.queue_redraw()
+	await process_frame
+	await process_frame
+	check(not game.buttons.any(func(b): return str(b.id) == "map_overview"), "There is no OVERVIEW/EXPLORE button")
+	check(not game._minimap_shown(), "No minimap (it only belonged to the closer view)")
 	game.sim._spawn_incident()
 	var call: Dictionary = game.sim.incidents.back()
 	call.pos = Vector2(.5, .5)
@@ -133,14 +152,12 @@ func run() -> void:
 	game._process(0)
 	game.tactical_map.refresh()
 	var point: Vector2 = game.tactical_map.call_hit_rect(int(call.id)).get_center()
-	var initial_pan: Vector2 = game.map_pan
 	button(point, true)
 	check(game.sim.successful_dispatches == 0, "Marker press never dispatches before release")
 	motion(point + Vector2(36, 22), Vector2(36, 22))
 	button(point + Vector2(36, 22), false)
-	check(game.map_pan != initial_pan, "Left dragging a call pans the town")
-	check(game.sim.successful_dispatches == 0, "Dragging a call does not accidentally dispatch")
-	game._center_map(Vector2(.5, .5))
+	check(game.map_pan == whole_pan, "Dragging does not move the map")
+	check(game.sim.successful_dispatches == 0, "Dragging across a call does not accidentally dispatch")
 	game.tactical_map.refresh()
 	point = game.tactical_map.call_hit_rect(int(call.id)).get_center()
 	button(point, true)
@@ -150,8 +167,7 @@ func run() -> void:
 	check(game.sim.successful_dispatches == 1, "A released click dispatches exactly once")
 	button(point, false)
 	check(game.sim.successful_dispatches == 1, "An unmatched mouse release never dispatches")
-	# Playtest 15.10: a crew is picked on press, so a press that turns into a
-	# drag still selects it (and still pans the town).
+	# Playtest 15.10: a crew is picked on press, even if the press becomes a drag.
 	var fire: Dictionary = game.sim.units[0]
 	fire.state = "return"
 	fire.pos = Vector2(.56, .62)
@@ -163,43 +179,13 @@ func run() -> void:
 	button(point + Vector2(24, 12), false)
 	check(game.selected_unit == int(fire.id), "Pressing a crew selects it even when the press becomes a drag")
 	game.selected_unit = -1
-	# A marker outside the viewport belongs on the minimap, never clamped onto
-	# an unrelated street along the visible viewport edge.
-	call.pos = Vector2(.01, .01)
-	game.map_zoom = game._drag_zoom()
-	game._center_map(Vector2(.9, .9))
-	game.tactical_map.refresh()
-	check(not game.tactical_map.call_hit_rect(int(call.id)).has_area(), "Offscreen calls are not clickable edge ghosts")
-	button(game.MINIMAP_RECT.position + game.MINIMAP_RECT.size * .1, true)
-	button(game.MINIMAP_RECT.position + game.MINIMAP_RECT.size * .1, false)
-	check(game._map_center().x < .5 and game._map_center().y < .5, "Minimap click jumps toward its world position")
-	var old_zoom: float = game.map_zoom
-	var old_center: Vector2 = game._map_center()
-	game._toggle_overview()
-	check(is_equal_approx(game.map_zoom, game._fit_map_zoom()), "Overview fits the whole world")
-	check(game._map_rect().size.x <= game.MAP_VIEW.size.x + 1 and game._map_rect().size.y <= game.MAP_VIEW.size.y + 1, "Overview contains every world edge")
-	game._toggle_overview()
-	check(is_equal_approx(game.map_zoom, old_zoom) and game._map_center().distance_to(old_center) < .002, "Overview returns to previous camera")
-	# Only two views: the wheel switches between them, never zooms further.
-	game._zoom_map(1, Vector2(690, 390))
-	check(is_equal_approx(game.map_zoom, game._drag_zoom()), "Wheel up in the drag view does not zoom further in")
-	game.selected = int(call.id)
-	game._zoom_map(-1, Vector2(690, 390))
-	check(game._is_map_overview(), "Wheel down shows the whole town")
-	check(game.selected == -1, "Switching to the whole town closes the open call card")
-	game._zoom_map(-1, Vector2(690, 390))
-	check(game._is_map_overview(), "Wheel down on the whole town stays there")
-	var anchor := Vector2(690, 390)
-	var world_before: Vector2 = (anchor - game._map_rect().position) / game._map_rect().size
-	game._zoom_map(1, anchor)
-	check(is_equal_approx(game.map_zoom, game._drag_zoom()), "Wheel up on the whole town opens the drag view")
-	var world_after: Vector2 = (anchor - game._map_rect().position) / game._map_rect().size
-	check(world_before.distance_to(world_after) < .02, "The drag view opens where the cursor was")
-	initial_pan = game.map_pan
+	# The wheel and the middle button no longer change the view.
+	button(Vector2(690, 390), true, MOUSE_BUTTON_WHEEL_UP)
+	button(Vector2(690, 390), false, MOUSE_BUTTON_WHEEL_UP)
 	button(Vector2(700, 500), true, MOUSE_BUTTON_MIDDLE)
 	motion(Vector2(740, 520), Vector2(40, 20))
 	button(Vector2(740, 520), false, MOUSE_BUTTON_MIDDLE)
-	check(game.map_pan != initial_pan, "Middle-button panning is retained")
+	check(is_equal_approx(game.map_zoom, whole_zoom) and game.map_pan == whole_pan, "Wheel and middle-button drag leave the whole-town view as it is")
 	# HUD buttons preserve their immediate click behavior.
 	game.buttons.clear()
 	game.buttons.append({"id": "pause", "rect": Rect2(900, 16, 40, 36)})
@@ -213,13 +199,13 @@ func run() -> void:
 		var event: Dictionary = JSON.parse_string(line)
 		if event.event == "mouse_button": clicks += 1
 		if event.event == "mouse_motion": moves += 1
-	check(clicks == 12 and moves == 4, "Gesture routing records each delivered mouse event exactly once")
+	check(clicks == sent_buttons and moves == sent_moves, "Gesture routing records each delivered mouse event exactly once (%d/%d clicks, %d/%d moves)" % [clicks, sent_buttons, moves, sent_moves])
 	test_selection_preserves_view()
 	game.voice.shutdown()
 	game.queue_free()
 	await process_frame
 	await process_frame
-	if failures.is_empty(): print("PASS: stable camera for selection, scouting, dispatch and crew controls in both views; drag, minimap, explicit zoom, HUD input and recording")
+	if failures.is_empty(): print("PASS: whole-town view only (no zoom, button, wheel or panning); stable selection, scouting, dispatch and crew controls; HUD input and recording")
 	else:
 		for failure in failures: printerr("FAIL: ", failure)
 	quit(0 if failures.is_empty() else 1)

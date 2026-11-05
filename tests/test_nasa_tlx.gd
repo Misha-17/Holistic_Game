@@ -26,6 +26,24 @@ func finish_level(game, index: int, won: bool) -> void:
 	game.elapsed_ui += game.TLX_DELAY_S + 0.1
 	game._process(0.0)
 
+func surveys() -> Array[String]:
+	var found: Array[String] = []
+	var root := DirAccess.open("user://research")
+	if root == null: return found
+	for session: String in root.get_directories():
+		var folder := "user://research/%s/questionnaires" % session
+		var dir := DirAccess.open(folder)
+		if dir == null: continue
+		for name: String in dir.get_files():
+			if name.begins_with("nasa_tlx_"): found.append(folder.path_join(name))
+	return found
+
+func new_surveys(before: Array[String]) -> Array[String]:
+	var result: Array[String] = []
+	for path in surveys():
+		if not before.has(path): result.append(path)
+	return result
+
 func run() -> void:
 	var game = load("res://scripts/main.gd").new()
 	root.add_child(game)
@@ -35,7 +53,7 @@ func run() -> void:
 	game.collection_choice_made = true
 	game.voice_choice_made = true
 	var saved: Array[String] = []
-	game.research_file_saved.connect(func(path: String): saved.append(path))
+	var before := surveys()
 
 	finish_level(game, 4, true)
 	check(game.screen == "results", "Level 5 results do not open the survey")
@@ -43,11 +61,13 @@ func run() -> void:
 	check(game.screen == "tlx", "A lost level 6 opens the survey after the results")
 	check(not game.tlx_form.all_answered(), "No answer is preset")
 	game._action("tlx_submit")
+	saved = new_surveys(before)
 	check(game.screen == "tlx" and saved.is_empty(), "Cannot submit before all six are answered")
 	var values := {"mental_demand": 85, "physical_demand": 10, "temporal_demand": 90, "performance": 60, "effort": 80, "frustration": 55}
 	for id in values: game.tlx_form.set_answer(id, values[id])
 	check(game.tlx_form.all_answered(), "All six answered")
 	game._action("tlx_submit")
+	saved = new_surveys(before)
 	check(game.screen == "results" and saved.size() == 1, "Submit saves and returns to the results")
 	var record: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(saved[0]))
 	check(record.answers.mental_demand == 85 and is_equal_approx(float(record.answers.raw_tlx), 63.33), "Answers and raw TLX saved (%s)" % record.answers.get("raw_tlx"))
@@ -65,6 +85,8 @@ func run() -> void:
 	game._action("tlx_title")
 	for id in values: game.tlx_form.set_answer(id, 50)
 	game._action("tlx_submit")
+	saved = new_surveys(before)
+	saved.sort()
 	check(saved.size() == 2, "Survey from the title is saved too")
 	var second: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(saved[1]))
 	check(second.capture_session_id == record.capture_session_id, "A later survey attaches to the last session")

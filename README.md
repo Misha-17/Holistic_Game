@@ -2,6 +2,30 @@
 
 A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engineering and Police each have four crews in every level; calls need several departments working together.
 
+## Study consent, withdrawal and one map view (04.11)
+
+- **Consent on the first screen.** When the game starts, players see the study information (what is recorded, where it is stored and analysed, anonymous publication, their rights) and choose **I AGREE · RECORD MY PLAY** or **PLAY WITHOUT DATA COLLECTION**. The answer holds until the game is closed and replaces the old question at the first level of each session. The text is **placeholder wording** in `scripts/study_info.gd` (square brackets mark details to fill in); bump `TEXT_VERSION` there when it changes. Every recorded session logs a `study_consent` row with that version. **STUDY INFORMATION** in Settings → Research shows the text again.
+- **Withdraw after playing.** **WITHDRAW MY DATA** on the main menu (shown after a recorded session, above SETTINGS / QUIT), on the results screen (between SETTINGS and MAIN MENU) and in Settings → Research. Clicking it only opens a confirmation (CANCEL / WITHDRAW AND DELETE; Esc cancels); confirming deletes what was recorded about that player in the session just played and stops recording them:
+  - solo: the whole session folder and its voice folder;
+  - session leader in co-op: their own input rows, 60 Hz samples, survey answers and voice track (the shared game events stay, because teammates' files need them);
+  - other players: while still in the room, a request goes to the session leader's computer, which deletes their `players/<key>/` folder and their voice track. After leaving the room (the usual case on the main menu) the game cannot reach the leader, so it shows a **participant code** (the first 8 characters of their player key, e.g. `ABCD-1234`) to give the researcher, who deletes `players/<key>/` (the folder name starts with the code) and the matching `player_<key>.wav` by hand.
+  `research/withdrawals.jsonl` on the storing computer notes each withdrawal (session, player key, what was deleted) without any recorded data. Sessions from before a restart cannot be withdrawn in the game (the text points to the researcher).
+- **Only the whole-town view.** The EXPLORE / OVERVIEW button, wheel zoom, the drag view, panning (mouse, middle button, arrow keys) and the minimap are gone. Pressing and moving across a crew or call still never dispatches it by accident.
+- **Quitting:** the game now closes the microphone two frames before quitting. "WASAPI: GetBufferSize error" in the console after quitting comes from Godot's Windows audio driver during shutdown; voice files are already closed at that point, so recordings are not affected.
+
+## Survey on the way out (04.11)
+
+- **MAIN MENU on the results screen asks about the NASA-TLX first** (also from settings opened there): **YES, FILL IT IN** opens the survey and then goes to the main menu (submitted or skipped); **NO, GO TO MAIN MENU** goes straight there; Esc stays on the results screen. Sessions that end before Level 6 no longer depend on players remembering the title-screen survey button. A session that already has a survey (for example after Level 6) is not asked again. The answers are saved with `"source": "leaving_session"`.
+- In co-op a player filling in the survey on the way out is not pulled into the next level the host starts, and stays connected until their answers have reached the session leader's computer.
+
+## Playtest 02.11 update (0.9.3, network protocol 14)
+
+- **Reconnecting keeps everyone's departments.** Each computer has a stable player key (`user://player_key.txt`). If a player drops out during a level (or on the results screen), nobody else's departments change: the missing player's seat and departments wait for them, their crews keep working but get no new orders, and when they rejoin they get the same seat and departments back. Departments are re-split only when the next level starts, if the player has not come back. A new player who arrives mid-level waits for the next level instead of taking anyone's crews. In the lobby, joining and leaving re-split as before.
+- **One voice track per person.** Tracks are named after the player (`player_<key>.wav`), not the network connection, so a player who reconnects continues in the same track (the time they were away is silence). Before, every reconnect opened a new track as long as the whole session.
+- **Only the session leader's computer stores study files.** The leader is the LAN host, or on the Azure server the first player in the room (they stay leader after a dropout; while they are away the next player stands in). The leader saves the game log, all voice tracks and its own input as before. Other players' games save nothing locally: their own mouse, clicks, keys, selections, 60 Hz samples and questionnaire answers are sent over the game connection (through the server) to the leader, into `research/<session>/players/<player key>/` with the same file names. Shared game events are recorded once, by the leader. Make sure the researcher's (most stable) computer joins the room first.
+- **Teammates' crew status is hidden.** Their crew cards in the bottom bar say TEAMMATE instead of READY / EN ROUTE / ON SCENE, their stations on the map show no free-crew count, and on call cards their crews are listed without a state. Their vehicles still drive on the map.
+- **No upload to the Azure server** any more (removed with `tools/download_research.*`). The server stores nothing.
+
 ## Research update (0.9.2, client feedback 01.11)
 
 - **Fixed 60 Hz recording.** Each level also writes `levels/<level_run_id>_samples_60hz.csv`: a background thread reads the cursor 60 times a second on a fixed clock, whatever the frame rate, plus the selection, the object under the cursor and the player's task load. Before, mouse rows came once per rendered frame, so a 30 fps PC recorded half as much as a 75 fps PC, and every PC recorded less when calls piled up.
@@ -19,14 +43,14 @@ A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engi
 - **Microphone check** after enabling voice at level entry, plus an input meter in Settings → Sounds.
 - **Study PC check:** Settings → Research → **CHECK THIS STUDY PC**. Five-second test of window size, scaling, frame rate, microphone and recording, with OK / CHECK / FIX lines; saved to `research/pc_checks/`. During play a `display` row (fps, window, scaling) is logged every 10 s.
 - **NASA-TLX (raw):** opens after the last level (Level 6, won or lost) and from **SURVEY · NASA-TLX** on the title screen. Saved to `research/<session>/questionnaires/`.
-- **Automatic upload to the study server.** In sessions on the dedicated (Azure) server each player's computer sends its own event logs, survey answers and own voice track to the server in the background after each level (slowed down while playing, resumes after disconnects or restarts). Players do nothing. The server stores them in `research_uploads/<session>/<pc_id>/` next to the server executable; the researcher downloads them with `tools/download_research.ps1` (Windows) or `tools/download_research.sh`.
+- ~~Automatic upload to the study server~~ (removed 02.11: only the session leader's computer stores files).
 - **Fullscreen in the editor:** Godot 4.4+ runs the game inside the editor's Game tab, where fullscreen cannot work and the game looks small. Untick **Embed Game on Next Play** in the Game tab's ⋮ menu (or Editor Settings → Run → Window Placement → Game Embed Mode = Disabled). Exported builds are not affected.
 
 ## Menu and camera update (0.9.1)
 
 The level menu now shows illustrated cards in play order, **00–06**, with Level 0 first, clear completion/lock badges and a separate saved-shift panel. The Training Harbor title and subtitle no longer cover the practice map.
 
-Your camera stays where you leave it when selecting a call, crew or station, scouting, dispatching or cycling through calls. Use the wheel or **EXPLORE / OVERVIEW** to change views. Dragging and arrow keys keep your chosen zoom.
+Your camera stays where you leave it when selecting a call, crew or station, scouting, dispatching or cycling through calls. (Since 04.11 the whole town is the only view.)
 
 ## Level 0 and getting started (0.9.0)
 
@@ -41,8 +65,7 @@ The six existing campaign levels keep their saved indices and difficulty. **Star
 - **Withdraw a crew from a scene:** click the call and press **WITHDRAW** next to the crew on its card, or click its crew card in the bottom bar, then **WITHDRAW** (or **V**). It leaves the incident and returns to standby; you can send it to another call while it returns, once the normal dispatch cooldown has passed. This also cancels a crew en route or clearing a road. Other crews keep working, and the incident still needs a replacement for the withdrawn department.
 - **Change roles between levels:** in the co-op lobby or results screen, click **SWAP** beside a teammate to exchange your department assignments. With two or three players, this swaps the entire department bundle. Roles stay fixed during a level; the host/session leader remains the same player. Joining or leaving redistributes departments to keep every role covered. Solo players already command every department.
 - **Q:** scout. The shared field team needs 8 s between scouts: the **SCOUT** counter in the top bar and the SCOUT button on a ? call show the seconds left (playtest 19.10). **E:** supply a crew on scene. **Space:** coffee boost. **C:** rescue close-up. **R:** ping.
-- **Two views only:** every level **starts on the whole town**. Scroll up or press **EXPLORE** to open the **drag view**; scroll down or press **OVERVIEW** to return to the whole town. Clicking calls, crews or stations preserves your chosen zoom and camera position. There is no further zooming in (no +/- buttons, no F shortcut). Switching to the whole town closes an open call card.
-- In the drag view: **left-drag** pans (middle-drag too), **WASD / arrows** pan, the **minimap** (bottom right, drag view only) jumps; **M** or its HIDE button hides it (music is switched in Settings).
+- **One view:** the whole town is always on screen (04.11: no zoom, no panning, no minimap).
 - The map fills the whole screen; the top bar and crew cards float over it, see-through. Markers are kept out from under them.
 - Crews and stations are picked the moment you press on them, so a press that turns into a drag still selects the crew. Moving vehicles never steal a click meant for a call or station under them. Station buttons are 20% bigger. A crew's route preview is drawn in its department's colour.
 - With a crew selected, clicking a **?** call does **not** send the crew: it opens the call's card with a **SCOUT** button, and the crew stays selected. 1–4 over a ? call also asks you to scout first.
@@ -136,11 +159,11 @@ Use **Settings → Research** (voice chat itself is under Settings → Sounds). 
 | Setting | Effect |
 | --- | --- |
 | Voice chat | Keeps the microphone open until disabled, including in menus. Starts off each launch. |
-| Allow team recording | Allows teammates to include your transmitted voice in their local files. |
-| Save team voice | Saves one aligned WAV per speaker, with consenting teammates, in a single session folder across levels and retries. |
-| Record my mouse | Saves your own in-game movements, every mouse button press/release and wheel input in a local JSONL file. |
+| Allow team recording | Allows the session leader's computer to include your transmitted voice in its files. |
+| Save team voice | On the session leader's computer (or solo): one aligned WAV per speaker, with consenting teammates, in a single session folder across levels and retries. |
+| Record my mouse | Records your own in-game movements, every mouse button press/release and wheel input. Solo/leader: a local JSONL file. Other players: sent to the session leader's computer. |
 
-**Open recordings** opens the game data folder. Mouse/game logs are under `research/`; audio and its timing sidecar are under `research/voice/`. No recordings upload to Azure. The server relays voice but does not record. Only speech sent using in-game voice is captured; Discord/Teams calls and system audio are not included. Teammates' mouse input is never collected on your computer.
+**Open recordings** opens the game data folder. Mouse/game logs are under `research/`; audio and its timing sidecar are under `research/voice/`. In co-op only the session leader's computer saves files; teammates' own input arrives there under `research/<session>/players/<player key>/`. Nothing is stored on the Azure server: it relays voice and study data but does not record. Only speech sent using in-game voice is captured; Discord/Teams calls and system audio are not included. Teammates' mouse input is stored on your computer only if you are the session leader.
 
 Level 0 can be recorded with consent; the separate legacy guided tutorial is excluded. Every level attempt has a unique ID and a separate mouse/event JSONL file, plus one authoritative session timeline. Events include scheduled/actual starts, ends, responsible crew, and resolved, expired, handed-off or unfinished outcomes. Abandoned or partially observed events are marked explicitly. Consent gaps and late joins are recorded without inventing missing outcomes. See [recording format and playback](docs/RECORDING_FORMAT.md).
 
@@ -156,7 +179,7 @@ The game contains no classifier, workload model, adaptive assistance or required
 
 ## Build and verification
 
-This build uses network protocol **13** (30.10: research upload channel, survey and session consent; 5 ENet channels). All co-op clients and the server must use the same build; redeploy the Azure server.
+This build uses network protocol **14** (02.11: player keys, reserved departments, study data relayed to the session leader; 5 ENet channels). All co-op clients and the server must use the same build; redeploy the Azure server.
 
 Run `powershell -ExecutionPolicy Bypass -File tools/package.ps1` on Windows; pass `-GodotConsole` and `-GodotGui` for other engine paths. It builds the Windows portable package, Linux-server resource pack and clean source ZIP under `artifacts/`. The portable build includes the official Godot runtime because export templates were unavailable locally; its license texts are in `licenses/`.
 
@@ -178,7 +201,10 @@ godot --headless --path . --script tests/test_mic_check.gd
 godot --headless --path . --script tests/test_nasa_tlx.gd
 godot --headless --path . --script tests/test_sample_stream.gd
 godot --headless --path . --script tests/test_pc_check.gd
-godot --headless --path . --script tests/test_research_upload.gd
+godot --headless --path . --script tests/test_reconnect_roles.gd
+godot --headless --path . --script tests/test_leader_storage.gd
+godot --headless --path . --script tests/test_leave_survey.gd
+godot --headless --path . --script tests/test_study_consent.gd
 godot --headless --path . --script tests/test_role_assignment.gd
 godot --headless --path . --script tests/test_road_events.gd
 godot --headless --path . --script tests/test_levels.gd
@@ -192,6 +218,7 @@ godot --headless --path . --script tests/test_session_lifecycle.gd
 godot --headless --path . --script tests/test_snapshot_transport.gd
 python tests/run_voice_tests.py --godot /path/to/godot
 python tests/run_main_network_tests.py --godot /path/to/godot
+python tests/run_leader_storage_tests.py --godot /path/to/godot
 python tests/run_main_network_tests.py --briefings --godot /path/to/godot
 ```
 

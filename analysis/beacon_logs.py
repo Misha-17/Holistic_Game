@@ -1,5 +1,9 @@
 """Loaders for Beacon Bay research files (schema 3 and 4).
 
+From 2.11 only the session leader's computer stores files in co-op. The other
+players' own input is in research/<session>/players/<player key>/ with the same
+file names; load_player_level() merges the leader's shared game events into it.
+
 One "player level" = one level attempt as recorded on one player's computer:
 `research/<session>/levels/<level_run_id>_events.jsonl` (all schemas) plus, from
 schema 4 on, `<level_run_id>_samples_60hz.csv` next to it.
@@ -59,6 +63,7 @@ def load_player_level(path: str | Path, attempt: int = -1) -> PlayerLevel:
     second level_started mid-level) is joined back into one series."""
     path = Path(path)
     rows = read_jsonl(path)
+    rows = _with_leader_events(path, rows)
     runs: dict[str, list[dict]] = {}
     for row in rows:
         runs.setdefault(str(row.get("level_run_id") or ""), []).append(row)
@@ -92,6 +97,36 @@ def load_player_level(path: str | Path, attempt: int = -1) -> PlayerLevel:
         frame = pd.read_csv(samples)
         level.samples = frame[(frame.level_elapsed_s > 0) & (frame.level_elapsed_s <= level.duration_s)].reset_index(drop=True)
     return level
+
+
+# Rows a player's own game records when it is not the session leader (2.11):
+# its input and view. Everything else (calls, dispatches, hazards, state) is
+# recorded once, in the leader's file for the same level.
+LOCAL_EVENTS = {"mouse_motion", "mouse_button", "key_input", "ui_action", "crew_selected", "crew_deselected",
+                "department_filter", "inspection", "command_requested", "task_state", "context", "display",
+                "collection_choice", "briefing_completed", "microphone_check", "pc_check", "voice_recording",
+                "clock_correction", "chaos_state_at_capture_start", "study_consent", "study_withdrawal"}
+LIFECYCLE = {"capture_started", "capture_resumed", "capture_stopped", "level_started", "level_ended",
+             "sampler_started", "sampler_stopped", "sampler_error", "shift_end"}
+
+
+def _with_leader_events(path: Path, rows: list[dict]) -> list[dict]:
+    """A file stored by the session leader for another player
+    (research/<session>/players/<key>/levels/<run>_events.jsonl) holds only
+    that player's own input. Add the shared game events of the same level from
+    the leader's file (research/<session>/levels/<run>_events.jsonl), in level
+    time order, so per-player analysis sees the calls and dispatches too."""
+    if len(path.parents) < 4 or path.parents[2].name != "players":
+        return rows
+    leader_file = path.parents[3] / "levels" / path.name
+    if not leader_file.exists():
+        return rows
+    shared = [r for r in read_jsonl(leader_file) if r["event"] not in LOCAL_EVENTS and r["event"] not in LIFECYCLE]
+    for r in shared:
+        r["from_leader_file"] = True
+    merged = rows + shared
+    merged.sort(key=lambda r: (str(r.get("level_run_id") or ""), float(r.get("level_elapsed_s") or 0.0), 0 if r.get("from_leader_file") else 1))
+    return merged
 
 
 # ----------------------------------------------------------------- mouse
@@ -277,7 +312,9 @@ def speech_activity(voice_dir: str | Path, level_run_id: str) -> dict[int, list[
         start, end = float(a["start_frame"]), float(a["end_frame"])
         if end < frames[0] or start > frames[-1]:
             continue
-        peer = int(str(a["speaker_id"]).replace("peer_", ""))
+        # 2.11: speaker_id is the player ("player_<key>"), stable across
+        # reconnects; peer_id is the network id at that moment.
+        peer = int(a["peer_id"]) if "peer_id" in a else int(str(a["speaker_id"]).replace("peer_", ""))
         t0, t1 = np.interp([start, end], frames, level_s)
         if t1 > t0:
             result.setdefault(peer, []).append((float(t0), float(t1)))

@@ -25,12 +25,12 @@ Under `research/voice/`, open a `team_<session_id>_…` folder:
 
 - **`listen.html`**: offline session player. Play/pause/seek the whole conversation, jump to a level, and mute or solo individual speakers. Labels and activity indicators help identify who is speaking.
 - **`session.json`**: speaker identities, departments, WAV filenames, common frame clock and level segments.
-- **`peer_<id>.wav`**: isolated mono PCM16 audio for each recorded speaker, 16 kHz. Import all tracks at time zero in an audio editor for the complete synchronized session.
+- **`player_<key>.wav`**: isolated mono PCM16 audio for each recorded person, 16 kHz (from 02.11; earlier builds: `peer_<id>.wav`, one per network connection). A player who reconnects continues in the same track; `session.json` lists every network id (`peer_ids`) the track covers. Import all tracks at time zero in an audio editor for the complete synchronized session.
 - **`timeline.jsonl`**: recording changes, level markers and consent/timing metadata.
 
 Overlapping voices stay on separate tracks; no speech separation or transcription model is used. Every track starts at frame zero and ends at the same frame. Late joins, disabled saving, results screens, nonconsent and missing packets become silence on the shared timeline. Activity indicators describe audio energy, not guaranteed speech recognition. Only consenting remote players are saved. Capture may include background sound transmitted through their in-game microphones.
 
-The gameplay and voice metadata share `capture_session_id` and `level_run_id`. Gameplay seconds stop on a solo pause; audio uses wall time, with level clock markers to align the two. During a level, voice continues in personal menus. Between levels it is silent. Files stay on each recording player's computer; the relay server does not record them.
+The gameplay and voice metadata share `capture_session_id` and `level_run_id`. Gameplay seconds stop on a solo pause; audio uses wall time, with level clock markers to align the two. During a level, voice continues in personal menus. Between levels it is silent. In co-op only the session leader's computer saves voice (02.11); the relay server does not record.
 
 WAV headers and manifests checkpoint during recording. Interrupted sessions recover on next launch. File errors turn saving off without stopping the game. For a finalized offline player and complete final metadata, leave the game normally or disconnect before opening the folder.
 

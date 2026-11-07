@@ -214,6 +214,7 @@ func _session_screen() -> bool:
 
 func _simulation_active() -> bool:
 	if _waiting_for_briefings or not entry_popup.is_empty(): return false
+	if network != null and network.connection_stalled(): return false
 	return screen == "game" or (network != null and network.active and _session_screen() and sim.running)
 
 func _map_rect() -> Rect2:
@@ -908,10 +909,14 @@ func _leave_to_title() -> void:
 	# Answers relayed to the session leader must leave before the connection closes.
 	var sent: int = relay.flush_now() if relay != null else 0
 	_leaving_after_tlx = true
-	if sent > 0 or (relay != null and relay.pending_bytes() > 0):
-		await get_tree().create_timer(0.6).timeout
-		if relay != null: relay.flush_now()
-		await get_tree().create_timer(0.3).timeout
+	var drain_deadline := Time.get_ticks_msec() + 10000
+	while relay != null and relay.pending_bytes() > 0 and network.relay_ready() and Time.get_ticks_msec() < drain_deadline:
+		_toast("Finishing study-data transfer before leaving...")
+		await get_tree().create_timer(0.1).timeout
+		sent += relay.flush_now()
+	if sent > 0: await get_tree().create_timer(0.3).timeout
+	if relay != null and relay.pending_bytes() > 0:
+		_toast("Some study data has not been sent. Keep the game open and reconnect to the same room.")
 	_leave_network()
 	_leaving_after_tlx = false
 
@@ -1667,6 +1672,9 @@ func _draw_all(canvas: CanvasItem) -> void:
 		_text(toast_text, Vector2((1440-width)/2 + 28, 130), 16, CREAM)
 	for p in particles:
 		cv.draw_rect(Rect2(p.pos, Vector2(5,5)), Color(p.color, clampf(p.life, 0, 1)))
+	if screen == "game" and network.connection_stalled():
+		_panel(Rect2(390, 154, 660, 40), INK, CORAL)
+		_text("Connection unstable — waiting for server updates", Vector2(410, 181), 19, CREAM)
 	if show_perf:
 		var line: String = "%d FPS" % Engine.get_frames_per_second()
 		if network.active and not network.hosting:
@@ -3248,6 +3256,9 @@ func _cycle_incident() -> void:
 	_select_incident(int(calls[idx].id))
 
 func _command(action: String, payload: Dictionary) -> void:
+	if network.connection_stalled():
+		_toast("Waiting for the server. Please try again when updates resume.")
+		return
 	_route_cache_until = 0
 	if screen != "game": return
 	research.log_event("command_requested", {"action": action, "payload": payload, "actor_peer": multiplayer.get_unique_id()})

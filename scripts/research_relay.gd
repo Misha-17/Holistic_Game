@@ -14,7 +14,12 @@ class_name ResearchRelay
 # waits in memory (up to MAX_QUEUED_BYTES) and is sent when they are back.
 
 const MAX_QUEUED_BYTES := 64 * 1024 * 1024
-const MAX_CHUNK_BYTES := 256 * 1024
+const MAX_CHUNK_BYTES := 16 * 1024
+const UPLOAD_BYTES_PER_SECOND := 64 * 1024
+# Replacements remain atomic; allow credit to accumulate for a large survey/file.
+const MAX_UPLOAD_CREDIT := NetworkSession.RESEARCH_RAW_MAX
+var _upload_credit := 0.0
+var _budget_ms := -1
 const ROOT := "user://research/"
 
 var network: NetworkSession
@@ -83,6 +88,10 @@ func send_file(rel: String, text: String) -> void:
 
 func enqueue(rel: String, data: PackedByteArray, mode: String) -> void:
 	if data.is_empty(): return
+	if mode == "append" and data.size() > MAX_CHUNK_BYTES:
+		for offset in range(0, data.size(), MAX_CHUNK_BYTES):
+			enqueue(rel, data.slice(offset, mini(offset + MAX_CHUNK_BYTES, data.size())), mode)
+		return
 	_mutex.lock()
 	if _queued_bytes + data.size() > MAX_QUEUED_BYTES:
 		dropped_bytes += data.size()
@@ -116,11 +125,24 @@ func _process(_delta: float) -> void:
 
 ## Send what is queued, if the leader can be reached. Returns bytes sent.
 func flush_now() -> int:
-	if network == null or not network.relay_ready(): return 0
+	var now := Time.get_ticks_msec()
+	var elapsed := maxf(0.0, (now - _budget_ms) / 1000.0) if _budget_ms >= 0 else 0.0
+	_budget_ms = now
+	if network == null or not network.relay_ready() or network.connection_stalled():
+		_upload_credit = 0.0
+		return 0
+	_upload_credit = minf(MAX_UPLOAD_CREDIT, _upload_credit + elapsed * UPLOAD_BYTES_PER_SECOND)
 	var sent := 0
 	while true:
 		_mutex.lock()
-		var item: Dictionary = _outbox.pop_front() if not _outbox.is_empty() else {}
+		if _outbox.is_empty():
+			_upload_credit = minf(_upload_credit, MAX_CHUNK_BYTES)
+			_mutex.unlock()
+			break
+		if (_outbox[0].data as PackedByteArray).size() > _upload_credit:
+			_mutex.unlock()
+			break
+		var item: Dictionary = _outbox.pop_front()
 		if not item.is_empty(): _queued_bytes -= (item.data as PackedByteArray).size()
 		_mutex.unlock()
 		if item.is_empty(): break
@@ -132,6 +154,7 @@ func flush_now() -> int:
 			_mutex.unlock()
 			break
 		sent += (item.data as PackedByteArray).size()
-		if sent >= 2 * MAX_CHUNK_BYTES: break # spread a backlog over several frames
+		_upload_credit -= (item.data as PackedByteArray).size()
+		break # At most one research message per frame.
 	sent_bytes += sent
 	return sent

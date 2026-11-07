@@ -19,8 +19,8 @@ const PROTOCOL_VERSION := 14 # 2.11: stable player keys, reserved departments, s
 const MAX_PLAYER_NAME_LENGTH := 20
 const UNRELIABLE_SNAPSHOT_LIMIT := 1100 # Leave room for RPC/ENet headers below the path MTU.
 # ENet channels: 0 control, 1 voice audio, 2 voice state, 3 large state/events,
-# 4 study data relayed to the session leader (its own channel, so it never
-# delays gameplay messages).
+# 4 study data relayed to the session leader. Channels separate ordering,
+# but still share bandwidth; ResearchRelay budgets outgoing file traffic.
 const CHANNELS := 5
 const RESEARCH_CHANNEL := 4
 const RESEARCH_PACKET_MAX := 1024 * 1024 # compressed bytes per relayed chunk
@@ -81,6 +81,21 @@ var _upnp_thread: Thread
 var _connect_started_ms := -1
 var _join_address := ""
 const CONNECT_TIMEOUT_MS := 9000
+const SNAPSHOT_STALL_MS := 1500
+var _last_state_ms := -1
+var _state_stalled := false
+var _max_state_gap_ms := 0
+var _state_count := 0
+var _last_state_bytes := 0
+
+func connection_stalled() -> bool:
+	return active and not hosting and _connect_started_ms < 0 and _last_state_ms >= 0 and Time.get_ticks_msec() - _last_state_ms > SNAPSHOT_STALL_MS
+
+func connection_diagnostics() -> Dictionary:
+	return {"status": status, "snapshot_age_ms": maxi(0, Time.get_ticks_msec() - _last_state_ms) if _last_state_ms >= 0 else -1,
+		"snapshot_stalled": _state_stalled, "max_snapshot_gap_ms": _max_state_gap_ms,
+		"snapshots_received": _state_count, "last_snapshot_compressed_bytes": _last_state_bytes}
+
 const VOICE_PACKET_BYTES := 640 # 20 ms, 16 kHz mono PCM16.
 var voice_participants: Dictionary = {}
 var _local_voice_state := {"mic": false, "consent": false, "recording": false}
@@ -164,6 +179,11 @@ func join(address: String) -> Error:
 	return OK
 
 func _process(_delta: float) -> void:
+	if active and not hosting and _connect_started_ms < 0 and _last_state_ms >= 0:
+		var age := Time.get_ticks_msec() - _last_state_ms
+		if age > SNAPSHOT_STALL_MS and not _state_stalled:
+			_state_stalled = true
+			print("NETWORK: server updates delayed ", JSON.stringify(connection_diagnostics()))
 	# ENet waits ~30 s before giving up; tell the player much sooner.
 	if active and not hosting and _connect_started_ms >= 0 and Time.get_ticks_msec() - _connect_started_ms > CONNECT_TIMEOUT_MS:
 		var address := _join_address
@@ -181,6 +201,11 @@ func round_trip_ms() -> int:
 	return int(host_peer.get_statistic(ENetPacketPeer.PEER_ROUND_TRIP_TIME))
 
 func close() -> void:
+	_last_state_ms = -1
+	_state_stalled = false
+	_max_state_gap_ms = 0
+	_state_count = 0
+	_last_state_bytes = 0
 	_connect_started_ms = -1
 	_close_upnp()
 	if multiplayer.has_multiplayer_peer():
@@ -489,9 +514,7 @@ func _peer_disconnected(id: int) -> void:
 	_voice_state_windows.erase(id)
 	voice_participants_changed.emit()
 	if hosting: _broadcast_voice_states.call_deferred()
-	if hosting:
-		if dedicated: _broadcast_roster.call_deferred()
-		else: _broadcast_roster()
+	if hosting: _broadcast_roster.call_deferred()
 	roster_changed.emit()
 	if hosting:
 		var text := ("%s disconnected. Their departments wait for them; nobody else's change." % label) if kept else ("%s left. Departments reshuffled. %s" % [label, assignment_summary()])
@@ -499,8 +522,8 @@ func _peer_disconnected(id: int) -> void:
 
 func _broadcast_roster() -> void:
 	# Wait until ENet finishes removing disconnected peers before sending.
-	if active and hosting and multiplayer.get_peers().size() > 0:
-		_roster.rpc(roster, dedicated, player_names, role_assignments, _roster_extra())
+	for recipient in _connected_recipients():
+		_roster.rpc_id(recipient, roster, dedicated, player_names, role_assignments, _roster_extra())
 
 func _roster_extra() -> Dictionary:
 	var names_waiting: Array[String] = []
@@ -514,6 +537,7 @@ func _connected() -> void:
 	_hello.rpc_id(1, PROTOCOL_VERSION, clean_player_name(local_player_name), _clean_key(local_player_key, 0))
 
 func _failed() -> void:
+	print("NETWORK: connection ended ", JSON.stringify(connection_diagnostics()))
 	close()
 	status = "Connection ended. Check the host address and firewall."
 	disconnected.emit()
@@ -651,6 +675,15 @@ func _accept_snapshot(sequence: int, packed: PackedByteArray, size: int) -> void
 	if sequence < 0 or sequence <= _received_snapshot_sequence: return
 	var data := _unpack(packed, size)
 	if data.is_empty(): return
+	var now := Time.get_ticks_msec()
+	var gap := now - _last_state_ms if _last_state_ms >= 0 else 0
+	_max_state_gap_ms = maxi(_max_state_gap_ms, gap)
+	_last_state_ms = now
+	_state_count += 1
+	_last_state_bytes = packed.size()
+	if _state_stalled:
+		print("NETWORK: server updates resumed after ", gap, " ms")
+	_state_stalled = false
 	_received_snapshot_sequence = sequence
 	snapshot_received.emit(data)
 
@@ -953,8 +986,7 @@ func send_research(rel_path: String, raw: PackedByteArray, mode: String) -> bool
 	if not relay_ready() or not valid_relay_path(rel_path) or mode not in RELAY_MODES or raw.size() > RESEARCH_RAW_MAX: return false
 	var packed := raw.compress(FileAccess.COMPRESSION_ZSTD)
 	if packed.size() > RESEARCH_PACKET_MAX: return false
-	_research_relay.rpc_id(1, rel_path, packed, raw.size(), mode)
-	return true
+	return _research_relay.rpc_id(1, rel_path, packed, raw.size(), mode) == OK
 
 @rpc("any_peer", "call_remote", "reliable", RESEARCH_CHANNEL)
 func _research_relay(rel_path: String, packed: PackedByteArray, size: int, mode: String) -> void:

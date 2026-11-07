@@ -986,7 +986,7 @@ func send_research(rel_path: String, raw: PackedByteArray, mode: String) -> bool
 	if not relay_ready() or not valid_relay_path(rel_path) or mode not in RELAY_MODES or raw.size() > RESEARCH_RAW_MAX: return false
 	var packed := raw.compress(FileAccess.COMPRESSION_ZSTD)
 	if packed.size() > RESEARCH_PACKET_MAX: return false
-	return _research_relay.rpc_id(1, rel_path, packed, raw.size(), mode) == OK
+	return rpc_id(1, "_research_relay", rel_path, packed, raw.size(), mode) == OK
 
 @rpc("any_peer", "call_remote", "reliable", RESEARCH_CHANNEL)
 func _research_relay(rel_path: String, packed: PackedByteArray, size: int, mode: String) -> void:

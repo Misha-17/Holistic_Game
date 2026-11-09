@@ -64,8 +64,7 @@ func run() -> void:
 	game._receive_snapshot(snapshot("level6_retry", 5, 0.0))
 	check(game.capture_run_id == "level6_retry", "A new run ID starts a new level capture")
 	game._stop_capture()
-	check(FileAccess.file_exists(session_path), "The session leader keeps its log on this computer")
-	check(game.relay.pending_bytes() == 0, "The leader sends nothing anywhere")
+	check(FileAccess.file_exists(session_path), "The guest keeps its log on its own computer")
 
 	var rows := records(session_path)
 	var level_starts := 0

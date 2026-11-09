@@ -31,9 +31,6 @@ var town: TownView
 var map_clip: Control
 var audio: AudioDirector
 var research: ResearchLogger
-## 2.11: only the session leader's computer stores study files. On the other
-## players' computers this relay carries their own data to the leader.
-var relay: ResearchRelay
 const PLAYER_KEY_PATH := "user://player_key.txt"
 var network: NetworkSession
 var voice: Node
@@ -100,11 +97,12 @@ var _consent_logged_session := ""
 ## in Settings > Research deletes this player's recordings of the session.
 var withdraw_prompt := false
 var _withdrawn_session := ""
+## 9.11: a player who drops out of a co-op room and rejoins it continues the
+## same session folder (within RESUME_SECONDS) instead of starting a new one.
+const RESUME_SECONDS := 15 * 60
+var _resume_session := {}
+var _capture_room := "" # the joined room's address while a co-op session is recorded
 var _session_had_collection := false
-## How this computer took part in the last session, and its player key then:
-## a withdrawal from the main menu happens after leaving the room (4.11).
-var _session_role := "solo"
-var _session_key := ""
 var _leaving_after_tlx := false
 var _tlx_submitted_session := ""
 var last_capture_session_id := ""
@@ -460,23 +458,25 @@ func _sync_capture() -> void:
 		capture_shift = sim.shift_index
 		capture_run_id = shared_level_run_id if not shared_level_run_id.is_empty() else _new_capture_id("level%d" % BeaconCampaign.level_number(sim.shift_index))
 	if capture_session_id.is_empty():
-		capture_session_id = _new_capture_id("session")
+		# 9.11: a readable folder per session, "2026-11-07_19-30_Andrei".
+		var file_label := StudyFiles.label(_my_player_name())
+		capture_session_id = _resumable_session(file_label)
+		if capture_session_id.is_empty(): capture_session_id = StudyFiles.new_session_name(file_label)
+		_resume_session = {}
+		_capture_room = network._join_address if network.active and not network.hosting else ""
+		research.file_label = file_label
+		voice.file_label = file_label
 		_session_had_collection = false
-		_session_role = "solo" if not network.active else ("leader" if network.is_leader() else "guest")
-		_session_key = network.player_key(multiplayer.get_unique_id()) if network.active else network.local_player_key
-		if _sends_to_leader(): last_capture_session_id = capture_session_id
-		else: _remember_session(capture_session_id)
+		_remember_session(capture_session_id)
 	var context := _capture_context()
 	voice.set_research_context(context)
 	voice.set_capture_active(entry_popup.is_empty() and not _waiting_for_briefings)
 	voice.set_session_time(sim.elapsed)
 	voice.start(capture_session_id)
 	if research_enabled and not research.enabled:
-		# Decided when the log opens: leader (or solo) writes files here; anyone
-		# else sends their own rows to the leader and writes nothing locally.
-		research.relay = relay if _sends_to_leader() else null
 		research.set_clock(sim.elapsed, sim.shift_index)
-		research.begin_session(capture_session_id, {"peer_id": multiplayer.get_unique_id(), "departments": network.departments_for(), "build": "0.9.3", "map_pixels": TownView.MAP_SIZE})
+		research.begin_session(capture_session_id, {"peer_id": multiplayer.get_unique_id(), "departments": network.departments_for(), "build": "0.9.4", "map_pixels": TownView.MAP_SIZE,
+				"player_key": _my_player_key(), "co_op": network.active})
 		research.begin_level(sim.shift_index, context, capture_run_id)
 		research.observe_state(sim.net_snapshot())
 		if sim.has_method("chaos_context"): research.log_event("chaos_state_at_capture_start", sim.chaos_context())
@@ -641,8 +641,8 @@ func _draw_pc_check() -> void:
 		_text("Checking this computer…", panel.position + Vector2(24, 44), 24, CREAM)
 		_wrap("Keep the game in front. If Voice chat is on, say a sentence at normal speaking volume now.", panel.position + Vector2(24, 84), panel.size.x - 48, 16, MUTED, 24)
 		var bar := Rect2(panel.position + Vector2(24, 150), Vector2(panel.size.x - 48, 10))
-		draw_rect(bar, PANEL_LIGHT)
-		draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(seconds / PC_CHECK_SECONDS, 0, 1), bar.size.y)), TEAL)
+		cv.draw_rect(bar, PANEL_LIGHT)
+		cv.draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(seconds / PC_CHECK_SECONDS, 0, 1), bar.size.y)), TEAL)
 	elif pc_check.is_empty():
 		_text("Not run yet.", panel.position + Vector2(24, 44), 22, MUTED)
 	else:
@@ -691,7 +691,6 @@ func _answer_study_consent(agreed: bool) -> void:
 	study_consent_agreed = agreed
 	collection_choice_made = true
 	research_enabled = agreed
-	research.exclude_own_input = false
 	if not agreed: research.set_enabled(false)
 	voice.set_recording_consent(agreed)
 	voice.set_recording_enabled(agreed)
@@ -725,115 +724,38 @@ func _can_withdraw() -> bool:
 	var session := _tlx_session()
 	return not dedicated_server and not session.is_empty() and session != _withdrawn_session and _session_had_collection
 
-## A short code for the researcher, from this player's key (offline teammates).
-func _participant_code() -> String:
-	var key := (_session_key if not _session_key.is_empty() else network.local_player_key).to_upper()
-	return "%s-%s" % [key.substr(0, 4), key.substr(4, 4)] if key.length() >= 8 else key
-
 func _draw_withdraw_prompt() -> void:
 	buttons.clear()
 	_overlay()
 	var panel := Rect2(380, 250, 680, 400)
 	_panel(panel, INK, CORAL)
-	if _session_role == "guest" and not _sends_to_leader():
-		_text("STUDY WITHDRAWAL", panel.position + Vector2(40, 52), 13, CORAL)
-		_text(StudyInfo.WITHDRAW_TITLE, panel.position + Vector2(40, 100), 30, CREAM)
-		var line := _wrap(StudyInfo.WITHDRAW_OFFLINE, panel.position + Vector2(40, 140), panel.size.x - 80, 17, CREAM, 25) + 44
-		_text("Participant code:  " + _participant_code(), Vector2(panel.position.x + 40, line), 22, GOLD)
-		_button("withdraw_cancel", "CLOSE", Rect2(panel.position + Vector2(355, 322), Vector2(285, 50)), PANEL_LIGHT, CREAM, 15)
-		return
 	_text("STUDY WITHDRAWAL", panel.position + Vector2(40, 52), 13, CORAL)
 	_text(StudyInfo.WITHDRAW_TITLE, panel.position + Vector2(40, 100), 30, CREAM)
 	var y := _wrap(StudyInfo.WITHDRAW_TEXT, panel.position + Vector2(40, 140), panel.size.x - 80, 17, CREAM, 25) + 40
-	_wrap(StudyInfo.WITHDRAW_COOP if network.active else StudyInfo.WITHDRAW_LATER, Vector2(panel.position.x + 40, y), panel.size.x - 80, 15, MUTED, 22)
+	_wrap(StudyInfo.WITHDRAW_LATER, Vector2(panel.position.x + 40, y), panel.size.x - 80, 15, MUTED, 22)
 	_button("withdraw_cancel", "CANCEL", Rect2(panel.position + Vector2(40, 322), Vector2(285, 50)), PANEL_LIGHT, CREAM, 15)
 	_button("withdraw_confirm", "WITHDRAW AND DELETE", Rect2(panel.position + Vector2(355, 322), Vector2(285, 50)), CORAL, INK, 15)
 
-## Delete what was recorded about this player in the last session and stop
-## recording them. Solo: the whole session. Session leader: their own input
-## rows, 60 Hz samples, survey answers and voice track (shared game events stay
-## for the teammates). Other players: a request to the leader, who deletes
-## their folder and voice track.
+## Delete this player's study files of the last session from this computer
+## (events, 60 Hz samples, survey answers, voice) and stop recording them.
+## 9.11: every player stores only their own data, so this is the same in solo
+## and co-op. Files already sent to the researcher are deleted by them.
 func _withdraw_my_data() -> void:
 	withdraw_prompt = false
 	var session := _tlx_session()
 	if session.is_empty(): return
-	var key := _session_key if not _session_key.is_empty() else network.local_player_key
-	var role := _session_role
-	if role == "guest" and not _sends_to_leader():
-		# Left the room already: the data is on the leader's computer and cannot
-		# be reached from here. The dialog shows a code for the researcher.
-		withdraw_prompt = true
-		return
 	_withdrawn_session = session
 	research_enabled = false
 	study_consent_agreed = false
+	research.set_enabled(false)
 	voice.set_recording_consent(false)
+	voice.set_recording_enabled(false)
 	var deleted: Array = []
-	if role == "guest":
-		research.set_enabled(false)
-		voice.set_recording_enabled(false)
-		relay.clear() # do not send anything else about this player
-		relay.enqueue("withdrawal.json", JSON.stringify({"session_id": session, "text_version": StudyInfo.TEXT_VERSION,
-			"utc": Time.get_datetime_string_from_system(true)}).to_utf8_buffer(), "withdraw")
-		_toast("Withdrawal sent to the session leader's computer. Your data there will be deleted.")
-	elif role == "leader":
-		# Keep recording the team while still in the room (teammates' files need
-		# the shared game events), but nothing more about this player.
-		if network.active:
-			research_enabled = true
-			research.withdraw_own_input()
-		else:
-			research.set_enabled(false)
-			voice.set_recording_enabled(false)
-		deleted.append_array(_remove_own_rows(session))
-		deleted.append_array(voice.withdraw_speaker("player_" + key, session))
-		_toast("Your data from this session was deleted. Teammates' data is kept.")
-	else:
-		research.set_enabled(false)
-		voice.set_recording_enabled(false)
-		deleted.append_array(voice.delete_session_folders(session))
-		deleted.append_array(_delete_tree("user://research/%s" % session.validate_filename()))
-		_toast("Your data from this session was deleted.")
-	if role != "guest": _note_withdrawal(session, key, role, deleted)
+	deleted.append_array(voice.delete_session_folders(session))
+	deleted.append_array(_delete_tree("user://research/%s" % session.validate_filename()))
+	_note_withdrawal(session, _my_player_key(), deleted)
+	_toast("Your data from this session was deleted from this computer.")
 	_update_visibility()
-
-## Leader: the shared files keep game events but lose this player's own rows.
-func _remove_own_rows(session: String) -> Array:
-	var removed: Array = []
-	var folder := "user://research/%s" % session.validate_filename()
-	if not DirAccess.dir_exists_absolute(folder): return removed
-	var logs: Array[String] = [folder.path_join("session_events.jsonl")]
-	if DirAccess.dir_exists_absolute(folder.path_join("levels")):
-		for name in DirAccess.get_files_at(folder.path_join("levels")):
-			if name.ends_with("_events.jsonl"): logs.append(folder.path_join("levels").path_join(name))
-			elif name.ends_with("_samples_60hz.csv") and DirAccess.remove_absolute(ProjectSettings.globalize_path(folder.path_join("levels").path_join(name))) == OK:
-				removed.append("levels/" + name)
-	for path in logs:
-		var count := _filter_own_rows(path)
-		if count > 0: removed.append("%s (%d own rows)" % [path.trim_prefix(folder + "/"), count])
-	removed.append_array(_delete_tree(folder.path_join("questionnaires")))
-	return removed
-
-func _filter_own_rows(path: String) -> int:
-	if not FileAccess.file_exists(path): return 0
-	var source := FileAccess.open(path, FileAccess.READ)
-	var target := FileAccess.open(path + ".tmp", FileAccess.WRITE)
-	if source == null or target == null: return 0
-	var removed := 0
-	while not source.eof_reached():
-		var line := source.get_line()
-		if line.is_empty(): continue
-		var at := line.find("\"event\":\"")
-		var event := line.substr(at + 9, line.find("\"", at + 9) - at - 9) if at >= 0 else ""
-		if ResearchLogger.LOCAL_EVENTS.has(event) and event != "study_withdrawal":
-			removed += 1
-			continue
-		target.store_line(line)
-	source.close()
-	target.close()
-	DirAccess.rename_absolute(ProjectSettings.globalize_path(path + ".tmp"), ProjectSettings.globalize_path(path))
-	return removed
 
 func _delete_tree(folder: String) -> Array:
 	var removed: Array = []
@@ -844,16 +766,16 @@ func _delete_tree(folder: String) -> Array:
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(folder))
 	return removed
 
-## research/withdrawals.jsonl on the storing computer: that a withdrawal
+## research/withdrawals.jsonl on this computer: that a withdrawal
 ## happened and what was deleted, with no recorded data.
-func _note_withdrawal(session: String, key: String, role: String, deleted: Array) -> void:
+func _note_withdrawal(session: String, key: String, deleted: Array) -> void:
 	DirAccess.make_dir_recursive_absolute("user://research")
 	var path := "user://research/withdrawals.jsonl"
 	var file := FileAccess.open(path, FileAccess.READ_WRITE if FileAccess.file_exists(path) else FileAccess.WRITE)
 	if file == null: return
 	file.seek_end()
 	file.store_line(JSON.stringify({"utc": Time.get_datetime_string_from_system(true), "unix_ms": int(Time.get_unix_time_from_system() * 1000.0),
-		"session_id": session, "player_key": key, "role": role, "text_version": StudyInfo.TEXT_VERSION, "deleted": deleted}))
+		"session_id": session, "player_key": key, "text_version": StudyInfo.TEXT_VERSION, "deleted": deleted}))
 	file.close()
 
 # ---------------------------------------------------------------- NASA-TLX
@@ -902,18 +824,8 @@ func _leave_to_title() -> void:
 	_submit_rating()
 	screen = "title"
 	_update_visibility()
-	if not network.active:
-		_leaving_after_tlx = false
-		return
-	# Answers relayed to the session leader must leave before the connection closes.
-	var sent: int = relay.flush_now() if relay != null else 0
-	_leaving_after_tlx = true
-	if sent > 0 or (relay != null and relay.pending_bytes() > 0):
-		await get_tree().create_timer(0.6).timeout
-		if relay != null: relay.flush_now()
-		await get_tree().create_timer(0.3).timeout
-	_leave_network()
 	_leaving_after_tlx = false
+	if network.active: _leave_network()
 
 func _draw_leave_prompt() -> void:
 	buttons.clear()
@@ -930,7 +842,7 @@ func _draw_tlx() -> void:
 	_draw_page_header("", "STUDY QUESTIONNAIRE · NASA-TLX")
 	_text("How was this play session?", Vector2(80, 150), 34, CREAM)
 	_wrap("Think about all the levels you played in this session. Move each slider to the point that matches your experience. There are no right or wrong answers.", Vector2(80, 196), 1260, 17, CREAM, 25)
-	_text("Your answers are saved with this session's study files." if not _sends_to_leader() else "Your answers are sent to the session leader's computer with this session's study files.", Vector2(80, 262), 14, MUTED)
+	_text("Your answers are saved on this computer with this session's study files.", Vector2(80, 262), 14, MUTED)
 	var done: int = tlx_form.answered_count()
 	var ready: bool = tlx_form.all_answered()
 	var later_label := "SKIP, GO TO MAIN MENU" if _leaving_after_tlx else ("NOT NOW" if tlx_source == "after_last_level" else "<  BACK")
@@ -948,20 +860,16 @@ func _submit_tlx() -> void:
 	_tlx_submitted_session = session
 	var record := {"schema": "beacon-bay-nasa-tlx-v1", "instrument": "NASA-TLX raw (unweighted), 0-100 in steps of 5",
 		"capture_session_id": session if not session.is_empty() else null, "source": tlx_source,
+		"player_name": _my_player_name(), "player_key": _my_player_key(),
 		"peer_id": multiplayer.get_unique_id() if network.active else 1, "departments": network.departments_for(),
 		"co_op": network.active, "last_level_number": BeaconCampaign.level_number(sim.shift_index),
 		"last_level_won": sim.won if sim.finished else null, "answers": answers,
 		"seconds_to_complete": snappedf((Time.get_ticks_msec() - _tlx_started_ms) / 1000.0, 0.1),
 		"utc": Time.get_datetime_string_from_system(true), "unix_ms": int(Time.get_unix_time_from_system() * 1000.0)}
-	if _sends_to_leader():
-		# Stored on the session leader's computer with this player's other data.
-		relay.send_file("questionnaires/nasa_tlx_%d.json" % int(record.unix_ms), JSON.stringify(record, "\t"))
-		_toast("Thank you. Your answers are saved on the session leader's computer.")
-		_close_tlx()
-		return
-	var folder := "user://research/%s/questionnaires" % (session if not session.is_empty() else "no_session")
+	# 9.11: next to the session's other files, "<name>_nasa-tlx.json".
+	var folder := "user://research/%s" % (session.validate_filename() if not session.is_empty() else "no_session")
 	DirAccess.make_dir_recursive_absolute(folder)
-	var path := folder.path_join("nasa_tlx_%d.json" % int(record.unix_ms))
+	var path := folder.path_join(StudyFiles.free_name(folder, StudyFiles.label(_my_player_name()) + "_nasa-tlx", "json"))
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
 		_toast("Could not save the survey answers on this computer.")
@@ -972,68 +880,31 @@ func _submit_tlx() -> void:
 	_close_tlx()
 
 # ------------------------------------------------------------ study data storage
-# 2.11 (Andrei): "Only the host stores files", and no upload to the Azure server.
-# Solo and the session leader (LAN host, or the first player in an Azure room)
-# write all files. Other players' games send only their own data to the leader.
-func _sends_to_leader() -> bool:
-	return network != null and network.active and not network.is_leader()
-
+# Playtest 07.11 (Andrei): every player stores their own study files on their
+# own computer and sends the session folder to the researcher. (2.11-4.11 only
+# the session leader stored files; teammates' data was relayed to it and arrived
+# too slowly. The Azure upload was removed on 2.11.)
 func _study_footer() -> String:
-	if not network.active: return "Progress saved locally"
-	if network.is_leader(): return "Study files are saved on this computer (session leader)"
-	var waiting: int = relay.pending_bytes() if relay != null else 0
-	if waiting > 0: return "Study data waiting for the session leader: %.1f MB" % (float(waiting) / 1048576.0)
-	return "Your study data is saved on the session leader's computer"
+	return "Progress saved locally" if not network.active else "Your study files are saved on this computer"
 
-## Leader: another player's data arrived. It goes into this computer's current
-## session folder, players/<player key>/, keeping that player's file names.
-func _store_relayed(key: String, rel_path: String, data: PackedByteArray, mode: String) -> void:
-	if dedicated_server or not NetworkSession.valid_relay_path(rel_path): return
-	var session := capture_session_id if not capture_session_id.is_empty() else last_capture_session_id
-	if session.is_empty():
-		session = _new_capture_id("session")
-		last_capture_session_id = session
-	var folder := "user://research/%s/players/%s" % [session.validate_filename(), key.validate_filename()]
-	if mode == "withdraw":
-		var deleted := _delete_tree(folder)
-		deleted.append_array(voice.withdraw_speaker("player_" + key, session))
-		_note_withdrawal(session, key, "teammate", deleted)
-		_toast("A teammate withdrew from the study; their data from this session was deleted.")
-		return
-	var target := folder.path_join(rel_path)
-	DirAccess.make_dir_recursive_absolute(target.get_base_dir())
-	var file: FileAccess
-	if mode == "append" and FileAccess.file_exists(target):
-		file = FileAccess.open(target, FileAccess.READ_WRITE)
-		if file != null: file.seek_end()
-	else:
-		file = FileAccess.open(target, FileAccess.WRITE)
-	if file == null: return
-	file.store_buffer(data)
-	file.close()
-	_note_player_folder(folder, key)
+## The session folder to continue after rejoining the same room soon after
+## dropping out (same name, not withdrawn), or "".
+func _resumable_session(file_label: String) -> String:
+	if _resume_session.is_empty() or not network.active or network.hosting: return ""
+	var id := str(_resume_session.id)
+	if id == _withdrawn_session or str(_resume_session.label) != file_label or str(_resume_session.room) != network._join_address: return ""
+	if Time.get_unix_time_from_system() - float(_resume_session.at) > RESUME_SECONDS: return ""
+	return id if DirAccess.dir_exists_absolute("user://research/" + id) else ""
 
-## players/<key>/player.json: who this key is (name, seat, departments, every
-## network id they had in this session; ids change when someone reconnects).
-func _note_player_folder(folder: String, key: String) -> void:
-	var path := folder.path_join("player.json")
-	var info: Dictionary = {}
-	if FileAccess.file_exists(path):
-		var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
-		if parsed is Dictionary: info = parsed
-	var peer := -1
-	for peer_id in network.player_keys:
-		if str(network.player_keys[peer_id]) == key: peer = int(peer_id)
-	var ids: Array = info.get("peer_ids", [])
-	if not info.is_empty() and (peer <= 0 or ids.has(peer)): return # nothing new to note
-	if peer > 0: ids.append(peer)
-	info.merge({"player_key": key, "peer_ids": ids, "display_name": network.player_log_label(peer) if peer > 0 else str(info.get("display_name", "")),
-		"departments": network.departments_for(peer) if peer > 0 else info.get("departments", []),
-		"updated_utc": Time.get_datetime_string_from_system(true)}, true)
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if file == null: return
-	file.store_string(JSON.stringify(info, "\t"))
-	file.close()
+## The name in this player's file names: the lobby name, else "Player 2" (seat)
+## in co-op, else "Player".
+func _my_player_name() -> String:
+	if not network.local_player_name.is_empty(): return network.local_player_name
+	if network.active: return network.player_label(multiplayer.get_unique_id())
+	return "Player"
+
+func _my_player_key() -> String:
+	return network.player_key(multiplayer.get_unique_id()) if network.active and network.player_keys.has(multiplayer.get_unique_id()) else network.local_player_key
 
 ## A random id for this computer's player, kept between launches (2.11). The
 ## host recognises a reconnecting player by it.
@@ -1096,6 +967,10 @@ func _end_level_capture(reason: String = "completed") -> void:
 
 func _stop_capture() -> void:
 	_end_level_capture("disconnected_or_exit")
+	if not capture_session_id.is_empty() and not _capture_room.is_empty():
+		_resume_session = {"id": capture_session_id, "room": _capture_room,
+			"label": StudyFiles.label(_my_player_name()), "at": Time.get_unix_time_from_system()}
+	_capture_room = ""
 	# A new session (possibly a new participant) is asked again.
 	collection_choice_made = study_consent_answered # 4.11: the launch answer holds until the game closes
 	voice_choice_made = false
@@ -1206,8 +1081,8 @@ func _draw_entry_popup() -> void:
 	if entry_popup == "consent":
 		_text("OPTIONAL DATA COLLECTION", Vector2(382, 276), 14, TEAL)
 		_text("Save this play session?", Vector2(382, 320), 29, CREAM)
-		_wrap("Save your mouse movements, clicks and game events by level. Save in-game team voice as separate, labelled speaker tracks in one session.", Vector2(382, 365), 670, 18, CREAM, 27)
-		_wrap("Enabling also lets teammates record your voice. Only consenting speakers are saved. In co-op, only the session leader's computer saves the voice tracks.", Vector2(382, 450), 670, 16, MUTED, 24)
+		_wrap("Save your mouse movements, clicks and game events by level, and your own in-game voice, on this computer.", Vector2(382, 365), 670, 18, CREAM, 27)
+		_wrap("Every player keeps their own files and sends them to the researcher after playing. Teammates' voices are not saved on your computer.", Vector2(382, 450), 670, 16, MUTED, 24)
 		_wrap("The next step lets you choose voice chat. Change any choice in Settings > Research. Both choices let you play.", Vector2(382, 530), 670, 15, MUTED, 23)
 		_button("collection_no", "PLAY WITHOUT COLLECTION", Rect2(382, 600, 326, 44), PANEL_LIGHT, CREAM, 14)
 		_button("collection_yes", "ENABLE COLLECTION", Rect2(724, 600, 326, 44), TEAL, INK, 14)
@@ -1348,10 +1223,6 @@ func _ready() -> void:
 	add_child(research)
 	_initialize_network()
 	network.local_player_key = _load_player_key()
-	relay = ResearchRelay.new()
-	relay.network = network
-	add_child(relay)
-	network.research_relay_received.connect(_store_relayed)
 	voice = preload("res://scripts/team_voice.gd").new()
 	add_child(voice)
 	voice.configure(network, false)
@@ -1462,7 +1333,7 @@ func _start_dedicated_server() -> void:
 		return
 	screen = "lobby"
 	print("Beacon Bay dedicated server: UDP ", network.port, "; waiting for a player to start (1-4 players).")
-	print("Study files are saved on the session leader's computer, not on this server.")
+	print("Study files are saved on each player's own computer, not on this server.")
 
 func _process(delta: float) -> void:
 	elapsed_ui += delta
@@ -1479,7 +1350,6 @@ func _process(delta: float) -> void:
 	toast_left = maxf(0, toast_left - delta)
 	_tick_pc_check(delta)
 	if network.active and network.hosting: network.set_roles_locked(screen != "lobby")
-	if voice != null: voice.set_storage_allowed(not network.active or network.is_leader())
 	action_feedback_left = maxf(0, action_feedback_left - delta)
 	focused_unit_left = maxf(0, focused_unit_left - delta)
 	if focused_unit_left<=0: focused_unit=-1
@@ -2418,14 +2288,13 @@ func _draw_settings() -> void:
 			_settings_heading("MY GAMEPLAY", 0, y)
 			_settings_card("research", "Record gameplay & mouse", "Movements, clicks and event outcomes by level", research_enabled, 0, y)
 			var voice_y: float = y + SETTINGS_STEP + 30
-			_settings_heading("TEAM VOICE", 0, voice_y)
-			_settings_card("voice_consent", "Allow team recording", "Let teammates include my voice in their files", voice.recording_consent, 0, voice_y)
-			_settings_card("voice_record", "Save team voice", "One session with a separate track per speaker", voice.recording_enabled, 0, voice_y + SETTINGS_STEP)
+			_settings_heading("MY VOICE", 0, voice_y)
+			_settings_card("voice_record", "Save my voice", "Your own microphone, saved with your study files", voice.recording_enabled, 0, voice_y)
 			_settings_heading("LOCAL RECORDINGS", 1, y)
 			# The note runs down to the bottom of the STUDY PC button in column 0.
 			var note_h: float = voice_y + 2 * SETTINGS_STEP + 30 + 56 - y - 58
-			_settings_note([["Levels share one session. Mouse and event logs are grouped by level; speaker tracks share the same timeline.", 16, CREAM], ["Solo: files are saved here. Co-op: only the session leader's computer saves files (the LAN host, or the first player in an online room); other players' mouse data and answers are sent to it. Only in-game voice is saved, when Voice chat (Sounds) is on.", 15, MUTED], ["Collection is chosen on the study consent screen when the game starts.", 15, MUTED], [str(voice.status), 15, TEAL], [_study_footer(), 15, TEAL]], 1, y, note_h)
-			_button("open_data","OPEN RECORDINGS",Rect2(SETTINGS_COL[1], y + note_h + 10, SETTINGS_CARD.x, 48),PANEL_LIGHT,TEAL,15)
+			_settings_note([["Levels share one session. Mouse and event logs are grouped by level; your voice track follows the same timeline.", 16, CREAM], ["Each player's files are saved on their own computer, one folder per session named by date, time and player name. Send that folder to the researcher. Only your own in-game voice is saved, when Voice chat (Sounds) is on.", 15, MUTED], ["Collection is chosen on the study consent screen when the game starts.", 15, MUTED], [str(voice.status), 15, TEAL], [_study_footer(), 15, TEAL]], 1, y, note_h)
+			_button("open_data","OPEN MY STUDY FILES",Rect2(SETTINGS_COL[1], y + note_h + 10, SETTINGS_CARD.x, 48),PANEL_LIGHT,TEAL,15)
 			var study_y: float = y + note_h + 70
 			var study_w: float = (SETTINGS_CARD.x - 12.0) / 2.0
 			_button("study_view","STUDY INFORMATION",Rect2(SETTINGS_COL[1], study_y, study_w, 48),PANEL_LIGHT,CREAM,15)
@@ -2981,7 +2850,9 @@ func _action(id: String) -> void:
 			_submit_rating()
 			# In co-op the host picks the next level in the lobby; solo goes to the shift list.
 			screen = "lobby" if network.active and network.hosting else "campaign"
-		"open_data": OS.shell_open(ProjectSettings.globalize_path("user://"))
+		"open_data":
+			DirAccess.make_dir_recursive_absolute("user://research")
+			OS.shell_open(ProjectSettings.globalize_path("user://research"))
 		"locked": _toast("Finish the previous shift to unlock this part of the story.")
 
 func _begin_tutorial(auto_start: bool = false) -> void:
@@ -3670,7 +3541,6 @@ func _toggle(id: String) -> void:
 		"research":
 			research_enabled = not research_enabled
 			if research_enabled:
-				research.exclude_own_input = false
 				study_consent_agreed = true
 			if not research_enabled: research.set_enabled(false)
 			_sync_capture()

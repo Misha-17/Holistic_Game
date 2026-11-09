@@ -31,11 +31,11 @@ func surveys() -> Array[String]:
 	var root := DirAccess.open("user://research")
 	if root == null: return found
 	for session: String in root.get_directories():
-		var folder := "user://research/%s/questionnaires" % session
+		var folder := "user://research/%s" % session
 		var dir := DirAccess.open(folder)
 		if dir == null: continue
 		for name: String in dir.get_files():
-			if name.begins_with("nasa_tlx_"): found.append(folder.path_join(name))
+			if name.contains("_nasa-tlx"): found.append(folder.path_join(name))
 	return found
 
 func new_surveys(before: Array[String]) -> Array[String]:

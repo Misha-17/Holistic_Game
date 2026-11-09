@@ -84,6 +84,7 @@ var _next_spawn: float = 2.8
 var _next_id: int = 1
 var _disruption_index: int = 0
 var _reported_final_minute: bool = false
+var _reported_all_clear: bool = false
 var _reported_target: bool = false
 var _previous_spawn_location: int = -1
 var _surge_index: int = 0
@@ -151,6 +152,7 @@ func start_shift(index: int) -> void:
 	_next_id = 1
 	_disruption_index = 0
 	_reported_final_minute = false
+	_reported_all_clear = false
 	_reported_target = false
 	_previous_spawn_location = -1
 	_surge_index = 0
@@ -219,12 +221,14 @@ func _tick_step(delta: float) -> void:
 		_emit("final_minute", "One minute until relief • finish strong")
 	if reputation <= 0.0 or elapsed >= duration:
 		_finish_shift()
-	elif _all_work_done():
-		# Every scheduled call and road event has happened and nothing is left
-		# open: end now instead of waiting out the clock.
-		_emit("all_clear", "Every call handled • shift complete")
-		_emit_research("shift_ended_early", {"shift": shift_index, "at": elapsed, "seconds_saved": duration - elapsed})
-		_finish_shift()
+	elif not _reported_all_clear and _all_work_done():
+		# Playtest 07.11: levels used to end here, before the clock ran out, and
+		# players read that as the level cutting off a call they were finishing.
+		# Every level now runs its full time (the same length for every team);
+		# this only tells the team that nothing is left to do.
+		_reported_all_clear = true
+		_emit("all_clear", "Every call handled • stay ready until the shift ends")
+		_emit_research("all_calls_handled", {"shift": shift_index, "at": elapsed, "seconds_left": duration - elapsed})
 
 func _tick_chaos_schedule() -> void:
 	var schedule: Array = _shift.get("chaos_phases", [])
@@ -585,7 +589,7 @@ func road_conditions() -> Array[Dictionary]:
 
 func _all_work_done() -> bool:
 	if is_practice(): return false # Always allow the full, gentle 2.5-minute practice.
-	# Only shifts that run on the arrival schedule can end early (not the tutorial
+	# Only shifts that run on the arrival schedule report "all clear" (not the tutorial
 	# or tests that clear the schedule).
 	var schedule: Array = _shift.get("arrival_schedule", [])
 	if schedule.is_empty() or elapsed < 60.0: return false
@@ -893,7 +897,7 @@ func _raw_state() -> Dictionary:
 		"_surge_index": _surge_index, "_surge_warned_index": _surge_warned_index,
 		"_surge_pending": _surge_pending, "_surge_spawn_timer": _surge_spawn_timer, "_surge_breather_length": _surge_breather_length,
 		"_next_spawn": _next_spawn, "_next_id": _next_id,
-		"_disruption_index": _disruption_index, "_reported_final_minute": _reported_final_minute,
+		"_disruption_index": _disruption_index, "_reported_final_minute": _reported_final_minute, "_reported_all_clear": _reported_all_clear,
 		"_reported_target": _reported_target, "_previous_spawn_location": _previous_spawn_location,
 		
 		"_rng_seed": str(_rng.seed), "_rng_state": str(_rng.state), "_shift": _shift.duplicate(true)
@@ -916,7 +920,7 @@ func apply_snapshot(data: Dictionary) -> void:
 			set(key, restored[key])
 		elif key in ["scout_cooldown", "dispatch_cooldown", "department_cooldowns", "wrong_dispatches", "last_action_effect", "minimum_confidence"]:
 			set(key, restored[key])
-		elif key in ["shift_index", "elapsed", "duration", "running", "finished", "won", "score", "reputation", "rescued", "combo", "best_combo", "credits", "upgrades", "weather", "notice", "supplies", "max_supplies", "supply_regen", "special_cooldown", "special_duration", "disruption", "disruption_remaining", "resolved_count", "failed_count", "total_spawned", "stars", "target", "shift_reward", "successful_dispatches", "scout_count", "supply_count", "rush_remaining", "_next_spawn", "_next_id", "_disruption_index", "_reported_final_minute", "_reported_target", "_previous_spawn_location"]:
+		elif key in ["shift_index", "elapsed", "duration", "running", "finished", "won", "score", "reputation", "rescued", "combo", "best_combo", "credits", "upgrades", "weather", "notice", "supplies", "max_supplies", "supply_regen", "special_cooldown", "special_duration", "disruption", "disruption_remaining", "resolved_count", "failed_count", "total_spawned", "stars", "target", "shift_reward", "successful_dispatches", "scout_count", "supply_count", "rush_remaining", "_next_spawn", "_next_id", "_disruption_index", "_reported_final_minute", "_reported_all_clear", "_reported_target", "_previous_spawn_location"]:
 			set(key, restored[key])
 	_shift = restored.get("_shift", Campaign.shift_data(shift_index)).duplicate(true)
 	_set_layout()

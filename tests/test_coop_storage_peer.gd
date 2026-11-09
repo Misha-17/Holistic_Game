@@ -1,11 +1,13 @@
 extends SceneTree
 
-# Helper for run_leader_storage_tests.py: one real game process per role.
-#   --server  dedicated server
-#   --leader  first player in the room: the only computer that stores files
-#   --guest   second player: drops out and rejoins mid-level, writes nothing locally
-# Playtest 2.11: departments must not move when someone reconnects, and the
-# guest's own input must end up on the leader's computer.
+# Helper for run_coop_storage_tests.py: one real game process per role.
+#   --server  dedicated server (stores nothing)
+#   --leader  first player in the room ("Ana")
+#   --guest   second player ("Mia Lee"): drops out and rejoins mid-level
+# Playtest 2.11: departments must not move when someone reconnects.
+# Playtest 07.11: every player stores their own files on their own computer, in
+# a date_time_name folder with descriptive file names; the survey on the way out
+# is saved there too.
 var qa := ""
 var role := ""
 var game: Node
@@ -66,11 +68,26 @@ func run_server() -> void:
 	game.network.close()
 	await create_timer(.2).timeout
 
+## This computer's session folders under research/ (not voice/ or pc_checks/).
+func session_folders() -> Array:
+	var result: Array = []
+	if DirAccess.dir_exists_absolute("user://research"):
+		for name in DirAccess.get_directories_at("user://research"):
+			if name not in ["voice", "pc_checks"]: result.append(name)
+	return result
+
+func level_files(folder: String, suffix: String) -> Array:
+	var result: Array = []
+	for name in DirAccess.get_files_at(folder):
+		if name.ends_with(suffix): result.append(name)
+	return result
+
 func run_leader() -> void:
 	game.audio.set_music_enabled(false)
 	game.audio.set_sfx_enabled(false)
 	game.screen = "lobby"
 	game.research_enabled = true
+	game.network.local_player_name = "Ana"
 	game.network.join("127.0.0.1:%d" % game.network.port)
 	if not await wait_for(func(): return game.network.roster.size() == 1, "leader joins"): return
 	mark("leader_joined")
@@ -80,36 +97,19 @@ func run_leader() -> void:
 	if not await wait_for(func(): return game.screen == "game" and game.capture_run_id != "", "level starts"): return
 	var mine: Array = game.network.departments_for()
 	mark("level_started")
-	# The guest drops out and comes back; meanwhile the leader keeps playing.
 	if not await wait_for(func(): return marked("guest_back"), "guest reconnects", 20.0): return
 	check(game.network.departments_for() == mine, "the leader's departments never changed")
 	await move_mouse(10)
 	if not await wait_for(func(): return marked("guest_done"), "guest finished input"): return
-	await create_timer(.6).timeout # let the last relayed rows arrive
-	var session: String = game.capture_session_id
 	mark("finish")
 	if not await wait_for(func(): return game.screen == "results" and game.capture_run_id == "", "results"): return
 	await create_timer(.4).timeout
-	var guest_key := FileAccess.get_file_as_string(qa.path_join("guest_key.txt")).strip_edges()
-	var folder := "user://research/%s/players/%s" % [session, guest_key]
-	check(not guest_key.is_empty() and DirAccess.dir_exists_absolute(folder), "the guest's folder exists on the leader's computer: " + folder)
-	var levels := DirAccess.get_files_at(folder + "/levels")
-	var events := ""
-	var has_samples := false
-	for name in levels:
-		if name.ends_with("_events.jsonl"): events += FileAccess.get_file_as_string(folder + "/levels/" + name)
-		if name.ends_with("_samples_60hz.csv"): has_samples = true
-	check(events.count('"event":"mouse_motion"') >= 20, "the guest's mouse rows from before and after the reconnect are stored (%d)" % events.count('"event":"mouse_motion"'))
-	check(not '"event":"incident_spawned"' in events and not '"event":"dispatch"' in events, "the guest's files hold only their own input")
-	check(has_samples, "the guest's 60 Hz samples are stored")
-	check(FileAccess.file_exists(folder + "/player.json"), "player.json identifies the guest")
-	# 4.11: the guest leaves from the results screen and fills in the survey
-	# on the way out; the answers must arrive here before they disconnect.
-	if await wait_for(func(): return marked("guest_survey"), "guest left with a survey", 20.0):
-		var answers := DirAccess.get_files_at(folder + "/questionnaires") if DirAccess.dir_exists_absolute(folder + "/questionnaires") else PackedStringArray()
-		check(answers.size() == 1, "the guest's NASA-TLX from leaving arrived on the leader's computer (%d)" % answers.size())
-	var own := FileAccess.get_file_as_string(game.research.log_path)
-	check(own.contains('"event":"shift_started"') or own.contains('"event":"level_started"'), "the leader's own log has the shared game events")
+	var folders := session_folders()
+	check(folders.size() == 1 and str(folders[0]).ends_with("_Ana"), "the leader has one session folder named after Ana: %s" % [folders])
+	if folders.size() == 1:
+		var folder: String = "user://research/" + str(folders[0])
+		check(level_files(folder, "_events.jsonl").any(func(n): return str(n).begins_with("Ana_level-")), "Ana's level file: %s" % [level_files(folder, "")])
+		check(not DirAccess.dir_exists_absolute(folder + "/players"), "no teammates' data on the leader's computer")
 	mark("done")
 	await wait_for(func(): return not game.network.active, "server closes", 10.0)
 
@@ -118,13 +118,11 @@ func run_guest() -> void:
 	game.audio.set_sfx_enabled(false)
 	game.screen = "lobby"
 	game.research_enabled = true
+	game.network.local_player_name = "Mia Lee"
 	if not await wait_for(func(): return marked("leader_joined"), "leader first"): return
 	game.network.join("127.0.0.1:%d" % game.network.port)
 	if not await wait_for(func(): return game.network.roster.size() == 2, "guest joins"): return
 	var key: String = game.network.player_key(game.multiplayer.get_unique_id())
-	var file := FileAccess.open(qa.path_join("guest_key.txt"), FileAccess.WRITE)
-	file.store_string(key)
-	file.close()
 	check(not game.network.is_leader(), "the second player is not the leader")
 	if not await wait_for(func(): return game.screen == "game" and game.capture_run_id != "" and marked("level_started"), "level starts"): return
 	var mine: Array = game.network.departments_for()
@@ -151,21 +149,25 @@ func run_guest() -> void:
 			game.tlx_form.set_answer(id, 55)
 		game._action("tlx_submit")
 		check(game.screen == "title", "after the survey the guest is on the main menu")
-		await wait_for(func(): return not game.network.active, "guest leaves the room after sending", 5.0)
-		mark("guest_survey")
 	await wait_for(func(): return marked("done"), "leader checked files", 20.0)
-	var sessions := 0
-	if DirAccess.dir_exists_absolute("user://research"):
-		for name in DirAccess.get_directories_at("user://research"):
-			if name.begins_with("session_"): sessions += 1
-	check(sessions == 0, "the guest wrote no research session folder on its own computer")
-	check(game.relay.sent_bytes > 0, "the guest sent its data to the leader")
+	var folders := session_folders()
+	check(folders.size() == 1 and str(folders[0]).ends_with("_Mia-Lee"), "the guest has its own session folder named after Mia: %s" % [folders])
+	if folders.size() == 1:
+		var folder: String = "user://research/" + str(folders[0])
+		var names: Array = Array(DirAccess.get_files_at(folder))
+		check(names.has("Mia-Lee_level-0_events.jsonl") and names.has("Mia-Lee_level-0_mouse-and-taskload-60hz.csv"), "level events and 60 Hz samples, named after Mia: %s" % [names])
+		var events := FileAccess.get_file_as_string(folder + "/Mia-Lee_level-0_events.jsonl")
+		check(events.count('"event":"mouse_motion"') >= 20, "mouse rows from before and after the reconnect are in one file (%d)" % events.count('"event":"mouse_motion"'))
+		check('"event":"incident_spawned"' in events or '"event":"dispatch"' in events or '"event":"state_observed"' in events, "the guest's file has the game events too")
+		check(not names.has("Mia-Lee_level-0_try-2_events.jsonl"), "the reconnect did not start a second try")
+		check(names.has("Mia-Lee_nasa-tlx.json"), "the survey from leaving is saved on the guest's computer")
+		check(names.has("Mia-Lee_all-levels_events.jsonl") and names.has("Mia-Lee_session-info.json") and names.has(StudyFiles.README_NAME), "session events, info and READ ME")
 
 func finish() -> void:
 	if role != "server":
 		game._stop_capture()
 		game.voice.shutdown()
-	if failures.is_empty(): print("PASS: %s - leader stores the team's files, guest reconnects without department changes" % role)
+	if failures.is_empty(): print("PASS: %s - each player stores their own named files, guest reconnects without department changes" % role)
 	else:
 		for failure in failures: printerr("FAIL: ", failure)
 	quit(0 if failures.is_empty() else 1)

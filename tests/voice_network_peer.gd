@@ -134,8 +134,8 @@ func _finish() -> void:
 			for offset in range(44, data.size(), 2): maximum = maxi(maximum, data.decode_s16(offset))
 			if maximum > 0: recorded_levels.append(maximum)
 			if maximum not in [0, 1000, 2000, 4000, 8000]: errors.append("speaker WAV contains mixed voices")
-		if recorded_levels.size() < 3: errors.append("consented local or remote speaker track missing")
-		if index != 3 and recorded_levels.has(8000): errors.append("unconsenting participant was included in local recording")
+		# 9.11: each computer saves only its own player's microphone.
+		if recorded_levels.size() != 1: errors.append("only the own microphone should be saved (%d voices)" % recorded_levels.size())
 		if not recorded_levels.has(1000 * (1 << index)): errors.append("own microphone missing from own recording")
 		voice.shutdown()
 	if index != 3 and not saw_departure: errors.append("peer departure was not observed")

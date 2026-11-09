@@ -12,22 +12,14 @@ signal voice_participants_changed
 ## Study data from another player, delivered to the session leader's game
 ## (2.11: only the leader's computer stores files). rel_path is relative to that
 ## player's folder; mode is "append" or "replace".
-signal research_relay_received(player_key: String, rel_path: String, data: PackedByteArray, mode: String)
 
 const PORT := 24680
-const PROTOCOL_VERSION := 14 # 2.11: stable player keys, reserved departments, study data relayed to the session leader.
+const PROTOCOL_VERSION := 15 # 9.11: study data is stored on each player's own computer again (no relay). 14: stable player keys, reserved departments.
 const MAX_PLAYER_NAME_LENGTH := 20
 const UNRELIABLE_SNAPSHOT_LIMIT := 1100 # Leave room for RPC/ENet headers below the path MTU.
-# ENet channels: 0 control, 1 voice audio, 2 voice state, 3 large state/events,
-# 4 study data relayed to the session leader (its own channel, so it never
-# delays gameplay messages).
-const CHANNELS := 5
-const RESEARCH_CHANNEL := 4
-const RESEARCH_PACKET_MAX := 1024 * 1024 # compressed bytes per relayed chunk
-const RESEARCH_RAW_MAX := 8 * 1024 * 1024
-const RESEARCH_EXTENSIONS := ["jsonl", "csv", "json"]
-## "withdraw" (4.11): the player withdrew from the study; the leader deletes their data.
-const RELAY_MODES := ["append", "replace", "withdraw"]
+# ENet channels: 0 control, 1 voice audio, 2 voice state, 3 large state/events.
+# (Channel 4, the 2.11 study-data relay to the session leader, was removed on 9.11.)
+const CHANNELS := 4
 # Every player has the same job: command one (or more) emergency departments.
 # Departments are split automatically by how many people are in the room.
 const DEPARTMENTS: Array[String] = ["fire", "medic", "engineer", "police"]
@@ -926,55 +918,3 @@ func _voice_rate_allowed(windows: Dictionary, peer_id: int, per_second: float, b
 	if allowed: window.tokens = float(window.tokens) - 1.0
 	windows[peer_id] = window
 	return allowed
-
-
-# ------------------------------------------------------------ study data relay
-# 2.11: only the session leader's computer stores study files. Other players'
-# games send their own data (mouse, clicks, keys, 60 Hz samples, questionnaire
-# answers) here; the host (LAN) or the dedicated server passes it on to the
-# leader, who writes it under research/<session>/players/<player key>/.
-
-static func valid_relay_path(path: String) -> bool:
-	if path.is_empty() or path.length() > 200 or path.begins_with("/") or ".." in path or "\\" in path: return false
-	var parts := path.split("/", false)
-	if parts.is_empty() or parts.size() > 3: return false
-	for part in parts:
-		if part.begins_with("."): return false
-		for character in part:
-			if not character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.": return false
-	return parts[-1].get_extension() in RESEARCH_EXTENSIONS
-
-## Can this game send study data to the leader right now?
-func relay_ready() -> bool:
-	if not active or hosting or is_leader(): return false
-	return _server_available() and roster.has(multiplayer.get_unique_id()) and leader_peer() > 0
-
-func send_research(rel_path: String, raw: PackedByteArray, mode: String) -> bool:
-	if not relay_ready() or not valid_relay_path(rel_path) or mode not in RELAY_MODES or raw.size() > RESEARCH_RAW_MAX: return false
-	var packed := raw.compress(FileAccess.COMPRESSION_ZSTD)
-	if packed.size() > RESEARCH_PACKET_MAX: return false
-	_research_relay.rpc_id(1, rel_path, packed, raw.size(), mode)
-	return true
-
-@rpc("any_peer", "call_remote", "reliable", RESEARCH_CHANNEL)
-func _research_relay(rel_path: String, packed: PackedByteArray, size: int, mode: String) -> void:
-	if not active or not hosting: return
-	var sender := multiplayer.get_remote_sender_id()
-	if not roster.has(sender) or not valid_relay_path(rel_path) or mode not in RELAY_MODES: return
-	if packed.size() > RESEARCH_PACKET_MAX or size <= 0 or size > RESEARCH_RAW_MAX: return
-	var key := player_key(sender)
-	var leader := leader_peer()
-	if leader == sender or leader <= 0: return
-	if not dedicated:
-		var raw := packed.decompress(size, FileAccess.COMPRESSION_ZSTD)
-		if raw.size() == size: research_relay_received.emit(key, rel_path, raw, mode)
-	else:
-		_research_deliver.rpc_id(leader, key, rel_path, packed, size, mode)
-
-@rpc("authority", "call_remote", "reliable", RESEARCH_CHANNEL)
-func _research_deliver(key: String, rel_path: String, packed: PackedByteArray, size: int, mode: String) -> void:
-	if not active or hosting or multiplayer.get_remote_sender_id() != 1 or not is_leader(): return
-	if not valid_relay_path(rel_path) or mode not in RELAY_MODES or key.length() > 40: return
-	if packed.size() > RESEARCH_PACKET_MAX or size <= 0 or size > RESEARCH_RAW_MAX: return
-	var raw := packed.decompress(size, FileAccess.COMPRESSION_ZSTD)
-	if raw.size() == size: research_relay_received.emit(key, rel_path, raw, mode)

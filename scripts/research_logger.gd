@@ -10,21 +10,10 @@ const MAX_BUFFER_LINES := 128
 var enabled := false
 var session_id := ""
 var log_path := ""
-var _file # FileAccess, or ResearchRelay.RelayFile when this is not the leader's computer
-var _level_file
-## 2.11: set when this computer is not the session leader. Then nothing is
-## written here: this player's own rows go to the leader through the relay, and
-## shared game events (which the leader records once) are skipped.
-var relay: ResearchRelay
-## The rows a non-leader still records: this player's own input and view.
-const LOCAL_EVENTS := ["mouse_motion", "mouse_button", "key_input", "ui_action", "crew_selected", "crew_deselected",
-	"department_filter", "inspection", "command_requested", "task_state", "context", "display", "collection_choice",
-	"briefing_completed", "microphone_check", "pc_check", "voice_recording", "clock_correction", "chaos_state_at_capture_start",
-	"study_consent", "study_withdrawal"]
-## 4.11: the session leader withdrew from the study but teammates are still
-## recorded. The leader's game keeps logging shared game events (teammates'
-## files need them) but no longer this player's own input or 60 Hz samples.
-var exclude_own_input := false
+## Player name used in file names (StudyFiles.label), set before begin_session.
+var file_label := "Player"
+var _file: FileAccess
+var _level_file: FileAccess
 var _context: Dictionary = {}
 var _level: Dictionary = {}
 var _levels: Array[Dictionary] = []
@@ -125,7 +114,7 @@ func begin_session(run_id: String, metadata: Dictionary = {}) -> void:
 		_completed_level_elapsed = 0.0
 		_capture_segment = 0
 		_disabled_at_us = -1
-		log_path = "%s/%s/session_events.jsonl" % [LOG_DIRECTORY, session_id]
+		log_path = "%s/%s/%s_all-levels_events.jsonl" % [LOG_DIRECTORY, session_id, StudyFiles.label(file_label)]
 	else:
 		_context.merge(metadata, true)
 	if not enabled: _open()
@@ -146,11 +135,12 @@ func set_enabled(value: bool) -> void:
 		consent_changed.emit(false)
 
 func _open() -> void:
-	var directory := "%s/%s/levels" % [LOG_DIRECTORY, session_id]
-	var err := DirAccess.make_dir_recursive_absolute(directory) if relay == null else OK
+	var directory := "%s/%s" % [LOG_DIRECTORY, session_id]
+	var err := DirAccess.make_dir_recursive_absolute(directory)
 	if err != OK and err != ERR_ALREADY_EXISTS:
 		log_error.emit("Could not create the local research folder.")
 		return
+	StudyFiles.write_readme(directory, file_label)
 	_file = _open_append(log_path)
 	if _file == null:
 		log_error.emit("Could not open the local research log.")
@@ -165,9 +155,8 @@ func _open() -> void:
 	_last_click_us = -1
 	_capture_segment += 1
 	enabled = true
-	_write("capture_started" if _capture_segment == 1 else "capture_resumed", {"samples": "levels/<level_run_id>_samples_60hz.csv at %d Hz" % ResearchSampler.RATE_HZ,
-		"local_only": relay == null, "stored_by": "this computer" if relay == null else "session leader's computer (players/<player key>/)",
-		"own_input_only": relay != null, "scope": "local_player_game_window", "motion": "every_delivered_event",
+	_write("capture_started" if _capture_segment == 1 else "capture_resumed", {"samples": "<player>_level-<N>_mouse-and-taskload-60hz.csv at %d Hz" % ResearchSampler.RATE_HZ,
+		"local_only": true, "scope": "local_player_game_window", "motion": "every_delivered_event",
 		"coordinates": "1600x900 viewport pixels", "context": _context,
 		"gap_wall_us": Time.get_ticks_usec() - _disabled_at_us if _disabled_at_us >= 0 else 0,
 		"gap_level_start_s": _disabled_level_elapsed if _disabled_at_us >= 0 else null,
@@ -189,19 +178,24 @@ func begin_level(level_index: int, metadata: Dictionary = {}, level_run_id: Stri
 	_clock_held_total_s = 0.0
 	_clock_holding = false
 	var level_number := int(metadata.get("level_number", metadata.get("level_id", level_index + 1)))
-	var attempt := int(_attempts.get(str(level_number), 0)) + 1
-	_attempts[str(level_number)] = attempt
+	# A run seen before in this session (e.g. after a reconnect) continues its files.
+	var previous := {}
+	for recorded: Dictionary in _levels:
+		if str(recorded.level_run_id) == run_id: previous = recorded
+	var attempt := int(previous.get("level_attempt", int(_attempts.get(str(level_number), 0)) + 1))
+	_attempts[str(level_number)] = maxi(attempt, int(_attempts.get(str(level_number), 0)))
+	var base := "%s/%s/%s" % [LOG_DIRECTORY, session_id, StudyFiles.level_base(file_label, level_number, attempt)]
 	_level = {"level_id": level_number, "level_number": level_number, "level_index": level_index,
 		"level_name": str(metadata.get("level_name", metadata.get("name", "Level %d" % level_number))),
 		"level_run_id": run_id, "level_attempt": attempt,
-		"log_path": "%s/%s/levels/%s_events.jsonl" % [LOG_DIRECTORY, session_id, run_id],
-		"samples_path": "%s/%s/levels/%s_samples_60hz.csv" % [LOG_DIRECTORY, session_id, run_id],
+		"log_path": base + "_events.jsonl",
+		"samples_path": base + "_mouse-and-taskload-60hz.csv",
 		"capture_started_at_s": _shift_elapsed, "practice": bool(metadata.get("practice", level_number == 0))}
 	_level_file = _open_append(str(_level.log_path))
 	if _level_file == null:
 		_fail_write()
 		return
-	_levels.append(_level.duplicate(true))
+	if previous.is_empty(): _levels.append(_level.duplicate(true))
 	_level_clicks = 0
 	_level_pointer_distance = 0.0
 	_last_click_us = -1
@@ -248,11 +242,6 @@ func end_level(reason: String = "completed", summary: Dictionary = {}, final_sta
 	_active_events.clear()
 	_closed_events.clear()
 
-## Stop recording this player's own input from now on (study withdrawal).
-func withdraw_own_input() -> void:
-	exclude_own_input = true
-	_stop_sampler("study_withdrawal", false)
-
 func get_level_context() -> Dictionary:
 	var result: Dictionary = _level.duplicate(true)
 	result.merge({"session_id": session_id, "capture_session_id": session_id,
@@ -282,7 +271,7 @@ func _advance_clock(value: float) -> void:
 	_shift_elapsed = value
 
 func observe_state(state: Dictionary) -> void:
-	if not enabled or _level.is_empty() or relay != null: return
+	if not enabled or _level.is_empty(): return
 	# Saved snapshots wrap numeric values to retain exact precision. Network
 	# snapshots already contain native values; this accepts either form.
 	state = _decode_snapshot(state)
@@ -393,7 +382,6 @@ func log_click(pos: Vector2) -> void:
 
 func log_event(event_type: String, data: Dictionary = {}) -> void:
 	if not enabled: return
-	if relay != null and not LOCAL_EVENTS.has(event_type): return # the leader records shared game events
 	var enriched := data.duplicate(true)
 	var key := _event_key(event_type, data)
 	if not key.is_empty():
@@ -487,7 +475,6 @@ func _instance_id(key: String) -> String:
 
 func _write(event_type: String, data: Dictionary) -> void:
 	if not enabled or _file == null: return
-	if exclude_own_input and LOCAL_EVENTS.has(event_type) and event_type != "study_withdrawal": return
 	_event_count += 1
 	var active_ids: Array[String] = []
 	for key: String in _active_events: active_ids.append(_instance_id(key))
@@ -524,24 +511,21 @@ func _flush() -> void:
 
 func _write_manifest() -> void:
 	if not enabled: return
-	var manifest_path := "%s/%s/manifest.json" % [LOG_DIRECTORY, session_id]
-	var manifest = FileAccess.open(manifest_path, FileAccess.WRITE) if relay == null else relay.open_file(manifest_path, false)
+	var manifest := FileAccess.open("%s/%s/%s_session-info.json" % [LOG_DIRECTORY, session_id, StudyFiles.label(file_label)], FileAccess.WRITE)
 	if manifest == null:
 		_fail_write()
 		return
 	manifest.store_string(JSON.stringify({"schema": SCHEMA_VERSION, "session_id": session_id,
-		"session_events": log_path, "level_files": _levels, "context": _sanitize(_context),
+		"player_name": file_label, "folder": session_id, "session_events": log_path, "level_files": _levels, "context": _sanitize(_context),
 		"level_files_mirror_session_events": true,
 		"join_key": ["session_id", "sequence"], "voice_join_key": ["capture_session_id", "level_run_id"],
-		"own_input_only": relay != null,
 		"clock": {"level_elapsed_s": "active simulation seconds within this attempt", "session_elapsed_s": "sum of actual level elapsed times, including retries", "local_elapsed_us": "monotonic wall clock since session capture first started"},
 		"updated_utc": Time.get_datetime_string_from_system(true)}, "\t"))
-	var error: int = manifest.get_error()
+	var error := manifest.get_error()
 	manifest.close()
 	if error != OK: _fail_write()
 
-func _open_append(path: String):
-	if relay != null: return relay.open_file(path, true)
+func _open_append(path: String) -> FileAccess:
 	var file := FileAccess.open(path, FileAccess.READ_WRITE if FileAccess.file_exists(path) else FileAccess.WRITE)
 	if file != null: file.seek_end()
 	return file
@@ -562,10 +546,9 @@ func _fail_write() -> void:
 	consent_changed.emit(false)
 
 func _start_sampler() -> void:
-	if not enabled or _level.is_empty() or exclude_own_input: return
+	if not enabled or _level.is_empty(): return
 	if sampler == null: sampler = ResearchSampler.new()
 	if sampler.is_running(): return
-	sampler.relay = relay
 	if not sampler.start(str(_level.samples_path), _session_start_us, _capture_segment):
 		_write("sampler_error", {"path": _level.samples_path, "reason": "file_open_failed"})
 		return

@@ -30,9 +30,7 @@ var rows_written := 0
 var _thread: Thread
 var _mutex := Mutex.new()
 var _running := false
-var _file # FileAccess, or a ResearchRelay.RelayFile on a non-leader computer
-## Set on players who are not the session leader: rows go to the leader (2.11).
-var relay: ResearchRelay
+var _file: FileAccess
 var _segment := 1
 var _start_us := 0
 var _session_start_us := 0
@@ -60,10 +58,9 @@ func start(csv_path: String, session_start_us: int, segment: int) -> bool:
 	path = csv_path
 	_session_start_us = session_start_us
 	_segment = segment
-	var existed := FileAccess.file_exists(path) if relay == null else false
-	_file = FileAccess.open(path, FileAccess.READ_WRITE if existed else FileAccess.WRITE) if relay == null else relay.open_file(path, true)
+	var existed := FileAccess.file_exists(path)
+	_file = FileAccess.open(path, FileAccess.READ_WRITE if existed else FileAccess.WRITE)
 	if _file == null: return false
-	if relay != null: existed = _file.get_length() > 0
 	_file.seek_end()
 	if not existed or _file.get_length() == 0: _file.store_line(",".join(columns()))
 	_start_us = Time.get_ticks_usec()

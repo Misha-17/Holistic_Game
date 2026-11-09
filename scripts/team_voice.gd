@@ -9,7 +9,8 @@ signal participants_changed
 const Mixer = preload("res://scripts/team_voice_mixer.gd")
 const Wav = preload("res://scripts/team_voice_wav.gd")
 const Session = preload("res://scripts/team_voice_session.gd")
-const DIRECTORY := "user://research/voice"
+const DIRECTORY := "user://research/voice" # before 9.11; still recovered and listed
+const RESEARCH_ROOT := "user://research"
 const RATE := 16000
 const FRAMES := 320
 const RECEIVED_VOICE_GAIN := 2.0
@@ -19,10 +20,10 @@ var recording_enabled := false
 var recording_consent := false
 var recording_active := false
 var recording_path := ""
-## 2.11: in co-op only the session leader's computer saves voice tracks (main.gd
-## sets this every frame). Other players still hear and send voice as before.
-var storage_allowed := true
 var status := "Voice chat disabled"
+## 9.11: the player's name for file names (StudyFiles.label). The recording goes
+## into the session folder: research/<session>/<name>_voice/<name>_voice.wav.
+var file_label := "Player"
 var playback_level := 50
 var peer_playback_gains: Dictionary = {}
 
@@ -77,6 +78,9 @@ func configure(network: NetworkSession, server_only: bool = false) -> void:
 	network.roster_changed.connect(_roster_updated)
 	network.disconnected.connect(_disconnected)
 	var recovered: int = Session.recover_pending(DIRECTORY)
+	if DirAccess.dir_exists_absolute(RESEARCH_ROOT):
+		for name in DirAccess.get_directories_at(RESEARCH_ROOT):
+			if name != "voice" and name != "pc_checks": recovered += Session.recover_pending(RESEARCH_ROOT.path_join(name))
 	if recovered > 0: _set_status("Recovered %d local voice recording(s)" % recovered)
 	_roster_updated()
 
@@ -229,36 +233,7 @@ func _process(_delta: float) -> void:
 		voice_error.emit("No microphone samples received. Check the selected input and system microphone permission.")
 
 
-## Follows the session leader: the leader starts saving (if Save team voice is
-## on); a computer that stops being the leader closes its files.
-func set_storage_allowed(value: bool) -> void:
-	if _server_only or storage_allowed == value: return
-	storage_allowed = value
-	if not value and _writer != null:
-		_render_audio()
-		_flush_recorded_tail()
-		_writer.log_metadata("session_stopped", _timing().merged({"reason": "no_longer_session_leader"}, true))
-		_writer.close_file()
-		_writer = null
-		recording_active = false
-		recording_path = ""
-		recording_changed.emit(false, recording_path)
-	elif value and _session_active and recording_enabled and _capture_active and _writer == null:
-		_open_recording()
-	_publish_state()
-	_refresh_status()
-
-## Study withdrawal (4.11): remove one person's voice from every recording of
-## a session on this computer (the open one and any finished folders).
-func withdraw_speaker(key: String, session: String) -> Array:
-	var removed: Array = []
-	var open_folder := recording_path.get_base_dir() if _writer != null and session_id == session else ""
-	if not open_folder.is_empty(): removed.append_array(_writer.withdraw_speaker(key))
-	for folder in session_folders(session):
-		if folder != open_folder: removed.append_array(Session.withdraw_from_folder(folder, key))
-	return removed
-
-## Delete every voice folder of a session (solo withdrawal: only one person).
+## Delete every voice folder of a session on this computer (study withdrawal).
 func delete_session_folders(session: String) -> Array:
 	if session_id == session and _writer != null: stop()
 	var removed: Array = []
@@ -270,7 +245,12 @@ func delete_session_folders(session: String) -> Array:
 
 func session_folders(session: String) -> Array[String]:
 	var result: Array[String] = []
-	if session.is_empty() or not DirAccess.dir_exists_absolute(DIRECTORY): return result
+	if session.is_empty(): return result
+	var folder := RESEARCH_ROOT.path_join(session.validate_filename())
+	if DirAccess.dir_exists_absolute(folder):
+		for name in DirAccess.get_directories_at(folder):
+			if name.ends_with("_voice"): result.append(folder.path_join(name))
+	if not DirAccess.dir_exists_absolute(DIRECTORY): return result
 	var safe := ""
 	for character in session.left(64):
 		if character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-": safe += character
@@ -283,14 +263,11 @@ func local_speaker_key() -> String:
 	return _speaker_key(_local_peer)
 
 func _open_recording() -> bool:
-	if _server_only or not _session_active or not recording_enabled or not _capture_active or not storage_allowed: return false
+	if _server_only or not _session_active or not recording_enabled or not _capture_active: return false
 	_render_audio()
-	var safe_id := ""
-	for character in session_id.left(64):
-		if character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-": safe_id += character
-	if safe_id == "": safe_id = "session"
-	var suffix := Crypto.new().generate_random_bytes(6).hex_encode()
-	recording_path = DIRECTORY.path_join("team_%s_%s" % [safe_id, suffix]).path_join("session.json")
+	var session_folder := RESEARCH_ROOT.path_join(session_id.validate_filename() if not session_id.is_empty() else "session")
+	var voice_folder := StudyFiles.free_folder(session_folder, StudyFiles.label(file_label) + "_voice")
+	recording_path = session_folder.path_join(voice_folder).path_join("session.json")
 	_writer = Session.new()
 	var info := _timing()
 	info.merge({"session_id": session_id.left(128), "sample_rate": RATE, "channels_per_track": 1,
@@ -329,11 +306,10 @@ func _render_audio(until_frame: int = -1) -> void:
 		_mixer.reset(_cursor)
 	var permissions: Dictionary = {}
 	if recording_active:
-		permissions[_local_peer] = true # Saving one's own microphone is independent of sharing consent.
-		if _network != null:
-			for peer_id in _network.voice_participants:
-				if int(peer_id) != _local_peer:
-					permissions[peer_id] = bool(_network.voice_participants[peer_id].consent)
+		# 9.11: each computer saves only its own player's microphone. Every player
+		# keeps their own files and sends them to the researcher, so teammates'
+		# voices are not saved a second time here.
+		permissions[_local_peer] = true
 	while _cursor + FRAMES <= now:
 		var mixed: Dictionary = _mixer.render(_cursor, _local_peer, permissions, peer_playback_gains, RECEIVED_VOICE_GAIN)
 		_cursor += FRAMES
@@ -578,6 +554,7 @@ func _timing() -> Dictionary:
 ## One track per person, even when they reconnect with a new network id (2.11:
 ## a dropping player used to get a new full-length track for every reconnect).
 func _speaker_key(peer_id: int) -> String:
+	if peer_id == _local_peer: return StudyFiles.label(file_label) + "_voice" # 9.11: <name>_voice.wav
 	if _network != null and _network.player_keys.has(peer_id): return "player_" + str(_network.player_keys[peer_id])
 	if peer_id == _local_peer and _network != null and not _network.active and not _network.local_player_key.is_empty():
 		return "player_" + _network.local_player_key
@@ -587,7 +564,8 @@ func _speaker_identity(peer_id: int) -> Dictionary:
 	return {"peer_id": peer_id, "speaker_id": _speaker_key(peer_id), "speaker_key": _speaker_key(peer_id),
 		"display_name": _network.player_log_label(peer_id) if _network != null else "Player %d" % peer_id,
 		"departments": _network.departments_for(peer_id) if _network != null else [],
-		"local": peer_id == _local_peer}
+		"local": peer_id == _local_peer,
+		"player_key": str(_network.player_keys.get(peer_id, _network.local_player_key if peer_id == _local_peer else "")) if _network != null else ""}
 
 
 func _log(event: String, data: Dictionary) -> void:
@@ -600,13 +578,7 @@ func _log(event: String, data: Dictionary) -> void:
 
 func _refresh_status() -> void:
 	var text := "Voice chat enabled" if mic_enabled else "Voice chat disabled"
-	if recording_active: text += " | Saving team voice"
-	var recorders := 0
-	if _network != null:
-		for peer_id in _network.voice_participants:
-			if int(peer_id) != _local_peer and bool(_network.voice_participants[peer_id].recording): recorders += 1
-	if recorders > 0: text += " | %d teammate(s) recording" % recorders
-	if recording_enabled and not storage_allowed: text += " | Voice is saved on the session leader's computer"
+	if recording_active: text += " | Saving your voice"
 	_set_status(text)
 
 

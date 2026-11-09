@@ -94,7 +94,7 @@ func run() -> void:
 	var session: String = game._tlx_session()
 	var folder := "user://research/" + session
 	check(DirAccess.dir_exists_absolute(folder), "the solo session was recorded")
-	check(FileAccess.get_file_as_string(folder + "/session_events.jsonl").contains('"event":"study_consent"'), "the consent and its text version are in the log")
+	check(FileAccess.get_file_as_string(folder + "/Player_all-levels_events.jsonl").contains('"event":"study_consent"'), "the consent and its text version are in the log")
 	check(game._can_withdraw(), "WITHDRAW MY DATA is offered after the level")
 	ids = await button_ids()
 	check(ids.has("withdraw_open") and ids.has("results_title"), "the results screen shows WITHDRAW MY DATA")
@@ -122,86 +122,40 @@ func run() -> void:
 	ids = await button_ids()
 	check(not ids.has("withdraw_open"), "the main menu no longer shows it")
 	var notes := FileAccess.get_file_as_string("user://research/withdrawals.jsonl")
-	check(notes.contains(session) and notes.contains('"role":"solo"') and not notes.contains("mouse_motion"), "a withdrawal note without data is kept")
+	check(notes.contains(session) and not notes.contains("mouse_motion"), "a withdrawal note without data is kept")
 
-	# --- Leader: own rows go, shared game events and teammates stay
-	var lead_session := "session_leadwithdraw_%d" % Time.get_ticks_usec()
-	var lead := "user://research/" + lead_session
-	var rows := [{"event": "incident_spawned", "data": {}}, {"event": "mouse_motion", "data": {}}, {"event": "dispatch", "data": {}}, {"event": "crew_selected", "data": {}}]
-	write_lines(lead + "/session_events.jsonl", rows)
-	write_lines(lead + "/levels/run1_events.jsonl", rows)
-	write_lines(lead + "/levels/run1_samples_60hz.csv", ["header"])
-	write_lines(lead + "/questionnaires/nasa_tlx_1.json", [{}])
-	write_lines(lead + "/players/abcd0000abcd0001/levels/run1_events.jsonl", rows)
-	var removed: Array = game._remove_own_rows(lead_session)
-	var kept := FileAccess.get_file_as_string(lead + "/levels/run1_events.jsonl")
-	check(kept.contains("incident_spawned") and kept.contains('"dispatch"') and not kept.contains("mouse_motion") and not kept.contains("crew_selected"), "the leader's own input rows are removed, game events kept")
-	check(not FileAccess.file_exists(lead + "/levels/run1_samples_60hz.csv") and not DirAccess.dir_exists_absolute(lead + "/questionnaires"), "the leader's 60 Hz samples and survey answers are deleted")
-	check(FileAccess.file_exists(lead + "/players/abcd0000abcd0001/levels/run1_events.jsonl"), "teammates' data is untouched")
-	check(removed.size() >= 3, "the deleted items are listed: %s" % [removed])
-
-	# --- Leader receives a teammate's withdrawal
-	game.capture_session_id = lead_session
-	game._store_relayed("abcd0000abcd0001", "withdrawal.json", "{}".to_utf8_buffer(), "withdraw")
-	check(not DirAccess.dir_exists_absolute(lead + "/players/abcd0000abcd0001"), "a teammate's withdrawal deletes their folder on the leader's computer")
-	check(FileAccess.get_file_as_string("user://research/withdrawals.jsonl").contains("abcd0000abcd0001"), "and is noted")
-	game.capture_session_id = ""
-	game._delete_tree(lead)
-
-	# --- Teammate (not leader): a request is queued for the leader
-	game.network.active = true
-	game.network.hosting = false
-	game.network.dedicated = true
-	game.network.roster = {77: 0, 1: 1}
-	game.last_capture_session_id = "session_guest_1"
-	game._session_had_collection = true
-	game._withdrawn_session = ""
-	game._session_role = "guest"
-	game._session_key = "abcd1234ef567890"
-	game.relay.enqueue("levels/a_events.jsonl", "x\n".to_utf8_buffer(), "append")
-	check(game._sends_to_leader(), "fixture: this player is not the leader")
-	game._withdraw_my_data()
-	var outbox: Array = game.relay._outbox
-	check(outbox.size() == 1 and outbox[0].mode == "withdraw", "queued data is dropped and a withdrawal request is queued for the leader")
-	game.relay.clear()
+	# --- Co-op (9.11): every player's files are on their own computer, so a
+	# teammate withdraws the same way, also after leaving the room.
+	game._stop_capture()
+	game.research_enabled = true
+	game.network.local_player_name = "Mia"
+	play_level(2)
+	var coop_session: String = game._tlx_session()
+	check(coop_session.ends_with("_Mia") and FileAccess.file_exists("user://research/%s/Mia_level-3_events.jsonl" % coop_session), "files are named after the player: %s" % coop_session)
 	game.network.active = false
-	game.network.roster = {}
-	# A teammate who already left the room: nothing can be deleted from here,
-	# so the dialog gives a code for the researcher instead.
-	game._withdrawn_session = ""
-	game.last_capture_session_id = "session_guest_2"
+	check(game._can_withdraw(), "offered again for a new session")
 	game.screen = "title"
 	game._action("withdraw_open")
-	game._action("withdraw_confirm")
 	ids = await button_ids()
-	check(game.withdraw_prompt and ids.has("withdraw_cancel") and not ids.has("withdraw_confirm"), "an offline teammate sees a code instead of a delete button")
-	check(game._participant_code() == "ABCD-1234", "the code comes from the player key (%s)" % game._participant_code())
-	game._action("withdraw_cancel")
-	game._session_role = "solo"
+	check(ids.has("withdraw_confirm") and ids.has("withdraw_cancel"), "the same confirmation for everyone: %s" % [ids])
+	game._action("withdraw_confirm")
+	check(not DirAccess.dir_exists_absolute("user://research/" + coop_session), "the session folder is deleted from this computer")
 
-	# --- Voice: one person's track removed from a finished session
-	var vfolder := "user://voice_withdraw_%d" % Time.get_ticks_usec()
+	# --- Voice: the recording lives inside the session folder and goes with it.
+	var vsession := StudyFiles.new_session_name("Mia")
+	var vfolder := "user://research/%s/Mia_voice" % vsession
 	var writer = Session.new()
-	writer.open_file(vfolder.path_join("session.json"), {"session_id": "s"})
-	for i in 5: writer.append_speakers({2: tone(), 3: tone()}, {2: {"speaker_key": "player_a", "peer_id": 2}, 3: {"speaker_key": "player_b", "peer_id": 3}})
+	writer.open_file(vfolder.path_join("session.json"), {"session_id": vsession})
+	for i in 5: writer.append_speakers({2: tone()}, {2: {"speaker_key": "Mia_voice", "peer_id": 2}})
 	writer.close_file()
-	var gone: Array = Session.withdraw_from_folder(vfolder, "player_b")
-	var manifest: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(vfolder.path_join("session.json")))
-	check(gone.has("player_b.wav") and not FileAccess.file_exists(vfolder.path_join("player_b.wav")), "the withdrawn person's WAV is deleted")
-	check((manifest.tracks as Array).size() == 1 and manifest.tracks[0].speaker_id == "player_a" and manifest.withdrawn_speakers == ["player_b"], "session.json keeps only the other track")
-	check(FileAccess.file_exists(vfolder.path_join("player_a.wav")) and FileAccess.file_exists(vfolder.path_join("listen.html")), "the other track and the player stay")
-	# ...and from a session that is still recording: never recorded again.
-	var live_folder := "user://voice_withdraw_live_%d" % Time.get_ticks_usec()
-	var live = Session.new()
-	live.open_file(live_folder.path_join("session.json"), {"session_id": "t"})
-	live.append_speakers({2: tone(), 3: tone()}, {2: {"speaker_key": "player_a", "peer_id": 2}, 3: {"speaker_key": "player_b", "peer_id": 3}})
-	live.withdraw_speaker("player_b")
-	live.append_speakers({2: tone(), 3: tone()}, {2: {"speaker_key": "player_a", "peer_id": 2}, 3: {"speaker_key": "player_b", "peer_id": 3}})
-	live.close_file()
-	check(not FileAccess.file_exists(live_folder.path_join("player_b.wav")), "a live session does not recreate the withdrawn track")
+	check(FileAccess.file_exists(vfolder.path_join("Mia_voice.wav")), "the player's track is <name>_voice.wav")
+	check(game.voice.session_folders(vsession) == [vfolder], "the voice folder is found in the session folder")
+	game.voice.delete_session_folders(vsession)
+	check(not DirAccess.dir_exists_absolute(vfolder), "withdrawal deletes the voice folder")
+	game._delete_tree("user://research/" + vsession)
 
 	game.voice.shutdown()
 	game.queue_free()
 	await process_frame
-	if failures.is_empty(): print("PASS: consent on the first screen with study information; withdrawal deletes the player's data (solo, leader, teammate) and voice track")
+	if failures.is_empty(): print("PASS: consent on the first screen with study information; withdrawal deletes this computer's session folder and voice")
 	quit(0 if failures.is_empty() else 1)

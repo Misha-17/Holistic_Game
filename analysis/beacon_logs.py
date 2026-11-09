@@ -1,12 +1,16 @@
 """Loaders for Beacon Bay research files (schema 3 and 4).
 
-From 2.11 only the session leader's computer stores files in co-op. The other
-players' own input is in research/<session>/players/<player key>/ with the same
-file names; load_player_level() merges the leader's shared game events into it.
+From 9.11 (playtest 07.11) every player stores their own files on their own
+computer, one folder per session named by date, time and player name:
+`research/2026-11-07_19-30_Mia/Mia_level-3_events.jsonl` with
+`Mia_level-3_mouse-and-taskload-60hz.csv` next to it (a retry of a level:
+`Mia_level-3_try-2_...`). Each file has the game events and the player's own
+input. Older layouts still load: `research/<session>/levels/<level_run_id>_events.jsonl`
+with `<level_run_id>_samples_60hz.csv`, and the 2.11-4.11 leader layout
+(`research/<session>/players/<player key>/levels/...`, merged with the leader's
+shared game events by load_player_level()).
 
-One "player level" = one level attempt as recorded on one player's computer:
-`research/<session>/levels/<level_run_id>_events.jsonl` (all schemas) plus, from
-schema 4 on, `<level_run_id>_samples_60hz.csv` next to it.
+One "player level" = one level attempt as recorded on one player's computer.
 
 Time axis used everywhere: level seconds (`level_elapsed_s`), 0 = shift start.
 The briefing before the shift has level time 0 and is cut off.
@@ -56,6 +60,18 @@ def read_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in handle if line.strip()]
 
 
+def samples_path(events_path: Path) -> Path | None:
+    """The 60 Hz CSV next to a level's events file (9.11 names, then older ones)."""
+    if not events_path.name.endswith("_events.jsonl"):
+        return None
+    base = events_path.name[: -len("_events.jsonl")]
+    for name in (base + "_mouse-and-taskload-60hz.csv", base + "_samples_60hz.csv"):
+        candidate = events_path.with_name(name)
+        if candidate.exists():
+            return candidate
+    return events_path.with_name(base + "_mouse-and-taskload-60hz.csv")
+
+
 def load_player_level(path: str | Path, attempt: int = -1) -> PlayerLevel:
     """Rows from shift start to the end of one level run (default: the last run
     in the file that reached level_ended). Rows are grouped by level_run_id, so
@@ -92,16 +108,16 @@ def load_player_level(path: str | Path, attempt: int = -1) -> PlayerLevel:
                         level_run_id=str(first.get("level_run_id") or ""),
                         session_id=str(first.get("session_id") or ""), schema=int(first.get("schema", 3)),
                         duration_s=float(end.get("level_elapsed_s", 0.0)))
-    samples = path.with_name(path.name[: -len("_events.jsonl")] + "_samples_60hz.csv") if path.name.endswith("_events.jsonl") else None
+    samples = samples_path(path)
     if samples is not None and samples.exists():
         frame = pd.read_csv(samples)
         level.samples = frame[(frame.level_elapsed_s > 0) & (frame.level_elapsed_s <= level.duration_s)].reset_index(drop=True)
     return level
 
 
-# Rows a player's own game records when it is not the session leader (2.11):
-# its input and view. Everything else (calls, dispatches, hazards, state) is
-# recorded once, in the leader's file for the same level.
+# Rows a player's own game recorded when it was not the session leader (2.11 to
+# 4.11 builds only): its input and view. Everything else (calls, dispatches,
+# hazards, state) was recorded once, in the leader's file for the same level.
 LOCAL_EVENTS = {"mouse_motion", "mouse_button", "key_input", "ui_action", "crew_selected", "crew_deselected",
                 "department_filter", "inspection", "command_requested", "task_state", "context", "display",
                 "collection_choice", "briefing_completed", "microphone_check", "pc_check", "voice_recording",

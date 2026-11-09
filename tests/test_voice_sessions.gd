@@ -138,15 +138,18 @@ func run() -> void:
 	await wait_ms(180)
 	voice.stop()
 	manifest = JSON.parse_string(FileAccess.get_file_as_string(session_path))
-	check(manifest.tracks.size() == 2, "unconsenting participant has no audio track")
+	# 9.11: each computer saves only its own player's microphone; teammates
+	# save theirs on their own computers.
+	check(manifest.tracks.size() == 1 and int(manifest.tracks[0].peer_id) == 1, "only this player's own microphone is saved (%d tracks)" % manifest.tracks.size())
+	check(str(manifest.tracks[0].file).ends_with("_voice.wav"), "the track is named <name>_voice.wav: %s" % manifest.tracks[0].file)
 	check(manifest.level_segments.size() == 2 and manifest.level_segments[0].level_run_id == "practice" and manifest.level_segments[1].level_run_id == "first", "manifest has explicit level segments for the session player")
-	check(manifest.audio_activity.size() == 2, "speaker activity spans identify only recorded speech")
+	check(manifest.audio_activity.size() == 1, "speaker activity spans identify only recorded speech")
 	for track: Dictionary in manifest.tracks:
 		var values := samples(session_path.get_base_dir().path_join(track.file))
 		check(int(track.frames) == int(manifest.frames), "all session tracks stay aligned through level transition")
-		check(not values.has(9999) and not values.has(7777) and not values.has(8888) and not values.has(6666), "nonconsent, pre-opt-in microphone samples, between-level speech and revoked buffered speech are excluded")
-		check(values.has(1111 if int(track.peer_id) == 1 else 2222), "track contains its own speaker only")
-		check(str(track.display_name).contains("Robin" if int(track.peer_id) == 1 else "Elio"), "manifest labels speaker by participant name")
+		check(not values.has(9999) and not values.has(7777) and not values.has(8888) and not values.has(6666) and not values.has(2222), "teammates' voices and pre-opt-in microphone samples are not saved")
+		check(values.has(1111), "the track contains this player's speech")
+		check(str(track.display_name).contains("Robin"), "manifest labels speaker by participant name")
 	var timeline := FileAccess.get_file_as_string(session_path.get_base_dir().path_join("timeline.jsonl"))
 	check(timeline.contains('"level_run_id":"practice"') and timeline.contains('"level_run_id":"first"'), "voice timing metadata retains both level segments")
 	check(timeline.contains('"capture_suspended"') and timeline.contains('"capture_resumed"'), "capture gaps are explicit on the session timeline")

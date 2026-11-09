@@ -16,10 +16,10 @@ Per player, per computer, under `research/<session_id>/`:
 
 | File | One row per | Rate |
 | --- | --- | --- |
-| `session_events.jsonl` | event (whole session, authoritative) | event-driven |
-| `levels/<level_run_id>_events.jsonl` | the same rows for one level attempt | event-driven |
-| `levels/<level_run_id>_samples_60hz.csv` *(4)* | fixed time slot | exactly 60 per second |
-| `manifest.json` | session | levels, file paths, join keys |
+| `<name>_all-levels_events.jsonl` (before 09.11: `session_events.jsonl`) | event (whole session, authoritative) | event-driven |
+| `<name>_level-<N>_events.jsonl` (before: `levels/<level_run_id>_events.jsonl`) | the same rows for one level attempt | event-driven |
+| `<name>_level-<N>_mouse-and-taskload-60hz.csv` *(4)* (before: `levels/<level_run_id>_samples_60hz.csv`) | fixed time slot | exactly 60 per second |
+| `<name>_session-info.json` (before: `manifest.json`) | session | levels, file paths, join keys |
 | `questionnaires/nasa_tlx_<unix_ms>.json` | NASA-TLX answer | after the last level |
 
 Join keys: rows `(session_id, sequence)`; voice `(capture_session_id, level_run_id)`;
@@ -72,7 +72,7 @@ rate-based (speed, idle time, time series alignment).
 | `active_incidents`, `urgent_incidents` | Open calls; calls with less than 20 s left (refreshed every second) |
 | `reputation`, `shift`, `build`, `map_pixels` | Community meter, level index, game build, map size |
 
-## 5. 60 Hz samples *(4)* (`<level_run_id>_samples_60hz.csv`)
+## 5. 60 Hz samples *(4)* (`<name>_level-<N>_mouse-and-taskload-60hz.csv`; before 09.11 `<level_run_id>_samples_60hz.csv`)
 
 A separate thread reads the operating-system cursor on a fixed 60 Hz grid. The
 grid does not depend on the frame rate, so every PC produces 60 rows per second
@@ -178,7 +178,8 @@ full).
 
 Score and level: `shift_started` (`duration` 330 s), `combo`, `combo_supply`,
 `rally` (coffee boost), `supply_ready`, `target_reached`, `final_minute`,
-`all_clear`, `shift_ended_early`, `shift_complete` (`rescued`, `target`,
+`all_clear` (from 09.11 only a message; the level runs on) with the research row
+`all_calls_handled` (`at`, `seconds_left`; before 09.11 `shift_ended_early`, `seconds_saved`, and the level ended), `shift_complete` (`rescued`, `target`,
 `resolved`, `missed`, `dispatches`, `wrong_dispatches`, `escalations`, `scouts`,
 `supplies_used`, `peak_calls`, `stars`, `won`).
 

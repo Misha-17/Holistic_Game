@@ -297,7 +297,7 @@ static func recover_pending(folder: String) -> int:
 		for track: Dictionary in tracks: known[str(track.get("file", ""))] = true
 		var session_directory := DirAccess.open(session_folder)
 		for filename: String in session_directory.get_files():
-			if not (filename.begins_with("peer_") or filename.begins_with("player_")) or not filename.ends_with(".wav") or known.has(filename): continue
+			if not (filename.begins_with("peer_") or filename.begins_with("player_") or filename.ends_with("_voice.wav")) or not filename.ends_with(".wav") or known.has(filename): continue
 			var id_text := filename.trim_prefix("peer_").trim_suffix(".wav")
 			if filename.begins_with("peer_") and not id_text.is_valid_int(): continue
 			var details: Dictionary = {"peer_id": int(id_text) if filename.begins_with("peer_") else -1, "speaker_id": filename.get_basename()}

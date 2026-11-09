@@ -113,7 +113,7 @@ func run() -> void:
 	check(ends.has("practice_attempt/disruption:disruption_0") and ends.has("practice_attempt/disruption:disruption_1"), "Repeated disruptions retain distinct correlation IDs")
 	for record: Dictionary in records(practice_path): check(record.level_run_id == "practice_attempt", "Practice file contains only that attempt")
 	for record: Dictionary in records(first_path): check(record.level_run_id == "first_attempt", "Level file cannot mix retries or practice input")
-	var manifest: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(path.get_base_dir().path_join("manifest.json")))
+	var manifest: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(path.get_base_dir().path_join("%s_session-info.json" % StudyFiles.label(logger.file_label))))
 	check(manifest.level_files.size() == 3 and bool(manifest.level_files_mirror_session_events), "Manifest indexes level artifacts and declares mirrored rows")
 	# Exercise the actual encoded save format, not just plain synthetic dictionaries.
 	var simulation := RescueSimulation.new()

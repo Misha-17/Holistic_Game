@@ -2,10 +2,32 @@
 
 A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engineering and Police each have four crews in every level; calls need several departments working together.
 
+## Playtest 07.11 update (0.9.4, network protocol 15)
+
+- **Every player stores their own study files again**, on their own computer, and sends them to the researcher after playing. The 2.11 relay to the session leader is removed: in the playtest the data reached the leader too slowly ("Study data waiting for the session leader: 24.5 MB") and a survey never arrived. Each computer saves the game events plus its own player's input, 60 Hz samples, survey answers and **only its own microphone** (teammates' voices are not saved a second time). The server stores nothing. **OPEN MY STUDY FILES** in Settings → Research opens the folder.
+- **Readable names.** One folder per session, named by date, time and the name typed in the lobby (blank: "Player 2" by seat; solo: "Player"):
+
+  ```
+  research/2026-11-07_19-30_Andrei/
+    READ ME - what these files are.txt
+    Andrei_session-info.json                      build, settings, list of level files
+    Andrei_all-levels_events.jsonl                every event of the session
+    Andrei_level-3_events.jsonl                   one level (played again: _try-2, _try-3)
+    Andrei_level-3_mouse-and-taskload-60hz.csv    60 rows per second for that level
+    Andrei_nasa-tlx.json                          survey answers
+    Andrei_voice/Andrei_voice.wav                 own microphone (+ session.json, timeline.jsonl, listen.html)
+  ```
+
+  Rows still carry `session_id`, `level_run_id` and the player key for joining teammates' files. A player who drops out and rejoins the same room within 15 minutes continues the same folder and level file (their voice continues in `Andrei_voice_2/`).
+- **Levels always run their full time.** A level used to end as soon as the last scheduled call had arrived and nothing was open ("Every call handled • shift complete"), up to ~40 s early, which players read as the level cutting off a call. Now the clock always runs out; the team only sees "Every call handled • stay ready until the shift ends" (research row `all_calls_handled`). Every team now plays the same length.
+- WITHDRAW MY DATA deletes this computer's session folder (including the voice folder), in solo and co-op alike; the participant code and the request to the leader are gone.
+- Fixed console spam ("Drawing is only allowed inside this node's `_draw()`") from the progress bar of the study PC check.
+- **Protocol 15: redeploy the Azure server**; older builds cannot join.
+
 ## Study consent, withdrawal and one map view (04.11)
 
 - **Consent on the first screen.** When the game starts, players see the study information (what is recorded, where it is stored and analysed, anonymous publication, their rights) and choose **I AGREE · RECORD MY PLAY** or **PLAY WITHOUT DATA COLLECTION**. The answer holds until the game is closed and replaces the old question at the first level of each session. The text is **placeholder wording** in `scripts/study_info.gd` (square brackets mark details to fill in); bump `TEXT_VERSION` there when it changes. Every recorded session logs a `study_consent` row with that version. **STUDY INFORMATION** in Settings → Research shows the text again.
-- **Withdraw after playing.** **WITHDRAW MY DATA** on the main menu (shown after a recorded session, above SETTINGS / QUIT), on the results screen (between SETTINGS and MAIN MENU) and in Settings → Research. Clicking it only opens a confirmation (CANCEL / WITHDRAW AND DELETE; Esc cancels); confirming deletes what was recorded about that player in the session just played and stops recording them:
+- **Withdraw after playing.** **WITHDRAW MY DATA** on the main menu (shown after a recorded session, above SETTINGS / QUIT), on the results screen (between SETTINGS and MAIN MENU) and in Settings → Research. Clicking it only opens a confirmation (CANCEL / WITHDRAW AND DELETE; Esc cancels); confirming deletes what was recorded about that player in the session just played and stops recording them (**since 07.11: this computer's whole session folder, for everyone**; the leader/teammate cases below applied to 04.11 builds only):
   - solo: the whole session folder and its voice folder;
   - session leader in co-op: their own input rows, 60 Hz samples, survey answers and voice track (the shared game events stay, because teammates' files need them);
   - other players: while still in the room, a request goes to the session leader's computer, which deletes their `players/<key>/` folder and their voice track. After leaving the room (the usual case on the main menu) the game cannot reach the leader, so it shows a **participant code** (the first 8 characters of their player key, e.g. `ABCD-1234`) to give the researcher, who deletes `players/<key>/` (the folder name starts with the code) and the matching `player_<key>.wav` by hand.
@@ -16,13 +38,13 @@ A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engi
 ## Survey on the way out (04.11)
 
 - **MAIN MENU on the results screen asks about the NASA-TLX first** (also from settings opened there): **YES, FILL IT IN** opens the survey and then goes to the main menu (submitted or skipped); **NO, GO TO MAIN MENU** goes straight there; Esc stays on the results screen. Sessions that end before Level 6 no longer depend on players remembering the title-screen survey button. A session that already has a survey (for example after Level 6) is not asked again. The answers are saved with `"source": "leaving_session"`.
-- In co-op a player filling in the survey on the way out is not pulled into the next level the host starts, and stays connected until their answers have reached the session leader's computer.
+- In co-op a player filling in the survey on the way out is not pulled into the next level the host starts, and (04.11 builds) stayed connected until their answers had reached the session leader's computer; since 07.11 the answers are saved on the player's own computer.
 
 ## Playtest 02.11 update (0.9.3, network protocol 14)
 
 - **Reconnecting keeps everyone's departments.** Each computer has a stable player key (`user://player_key.txt`). If a player drops out during a level (or on the results screen), nobody else's departments change: the missing player's seat and departments wait for them, their crews keep working but get no new orders, and when they rejoin they get the same seat and departments back. Departments are re-split only when the next level starts, if the player has not come back. A new player who arrives mid-level waits for the next level instead of taking anyone's crews. In the lobby, joining and leaving re-split as before.
-- **One voice track per person.** Tracks are named after the player (`player_<key>.wav`), not the network connection, so a player who reconnects continues in the same track (the time they were away is silence). Before, every reconnect opened a new track as long as the whole session.
-- **Only the session leader's computer stores study files.** The leader is the LAN host, or on the Azure server the first player in the room (they stay leader after a dropout; while they are away the next player stands in). The leader saves the game log, all voice tracks and its own input as before. Other players' games save nothing locally: their own mouse, clicks, keys, selections, 60 Hz samples and questionnaire answers are sent over the game connection (through the server) to the leader, into `research/<session>/players/<player key>/` with the same file names. Shared game events are recorded once, by the leader. Make sure the researcher's (most stable) computer joins the room first.
+- **One voice track per person.** (Since 07.11 each computer saves only its own player's voice, `<name>_voice.wav`.) Tracks are named after the player (`player_<key>.wav`), not the network connection, so a player who reconnects continues in the same track (the time they were away is silence). Before, every reconnect opened a new track as long as the whole session.
+- ~~**Only the session leader's computer stores study files.**~~ (Reverted after playtest 07.11: every player stores their own files again.) The leader is the LAN host, or on the Azure server the first player in the room (they stay leader after a dropout; while they are away the next player stands in). The leader saves the game log, all voice tracks and its own input as before. Other players' games save nothing locally: their own mouse, clicks, keys, selections, 60 Hz samples and questionnaire answers are sent over the game connection (through the server) to the leader, into `research/<session>/players/<player key>/` with the same file names. Shared game events are recorded once, by the leader. Make sure the researcher's (most stable) computer joins the room first.
 - **Teammates' crew status is hidden.** Their crew cards in the bottom bar say TEAMMATE instead of READY / EN ROUTE / ON SCENE, their stations on the map show no free-crew count, and on call cards their crews are listed without a state. Their vehicles still drive on the map.
 - **No upload to the Azure server** any more (removed with `tools/download_research.*`). The server stores nothing.
 
@@ -42,7 +64,7 @@ A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engi
 - **Consent once per session.** Recording and voice are asked at the first level only; one continuous capture per level, even when a guest's clock is corrected by the host (`clock_correction` rows, logged clock never goes back).
 - **Microphone check** after enabling voice at level entry, plus an input meter in Settings → Sounds.
 - **Study PC check:** Settings → Research → **CHECK THIS STUDY PC**. Five-second test of window size, scaling, frame rate, microphone and recording, with OK / CHECK / FIX lines; saved to `research/pc_checks/`. During play a `display` row (fps, window, scaling) is logged every 10 s.
-- **NASA-TLX (raw):** opens after the last level (Level 6, won or lost) and from **SURVEY · NASA-TLX** on the title screen. Saved to `research/<session>/questionnaires/`.
+- **NASA-TLX (raw):** opens after the last level (Level 6, won or lost) and from **SURVEY · NASA-TLX** on the title screen. Saved to `research/<session>/questionnaires/` (since 07.11: `<name>_nasa-tlx.json` in the session folder).
 - ~~Automatic upload to the study server~~ (removed 02.11: only the session leader's computer stores files).
 - **Fullscreen in the editor:** Godot 4.4+ runs the game inside the editor's Game tab, where fullscreen cannot work and the game looks small. Untick **Embed Game on Next Play** in the Game tab's ⋮ menu (or Editor Settings → Run → Window Placement → Game Embed Mode = Disabled). Exported builds are not affected.
 
@@ -103,7 +125,7 @@ The old slow zones (school crossing, harbor deliveries, market queues, bridge wo
 - **Every department has the same number of crews** (playtest 15.10: every player must carry the same load for the data): **4 each in every level** (playtest 19.10; before, levels 1–3 had 3). The last three levels have more calls at once (up to 7, 8 in the finale), calls come more often (every 11.8 / 11.4 / 10.8 s on average) and the rescue goals are 104 / 108 / 116. **Level 1 has no road events** (it's for learning the basics). Tested with simulated four-player teams: decent teams win every level with 1–2 stars on levels 4–6; a slow team wins levels 1–4 and usually loses 5–6. With the fourth crew, levels 1–3 got slightly easier for a slow team (level 3: 99/78 rescued instead of 81/78).
 - **Multiplayer route fix (playtest 19.10):** when a teammate sends a crew, every screen now draws that crew's new route from the crew to the call. Before, guests drew it from the crew's previous trip, which looked like a triangle back to the station. The dispatch event now carries the route (it is not written to research logs).
 - **Calls spread over the whole town:** 11 new sites in the south and east (59 in total), and calls pick one of nine districts evenly before picking a site. Over all six shifts with a bot: 40 calls in the north third, 70 in the middle, 52 in the south.
-- **Shifts end early** once the last scheduled call has arrived, every road event has happened, no call is open and no crew is still out ("Every call handled • shift complete"). Calls keep arriving until about 4:45, so this saves up to ~40 s.
+- ~~**Shifts end early**~~ once the last scheduled call has arrived and nothing is open (removed after playtest 07.11: every level now runs its full time).
 - Disruption texts no longer promise slower travel (only road events slow traffic now).
 
 ## Levels 3-6: a map and a hazard each (Oct 2026)
@@ -159,11 +181,10 @@ Use **Settings → Research** (voice chat itself is under Settings → Sounds). 
 | Setting | Effect |
 | --- | --- |
 | Voice chat | Keeps the microphone open until disabled, including in menus. Starts off each launch. |
-| Allow team recording | Allows the session leader's computer to include your transmitted voice in its files. |
-| Save team voice | On the session leader's computer (or solo): one aligned WAV per speaker, with consenting teammates, in a single session folder across levels and retries. |
-| Record my mouse | Records your own in-game movements, every mouse button press/release and wheel input. Solo/leader: a local JSONL file. Other players: sent to the session leader's computer. |
+| Save my voice | Your own microphone during levels, saved in the session folder (`<name>_voice/<name>_voice.wav`). Teammates' voices are not saved on your computer. |
+| Record gameplay & mouse | Records the game events and your own movements, mouse buttons and wheel input on this computer. |
 
-**Open recordings** opens the game data folder. Mouse/game logs are under `research/`; audio and its timing sidecar are under `research/voice/`. In co-op only the session leader's computer saves files; teammates' own input arrives there under `research/<session>/players/<player key>/`. Nothing is stored on the Azure server: it relays voice and study data but does not record. Only speech sent using in-game voice is captured; Discord/Teams calls and system audio are not included. Teammates' mouse input is stored on your computer only if you are the session leader.
+**Open my study files** opens `research/` in the game data folder (Windows: `%APPDATA%\Godot\app_userdata\Beacon Bay\research`). Each session is one folder named `<date>_<time>_<name>` with everything about this player in it (see the 07.11 section above and the READ ME file inside); players send that folder to the researcher. Nothing is stored on the Azure server: it relays voice but does not record. Only speech sent using in-game voice is captured; Discord/Teams calls and system audio are not included. Older builds wrote `research/<session>/levels/` and `research/voice/`.
 
 Level 0 can be recorded with consent; the separate legacy guided tutorial is excluded. Every level attempt has a unique ID and a separate mouse/event JSONL file, plus one authoritative session timeline. Events include scheduled/actual starts, ends, responsible crew, and resolved, expired, handed-off or unfinished outcomes. Abandoned or partially observed events are marked explicitly. Consent gaps and late joins are recorded without inventing missing outcomes. See [recording format and playback](docs/RECORDING_FORMAT.md).
 
@@ -179,7 +200,7 @@ The game contains no classifier, workload model, adaptive assistance or required
 
 ## Build and verification
 
-This build uses network protocol **14** (02.11: player keys, reserved departments, study data relayed to the session leader; 5 ENet channels). All co-op clients and the server must use the same build; redeploy the Azure server.
+This build uses network protocol **15** (09.11: study data stored on each player's computer, no relay; 4 ENet channels. 14: player keys, reserved departments). All co-op clients and the server must use the same build; redeploy the Azure server.
 
 Run `powershell -ExecutionPolicy Bypass -File tools/package.ps1` on Windows; pass `-GodotConsole` and `-GodotGui` for other engine paths. It builds the Windows portable package, Linux-server resource pack and clean source ZIP under `artifacts/`. The portable build includes the official Godot runtime because export templates were unavailable locally; its license texts are in `licenses/`.
 
@@ -202,7 +223,8 @@ godot --headless --path . --script tests/test_nasa_tlx.gd
 godot --headless --path . --script tests/test_sample_stream.gd
 godot --headless --path . --script tests/test_pc_check.gd
 godot --headless --path . --script tests/test_reconnect_roles.gd
-godot --headless --path . --script tests/test_leader_storage.gd
+godot --headless --path . --script tests/test_local_storage.gd
+godot --headless --path . --script tests/test_level_full_time.gd
 godot --headless --path . --script tests/test_leave_survey.gd
 godot --headless --path . --script tests/test_study_consent.gd
 godot --headless --path . --script tests/test_role_assignment.gd
@@ -218,7 +240,7 @@ godot --headless --path . --script tests/test_session_lifecycle.gd
 godot --headless --path . --script tests/test_snapshot_transport.gd
 python tests/run_voice_tests.py --godot /path/to/godot
 python tests/run_main_network_tests.py --godot /path/to/godot
-python tests/run_leader_storage_tests.py --godot /path/to/godot
+python tests/run_coop_storage_tests.py --godot /path/to/godot
 python tests/run_main_network_tests.py --briefings --godot /path/to/godot
 ```
 

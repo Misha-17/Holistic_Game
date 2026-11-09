@@ -4,7 +4,7 @@ extends SceneTree
 # drop and rejoin reshuffled everyone's departments. Now a player is recognised
 # by a key stored on their computer; while roles are locked (outside the
 # lobby) their departments wait for them and nobody else's change. The session
-# leader stays the same player. Also checks the study-data relay to the leader.
+# leader stays the same player.
 # Real ENet on localhost: a dedicated server and four clients.
 # Run: godot --headless --path . -s tests/test_reconnect_roles.gd
 
@@ -123,34 +123,13 @@ func run() -> void:
 	check(server.rebalance_roles() and server.team_size == 4, "the next level includes the newcomer")
 	check(not server.departments_for(newcomer.multiplayer.get_unique_id()).is_empty(), "the newcomer now has a department")
 
-	# Study data from a teammate reaches the leader through the server.
-	var received: Array = []
-	leader_back.research_relay_received.connect(func(key, rel, data, mode): received.append([key, rel, data.get_string_from_utf8(), mode]))
-	var line := '{"event":"mouse_motion","x":3}\n'
-	check(await wait_until(func(): return back.relay_ready()), "a teammate can relay to the leader")
-	check(not leader_back.relay_ready(), "the leader does not relay to itself")
-	check(back.send_research("levels/run1_events.jsonl", line.to_utf8_buffer(), "append"), "relay accepted")
-	check(not back.send_research("../escape.jsonl", line.to_utf8_buffer(), "append"), "unsafe paths are refused")
-	check(await wait_until(func(): return received.size() == 1), "the leader receives it")
-	if received.size() == 1:
-		check(received[0][0] == keys[2] and received[0][1] == "levels/run1_events.jsonl" and received[0][2] == line and received[0][3] == "append", "with the sender's player key, path and bytes")
-	# 4.11: a study withdrawal travels the same way.
-	check(back.send_research("withdrawal.json", "{}".to_utf8_buffer(), "withdraw"), "withdrawal request accepted")
-	check(not back.send_research("withdrawal.json", "{}".to_utf8_buffer(), "erase_everything"), "unknown modes are refused")
-	check(await wait_until(func(): return received.size() == 2), "the leader receives the withdrawal")
-	if received.size() == 2: check(received[1][0] == keys[2] and received[1][3] == "withdraw", "as a withdrawal from that player")
-
-	# LAN: the host is the leader and receives relayed data directly.
+	# LAN: the host is the session leader.
 	var host := make_peer("lan_host")
 	host.port = LAN_PORT
 	host.local_player_key = "ffff0000ffff0006"
 	check(host.host(false) == OK, "LAN host starts")
 	var guest := await join("abab0000abab0007", "G", LAN_PORT)
 	check(host.is_leader() and not guest.is_leader(), "the LAN host is the leader")
-	var lan_received: Array = []
-	host.research_relay_received.connect(func(key, rel, _data, _mode): lan_received.append([key, rel]))
-	check(guest.send_research("questionnaires/nasa_tlx_1.json", "{}".to_utf8_buffer(), "replace"), "LAN guest relays")
-	check(await wait_until(func(): return lan_received.size() == 1), "the LAN host receives it")
 
 	for net in [guest, host, newcomer, refused, leader_back, back, server] + clients: net.close()
 	await create_timer(0.1).timeout
@@ -158,5 +137,5 @@ func run() -> void:
 		set_multiplayer(null, branch.get_path())
 		branch.queue_free()
 	await process_frame
-	if failures.is_empty(): print("PASS: dropouts keep everyone's departments and seat, the leader stays the leader, new arrivals wait, study data reaches the leader")
+	if failures.is_empty(): print("PASS: dropouts keep everyone's departments and seat, the leader stays the leader, new arrivals wait")
 	quit(0 if failures.is_empty() else 1)

@@ -36,9 +36,10 @@ func button_ids() -> Array:
 
 func surveys(session: String) -> Array[String]:
 	var found: Array[String] = []
-	var folder := "user://research/%s/questionnaires" % session
+	var folder := "user://research/%s" % session
 	if DirAccess.dir_exists_absolute(folder):
-		for name in DirAccess.get_files_at(folder): found.append(folder.path_join(name))
+		for name in DirAccess.get_files_at(folder):
+			if name.contains("_nasa-tlx"): found.append(folder.path_join(name))
 	return found
 
 func esc() -> void:

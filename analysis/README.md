@@ -6,7 +6,8 @@ metrics the client asked for (feedback 01.11). They are not part of the game.
 ```bash
 pip install pandas numpy matplotlib statsmodels tabulate
 python analysis/run_analysis.py \
-  --level research/<session>/levels/<level_run_id>_events.jsonl   # one per player and level
+  --level research/<date>_<time>_<name>/<name>_level-<N>_events.jsonl   # one per player and level
+  # (older builds: research/<session>/levels/<level_run_id>_events.jsonl)
   --voice research/voice/team_<session>_<id>                       # optional, any recorder folders
   --dywa  study_responses/<file>.json                              # optional, from study/questionnaires
   --out   analysis_out

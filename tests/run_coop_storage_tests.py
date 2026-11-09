@@ -1,8 +1,9 @@
-"""Two real players on a dedicated server (playtest 2.11): only the session
-leader stores study files, the other player drops out and rejoins mid-level
-without anyone's departments changing, and their input ends up on the leader.
+"""Two real players on a dedicated server: the second player drops out and
+rejoins mid-level without anyone's departments changing (playtest 2.11), and
+each player stores their own study files locally in a date_time_name folder
+with descriptive names (playtest 07.11).
 
-Run: python tests/run_leader_storage_tests.py --godot /path/to/godot
+Run: python tests/run_coop_storage_tests.py --godot /path/to/godot
 No microphone is opened. Temporary files are isolated per run under .tools/.
 """
 from __future__ import annotations
@@ -22,7 +23,7 @@ def main() -> int:
     if not 1024 <= args.port <= 65535:
         parser.error("port must be between 1024 and 65535")
     root = Path(__file__).resolve().parents[1]
-    output = root / ".tools" / f"leader-storage-{time.time_ns()}"
+    output = root / ".tools" / f"coop-storage-{time.time_ns()}"
     output.mkdir(parents=True)
     hidden = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     processes = []
@@ -36,7 +37,7 @@ def main() -> int:
         env["XDG_DATA_HOME"] = str(local_user)
         log = (output / f"{label}.log").open("w", encoding="utf-8")
         command = [args.godot, "--headless", "--path", str(root), "--script",
-                   "res://tests/test_leader_storage_peer.gd", "--",
+                   "res://tests/test_coop_storage_peer.gd", "--",
                    f"--port={args.port}", f"--qa-dir={output}", *extra]
         process = subprocess.Popen(command, cwd=root, env=env, stdout=log,
                                    stderr=subprocess.STDOUT, creationflags=hidden)
@@ -68,8 +69,8 @@ def main() -> int:
                 failures.append(path.stem + " engine error")
             if any(token in line for token in ["PASS:", "FAIL:", "SCRIPT ERROR", "ERROR:"]):
                 print(path.name, line)
-    print("Leader storage logs:", output)
-    print("LEADER STORAGE SUITE:", "PASS" if not failures else "FAIL: " + ", ".join(failures))
+    print("Co-op storage logs:", output)
+    print("COOP STORAGE SUITE:", "PASS" if not failures else "FAIL: " + ", ".join(failures))
     return int(bool(failures))
 
 

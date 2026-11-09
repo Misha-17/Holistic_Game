@@ -59,7 +59,7 @@ func _test_stream() -> void:
 	game._process_events()
 	check(game.research.sampler != null and game.research.sampler.is_running(), "The sampler starts with the level")
 	var samples_path: String = game.research.get_level_context().get("samples_path", "")
-	check(samples_path.ends_with("_samples_60hz.csv"), "The manifest names the level's sample file")
+	check(samples_path.ends_with("_mouse-and-taskload-60hz.csv"), "The manifest names the level's sample file")
 	game.research.sampler.set_test_cursor(Vector2(300, 200))
 	var started := Time.get_ticks_msec()
 	var first_unit := -1

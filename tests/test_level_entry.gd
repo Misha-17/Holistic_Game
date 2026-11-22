@@ -47,7 +47,7 @@ func run() -> void:
 	check(fake_voice.mic_enabled and game.entry_popup == "voice" and game.screen == "game", "Enable voice starts the microphone check")
 	check(fake_voice.mic_check_result().verdict in ["no_signal", "waiting"], "No speech yet is not a passed check")
 	game._action("entry_voice_settings")
-	check(game.screen == "settings" and game.settings_tab == "sounds", "Sound settings open from the microphone check")
+	check(game.screen == "settings" and game.settings_tab == "devices", "CHOOSE MICROPHONE opens Settings > Devices from the microphone check")
 	check(game.previous_screen == "game" and game.entry_popup == "voice" and not game._simulation_active(), "Settings retain the pending check and paused clock")
 	check_paused(game, "Preparation Sounds settings")
 	game._action("settings_back")

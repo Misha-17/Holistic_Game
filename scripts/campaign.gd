@@ -419,7 +419,7 @@ static func upgrades() -> Array[Dictionary]:
 		{"id": "radio", "name": "Clear signal", "description": "Every new call gets 7 extra seconds per level.", "cost": 70, "max_level": 2, "icon": "radio", "kind": "support"},
 		{"id": "supplies", "name": "Ready supplies", "description": "Carry one more supply; deliveries arrive 5 seconds sooner.", "cost": 60, "max_level": 3, "icon": "box", "kind": "support"},
 		{"id": "rest", "name": "Good coffee", "description": "Crews recover sooner and tire 35% less per level.", "cost": 55, "max_level": 2, "icon": "coffee", "kind": "team"},
-		{"id": "rally", "name": "Town spirit", "description": "The coffee boost recharges 15 seconds sooner per level.", "cost": 85, "max_level": 2, "icon": "star", "kind": "support"},
+		{"id": "rally", "name": "Town spirit", "description": "The speed boost recharges 15 seconds sooner per level.", "cost": 85, "max_level": 2, "icon": "star", "kind": "support"},
 		{"id": "scouting", "name": "Local knowledge", "description": "The scout team is ready 2.5 seconds sooner per level.", "cost": 60, "max_level": 2, "icon": "eye", "kind": "team"}
 	]
 

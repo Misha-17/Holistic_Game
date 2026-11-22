@@ -341,6 +341,21 @@ func play_cue(cue_name: String, pitch: float = 1.0) -> void:
 	player.play()
 
 
+# Settings → Devices "PLAY TEST SOUND" (22.11): plays even when Sound effects
+# are off, so players can check that the chosen headset or speakers work. The
+# Game sound volume slider still applies.
+func play_test_sound() -> void:
+	if _pool.is_empty() or not _cues.has("rescue"): return
+	var player: AudioStreamPlayer = _pool[_pool_cursor]
+	_pool_cursor = (_pool_cursor + 1) % _pool.size()
+	player.stop()
+	player.stream = _cues["rescue"]
+	player.pitch_scale = 1.0
+	_apply_sound_level(player, "rescue", 0.0)
+	if player.volume_linear <= 0.0: player.volume_linear = db_to_linear(-12.0) # Game sound at 0 would make the test silent
+	player.play()
+
+
 func set_music_enabled(enabled: bool) -> void:
 	music_enabled = enabled
 	if enabled and _music_wanted and is_instance_valid(_music) and not _music.playing:

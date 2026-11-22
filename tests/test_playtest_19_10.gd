@@ -92,11 +92,11 @@ func test_results_settings() -> void:
 	game.network.roster = {}
 
 func test_settings_tabs_and_layout() -> void:
-	# Settings are grouped into three tabs; the volume sliders show only on Sounds.
+	# Settings are grouped into four tabs (Devices since 22.11); the volume sliders show only on Sounds.
 	check(game.settings_tab == "sounds", "Settings open on the Sounds tab")
 	game.screen = "settings"
 	game.previous_screen = "results"
-	for tab in ["sounds", "video", "research"]:
+	for tab in ["sounds", "devices", "video", "research"]:
 		game._action("settings_tab:" + tab)
 		game._update_visibility()
 		check(game.settings_tab == tab, "Tab %s opens" % tab)

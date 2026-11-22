@@ -70,6 +70,7 @@ var screen := "title"
 var previous_screen := "game"
 var settings_tab := "sounds"
 var sound_settings: Control
+var device_pickers: Control # Settings → Devices dropdowns (22.11)
 # NASA-TLX (Andrei, 30.10): asked once after the last level of a play session
 # (level 6, won or lost) and available from the title screen, for sessions that
 # end early. One survey per session, not per level.
@@ -1100,12 +1101,12 @@ func _draw_entry_popup() -> void:
 			"good": ["Good level (%s). Your team will hear you clearly." % level_text, TEAL],
 			"too_quiet": ["Too quiet (%s). Move the microphone closer, or raise its level in Windows: Settings > System > Sound > Input." % level_text, CORAL],
 			"too_loud": ["Too loud: your voice is clipping. Lower the input level in Windows sound settings.", CORAL],
-			"no_signal": ["No sound from the microphone. Check the input device in Windows sound settings and that apps may use the microphone.", CORAL],
+			"no_signal": ["No sound from the microphone. Pick another microphone in Settings > Devices, and check that apps may use the microphone.", CORAL],
 			"microphone_off": ["The microphone is off.", MUTED]}
 		var line: Array = lines.get(verdict, lines.waiting)
 		_wrap(str(line[0]), Vector2(382, 488), 670, 17, line[1], 25)
 		_wrap("Use headphones so teammates don't hear themselves. Voice stays on until you switch it off in Settings > Sounds.", Vector2(382, 560), 670, 15, MUTED, 22)
-		_button("entry_voice_settings", "SOUND SETTINGS", Rect2(382, 600, 326, 44), PANEL_LIGHT, CREAM, 14)
+		_button("entry_voice_settings", "CHOOSE MICROPHONE", Rect2(382, 600, 326, 44), PANEL_LIGHT, CREAM, 14)
 		_button("entry_voice_done", "CONTINUE" if verdict == "good" else "CONTINUE ANYWAY", Rect2(724, 600, 326, 44), TEAL if verdict == "good" else PANEL_LIGHT, INK if verdict == "good" else CREAM, 14)
 	elif entry_popup == "voice":
 		_text("TEAM VOICE CHECK", Vector2(382, 276), 14, TEAL)
@@ -1146,6 +1147,7 @@ func _ready() -> void:
 		_start_dedicated_server()
 		return
 	get_window().title = "Beacon Bay " + str(ProjectSettings.get_setting("application/config/version", ""))
+	DeviceSettings.load_and_apply() # Settings → Devices (22.11)
 	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 	get_tree().auto_accept_quit = false
 	Input.use_accumulated_input = false
@@ -1233,6 +1235,11 @@ func _ready() -> void:
 	add_child(sound_settings)
 	sound_settings.build(audio, network)
 	sound_settings.visible = false
+	device_pickers = preload("res://scripts/device_pickers.gd").new()
+	add_child(device_pickers)
+	device_pickers.build(_device_rows())
+	device_pickers.device_chosen.connect(_on_device_chosen)
+	device_pickers.visible = false
 	tlx_form = preload("res://scripts/nasa_tlx_form.gd").new()
 	add_child(tlx_form)
 	tlx_form.build()
@@ -1508,6 +1515,9 @@ func _update_visibility() -> void:
 	ip_input.visible = screen == "lobby" and not network.active
 	name_input.visible = ip_input.visible
 	sound_settings.visible = screen == "settings" and settings_tab == "sounds"
+	var show_devices: bool = screen == "settings" and settings_tab == "devices"
+	if show_devices and not device_pickers.visible: device_pickers.refresh() # new headset plugged in meanwhile
+	device_pickers.visible = show_devices
 	if tlx_form != null: tlx_form.visible = screen == "tlx"
 
 func _draw_all(canvas: CanvasItem) -> void:
@@ -1613,7 +1623,7 @@ func _draw_game() -> void:
 	var boost := Rect2(x, 14, 136, 40)
 	var boost_ready: bool = sim.special_cooldown <= 0
 	_button("special", "", boost, Color(PANEL_LIGHT, 0.85) if boost_ready else Color(PANEL, 0.6), GOLD)
-	var label: String = "COFFEE BOOST"
+	var label: String = "SPEED BOOST"
 	var lw: float = font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
 	_text(label, boost.position + Vector2((boost.size.x - lw) / 2, 19), 14, GOLD if boost_ready else MUTED)
 	var sub: String = "SPACE" if boost_ready else "ready in %ds" % ceili(sim.special_cooldown)
@@ -2231,9 +2241,10 @@ func _refresh_voice_mix() -> void:
 		var key := "voice_player_%d" % (int(network.roster[peer]) + 1)
 		voice.peer_playback_gains[int(peer)] = AudioDirector.slider_gain(audio.sound_level(key))
 
-# Settings in three tabs (reorganized 19.10): Sounds, Video, Research.
+# Settings in four tabs (reorganized 19.10; Devices added 22.11): Sounds,
+# Devices, Video, Research.
 # Two columns of 620 px centred on the screen (x 80-700 and 740-1360).
-const SETTINGS_TABS := [["sounds", "Sounds"], ["video", "Video"], ["research", "Research"]]
+const SETTINGS_TABS := [["sounds", "Sounds"], ["devices", "Devices"], ["video", "Video"], ["research", "Research"]]
 const SETTINGS_COL := [80.0, 740.0]
 const SETTINGS_TOP := 258.0
 const SETTINGS_CARD := Vector2(620, 88)
@@ -2256,6 +2267,42 @@ func _settings_note(lines: Array, column: int, y: float, height: float) -> void:
 	for line: Array in lines:
 		# Next paragraph: one line height (24) plus a 14 px gap below this one.
 		line_y = _wrap(str(line[0]), Vector2(rect.position.x + 20, line_y), rect.size.x - 40, int(line[1]), line[2], 24) + 38
+
+# Settings → Devices (22.11): y of each card in the left column. The cards are
+# drawn here; the dropdown lists on them are real controls (device_pickers.gd).
+func _device_rows() -> Dictionary:
+	var out_y: float = SETTINGS_TOP + SETTINGS_STEP + 70
+	return {"input": SETTINGS_TOP, "output": out_y, "monitor": out_y + SETTINGS_STEP + 92}
+
+func _device_frame(title: String, y: float) -> void:
+	var rect := Rect2(Vector2(SETTINGS_COL[0], y), SETTINGS_CARD)
+	_panel(rect, PANEL)
+	_text(title, rect.position + Vector2(20, 30), 19, CREAM)
+
+func _draw_devices_tab(y: float) -> void:
+	var rows := _device_rows()
+	_settings_heading("MICROPHONE", 0, rows.input)
+	_device_frame("Microphone", rows.input)
+	var meter_y: float = rows.input + SETTINGS_CARD.y + 12
+	if voice.mic_enabled:
+		_text("Speak: the bar should pass the white line", Vector2(SETTINGS_COL[0], meter_y + 12), 12, TEAL)
+		_draw_mic_meter(Rect2(SETTINGS_COL[0], meter_y + 22, SETTINGS_CARD.x, 16))
+	else:
+		_wrap("Turn on Voice chat (Sounds tab) to test the microphone here.", Vector2(SETTINGS_COL[0], meter_y + 18), SETTINGS_CARD.x, 14, MUTED, 20)
+	_settings_heading("HEADSET / SPEAKERS", 0, rows.output)
+	_device_frame("Sound output", rows.output)
+	_button("device_test_sound", "PLAY TEST SOUND", Rect2(SETTINGS_COL[0], rows.output + SETTINGS_CARD.y + 10, SETTINGS_CARD.x, 44), PANEL_LIGHT, CREAM, 14)
+	_settings_heading("MONITOR", 0, rows.monitor)
+	_device_frame("Monitor", rows.monitor)
+	if Engine.is_embedded_in_editor():
+		_text("Not available inside the Godot editor's Game tab", Vector2(SETTINGS_COL[0] + 200, rows.monitor + 30), 13, MUTED)
+	elif DeviceSettings.monitor_count() < 2:
+		_text("Only one monitor is connected", Vector2(SETTINGS_COL[0] + 200, rows.monitor + 30), 13, MUTED)
+	_settings_heading("HOW IT WORKS", 1, y)
+	_settings_note([["Click a list to see the devices this computer has, then pick one.", 16, CREAM],
+		["\"Default\" follows the device chosen in your computer's own sound settings (on Windows: Settings > System > Sound).", 15, MUTED],
+		["Plug in a headset before opening this page, or it may not be in the list. If a chosen device is unplugged, the game goes back to the default.", 15, MUTED],
+		["Your choices are saved on this computer and used again next time.", 15, MUTED]], 1, y, rows.monitor + SETTINGS_CARD.y - y)
 
 func _draw_settings() -> void:
 	_draw_page_header("", "SETTINGS")
@@ -2307,6 +2354,8 @@ func _draw_settings() -> void:
 				_text("Last check: " + {"pass": "ready", "warn": "ready, with notes", "fail": "needs fixes"}.get(str(pc_check.overall), ""), Vector2(SETTINGS_COL[0], check_y + 82), 14, _pc_color(str(pc_check.overall)))
 		"pc_check":
 			_draw_pc_check()
+		"devices":
+			_draw_devices_tab(y)
 		_:
 			_settings_heading("GAME AUDIO", 0, y)
 			_settings_card("music", "Music", "Background soundtrack", music_enabled, 0, y)
@@ -2680,7 +2729,7 @@ func _action(id: String) -> void:
 	if id == "entry_voice_settings":
 		previous_screen = "game"
 		screen = "settings"
-		settings_tab = "sounds"
+		settings_tab = "devices"
 		_update_visibility()
 		return
 	if id == "collection_yes" or id == "collection_no":
@@ -2699,6 +2748,9 @@ func _action(id: String) -> void:
 	if id.begins_with("settings_tab:"):
 		settings_tab = id.trim_prefix("settings_tab:")
 		_update_visibility()
+		return
+	if id == "device_test_sound":
+		audio.play_test_sound()
 		return
 	if id=="tutorial_skip":
 		_end_tutorial(false)
@@ -3525,6 +3577,15 @@ func _restore_guest_progress() -> void:
 		guest_progress.clear()
 	if is_instance_valid(audio): audio.reset_session(sim.incidents)
 
+# Settings → Devices: a dropdown list changed (device_pickers.gd).
+func _on_device_chosen(kind: String, label: String) -> void:
+	match kind:
+		"input": _toast("Microphone: " + label)
+		"output":
+			_toast("Sound output: " + label)
+			audio.play_test_sound()
+		"monitor": _toast("Monitor: " + label)
+
 func _toggle_fullscreen() -> void:
 	if Engine.is_embedded_in_editor():
 		_toast("Fullscreen is not available while the game runs inside the Godot editor. In the Game tab's ⋮ menu, untick \"Embed Game on Next Play\".")
@@ -3645,7 +3706,7 @@ func _call_status(call: Dictionary) -> String:
 	return "CREWS EN ROUTE"
 
 func _boost_text() -> String:
-	return "COFFEE BOOST" if sim.special_cooldown<=0 else "COFFEE BOOST %ds"%ceili(sim.special_cooldown)
+	return "SPEED BOOST" if sim.special_cooldown<=0 else "SPEED BOOST %ds"%ceili(sim.special_cooldown)
 
 func _toast(message: String) -> void:
 	if dedicated_server:

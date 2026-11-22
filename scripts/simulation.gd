@@ -470,7 +470,7 @@ func use_special() -> bool:
 		if _is_active(incident):
 			incident.deadline = maxf(float(incident.deadline), minf(float(incident.max_deadline) + 16.0, float(incident.deadline) + 8.0))
 	reputation = minf(100.0, reputation + 3.0)
-	_emit("rally", "Coffee boost! • every crew moves and works faster for 20 seconds")
+	_emit("rally", "Speed boost! • every crew drives and works faster for 20 s, open calls get up to 8 s more")
 	return true
 
 func buy_upgrade(_id: String) -> bool:
@@ -1445,7 +1445,7 @@ func _tick_unit(unit: Dictionary, delta: float) -> void:
 					call.discovered = true
 					_emit("field_report", "%s confirms the response teams needed at %s" % [unit.crew_name, call.name], {"incident_id": call.id, "pos": call.pos})
 	elif unit.state == "clearing":
-		# The coffee boost speeds clearing like any other work.
+		# The speed boost speeds clearing like any other work.
 		var rate: float = 1.5 if special_duration > 0.0 else 1.0
 		unit.remaining = maxf(0.0, float(unit.remaining) - delta * rate)
 		unit.work_elapsed = float(unit.get("work_elapsed", 0.0)) + delta

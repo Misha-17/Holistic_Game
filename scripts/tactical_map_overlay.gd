@@ -6,6 +6,11 @@ extends Node2D
 signal unit_selected(id: int)
 signal incident_selected(id: int)
 signal dispatch_requested()
+signal road_event_selected(id: int)
+signal scout_requested(id: int)
+signal close_requested()
+## A WITHDRAW button on a call card was clicked (Andrei, 30.10).
+signal withdraw_requested(unit_id: int)
 
 const INK := Color("142e3b")
 const PANEL := Color("183c46")
@@ -24,18 +29,24 @@ var selected_id: int = -1
 var selected_unit_id: int = -1
 var tutorial_active: bool = false
 var occlusions: Array[Rect2] = []
-var map_rect := Rect2(24, 146, 1064, 632)
+var map_rect := Rect2(Vector2(56, 34), BeaconCampaign.MAP_SIZE * 1.5)
 # The part of the map that is actually visible; markers are kept inside it.
-var view_rect := Rect2(24, 146, 1064, 632)
+var view_rect := Rect2(Vector2(56, 34), BeaconCampaign.MAP_SIZE * 1.5)
 # Co-op: which player commands the departments you don't (kind -> "P2").
 var owner_labels: Dictionary = {}
 var reduced_motion: bool = false
 var hovered_incident_id: int = -1
+## A call closed with Esc/CLOSE while the mouse is still on it: no hover
+## preview for it until the mouse leaves (Andrei, 30.10: Esc seemed not to close it).
+var dismissed_incident_id: int = -1
 var hovered_unit_id: int = -1
+var hovered_road_id: int = -1
 var hovered_base_kind: String = ""
 var role_filter: String = ""
 var focused_unit_id: int = -1
 var dispatch_enabled: bool = true
+## Off during the practice tutorial (same rule as the V key).
+var withdraw_enabled: bool = true
 # Departments this player commands. Other departments stay visible but are drawn dimmer.
 var owned_kinds: Array = ["fire", "medic", "engineer", "police"]
 
@@ -43,6 +54,7 @@ var _calls: Array[Dictionary] = []
 var _crews: Array[Dictionary] = []
 var _stations: Array[Dictionary] = []
 var _roads: Array[Dictionary] = []
+var _road_areas: Array[Dictionary] = []
 var _hits: Array[Dictionary] = []
 var _occupied: Array[Rect2] = []
 var _options: Array = []
@@ -108,6 +120,7 @@ func _follow_moving_crews() -> void:
 		var unit: Dictionary = _unit(int(item.unit.id))
 		if unit.is_empty(): continue
 		var point: Vector2 = _world(unit.pos)
+		if not view_rect.has_point(point): continue
 		var marker := Rect2(point - Vector2(15, 15), Vector2(30, 30))
 		item.unit = unit
 		item.point = point
@@ -116,6 +129,13 @@ func _follow_moving_crews() -> void:
 		if item.has("hit"): item.hit.rect = marker.grow(8)
 
 func refresh() -> void:
+	_refresh_layout()
+	queue_redraw()
+
+## Close a call's card for good: it is no longer selected and its hover
+## preview stays closed until the mouse moves off the call.
+func dismiss_call(id: int) -> void:
+	dismissed_incident_id = id if id >= 0 and id == hovered_incident_id else -1
 	_refresh_layout()
 	queue_redraw()
 
@@ -182,12 +202,24 @@ func _occluded(point: Vector2) -> bool:
 	return false
 
 func _hit_at(point: Vector2) -> Dictionary:
-	if not is_visible_in_tree() or sim == null or _occluded(point):
+	if not is_visible_in_tree() or sim == null or not view_rect.has_point(point) or _occluded(point):
 		return {}
+	# Moving vehicles drive over calls and stations; they must not steal a
+	# click meant for what's underneath (playtest 15.10). Order of preference:
+	# buttons, calls and stations first, then a moving vehicle, then the
+	# striped area of a closed road.
+	var vehicle: Dictionary = {}
+	var area: Dictionary = {}
 	for i in range(_hits.size() - 1, -1, -1):
-		if _hits[i].rect.has_point(point):
-			return _hits[i]
-	return {}
+		var hit: Dictionary = _hits[i]
+		if not hit.rect.has_point(point): continue
+		if bool(hit.get("area", false)):
+			if area.is_empty(): area = hit
+		elif hit.type == "unit":
+			if vehicle.is_empty(): vehicle = hit
+		else:
+			return hit
+	return vehicle if not vehicle.is_empty() else area
 
 func _update_hover(point: Vector2) -> void:
 	_pointer = point
@@ -216,7 +248,10 @@ func _update_hover(point: Vector2) -> void:
 			if int(item.incident.id) == hovered_incident_id and item.card.has_area() and item.rect.merge(item.card).grow(4).has_point(point):
 				next_call = hovered_incident_id
 	var next_unit: int = int(hit.get("id", -1)) if hit.get("type", "") == "unit" else -1
-	var changed: bool = hovered_incident_id != next_call or hovered_unit_id != next_unit or previous_key != next_key
+	var next_road: int = int(hit.get("id", -1)) if hit.get("type", "") == "road" else -1
+	var changed: bool = hovered_incident_id != next_call or hovered_unit_id != next_unit or previous_key != next_key or hovered_road_id != next_road
+	hovered_road_id = next_road
+	if next_call != dismissed_incident_id: dismissed_incident_id = -1
 	hovered_incident_id = next_call
 	hovered_unit_id = next_unit
 	if changed:
@@ -239,24 +274,37 @@ func handle_input(event: InputEvent) -> bool:
 			get_viewport().set_input_as_handled()
 			queue_redraw()
 			return true
-		Input.set_default_cursor_shape(Input.CURSOR_ARROW)
-	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-		var point: Vector2 = get_global_transform_with_canvas().affine_inverse() * event.position
-		var hit: Dictionary = _hit_at(point)
-		if not hit.is_empty():
-			get_viewport().set_input_as_handled()
-			match str(hit.type):
-				# The game decides: with a crew selected, clicking a call sends it there.
-				"call": incident_selected.emit(int(hit.id))
-				"unit": unit_selected.emit(int(hit.id))
-				"base":
-					var pick: int = _station_pick(str(hit.base_key))
-					if pick >= 0:
-						unit_selected.emit(pick)
-					elif not (hit.get("units", []) as Array).is_empty():
-						unit_selected.emit(int(hit.units[0]))
-			return true
+		# No target here: main.gd picks the cursor once for this event (hand over
+		# a building or button, arrow otherwise). Setting ARROW here first made
+		# the cursor flash arrow -> hand on every mouse move.
+	# Main owns the click-versus-drag gesture; activation is committed on release.
 	return false
+
+func pointer_target(screen_position: Vector2) -> Dictionary:
+	var point: Vector2 = get_global_transform_with_canvas().affine_inverse() * screen_position
+	return _hit_at(point).duplicate(true)
+
+func activate_target(hit: Dictionary) -> void:
+	if hit.is_empty() or not is_visible_in_tree() or sim == null: return
+	match str(hit.get("type", "")):
+		"call":
+			var call := _call(int(hit.id))
+			if not call.is_empty() and call.get("status", "") in ["active", "working"]:
+				incident_selected.emit(int(hit.id))
+		"unit":
+			if not _unit(int(hit.id)).is_empty(): unit_selected.emit(int(hit.id))
+		"road":
+			road_event_selected.emit(int(hit.id))
+		"scout":
+			scout_requested.emit(int(hit.id))
+		"close":
+			close_requested.emit()
+		"withdraw":
+			withdraw_requested.emit(int(hit.id))
+		"base":
+			var pick: int = _station_pick(str(hit.base_key))
+			if pick >= 0: unit_selected.emit(pick)
+			elif not (hit.get("units", []) as Array).is_empty(): unit_selected.emit(int(hit.units[0]))
 
 func _refresh_layout() -> void:
 	_calls.clear()
@@ -292,6 +340,7 @@ func _refresh_layout() -> void:
 				_selected_option = option
 		_preview = _selected_option
 		if not _preview.is_empty(): _preview_id = int(_preview.unit_id)
+	_reserve_road_areas()
 	var active: Array[Dictionary] = []
 	for incident in sim.incidents:
 		if incident.get("status", "") in ["active", "working"]:
@@ -300,6 +349,7 @@ func _refresh_layout() -> void:
 	for incident in active:
 		var id: int = int(incident.id)
 		var point: Vector2 = _world(incident.get("pos", Vector2.ZERO))
+		if not view_rect.has_point(point): continue
 		if _pin_origins.get(id, Vector2(INF, INF)) != point:
 			_pin_positions.erase(id)
 			_pin_origins[id] = point
@@ -312,7 +362,7 @@ func _refresh_layout() -> void:
 			_pin_positions[id] = footprint
 		pin = footprint.position + Vector2(34, 54)
 		var estimate: Dictionary = sim.incident_estimate(id) if sim.has_method("incident_estimate") else {}
-		_calls.append({"incident": incident, "point": point, "pin": pin, "rect": footprint, "card": Rect2(), "estimate": estimate, "expanded": id == selected_id or id == hovered_incident_id})
+		_calls.append({"incident": incident, "point": point, "pin": pin, "rect": footprint, "card": Rect2(), "estimate": estimate, "expanded": id == selected_id or (id == hovered_incident_id and id != dismissed_incident_id)})
 		_occupied.append(footprint.grow(5))
 		_hits.append({"rect": footprint, "type": "call", "id": id})
 	_layout_bases()
@@ -326,29 +376,130 @@ func _layout_call_cards() -> void:
 	for item in ordered:
 		if not item.expanded: continue
 		var size := Vector2(262, 82)
+		# The selected call lists every crew assigned to it, one row each, with a
+		# WITHDRAW button on the player's own crews (Andrei, 30.10: "it is not
+		# clear which units are on which scene").
+		var crews: Array = _crews_on_call(item.incident) if int(item.incident.id) == selected_id else []
+		item["crew_rows"] = crews
+		if not crews.is_empty(): size.y += 8 + CREW_ROW_H * crews.size()
 		var pin: Vector2 = item.pin
 		var choices: Array[Vector2] = [pin + Vector2(34, -26), pin + Vector2(-size.x - 34, -26), pin + Vector2(34, -size.y + 20), pin + Vector2(-size.x - 34, -size.y + 20), pin + Vector2(-size.x * .5, 48)]
 		var rect: Rect2 = _place_rect(choices, size)
 		item.card = rect
 		_occupied.append(rect.grow(6))
 		_hits.append({"rect": rect, "type": "call", "id": int(item.incident.id)})
+		# The clicked (selected) call's card has a CLOSE button (no need to know Esc).
+		if int(item.incident.id) == selected_id:
+			_hits.append({"rect": _close_button_rect(rect).grow(3), "type": "close", "id": int(item.incident.id)})
+		# Unconfirmed call: a real SCOUT button on its card (not only the Q key).
+		if not bool(item.incident.get("discovered", true)):
+			_hits.append({"rect": _scout_button_rect(rect), "type": "scout", "id": int(item.incident.id)})
+		for i in range((item.crew_rows as Array).size()):
+			var row: Dictionary = item.crew_rows[i]
+			if bool(row.can_withdraw):
+				_hits.append({"rect": _withdraw_button_rect(rect, i).grow(2), "type": "withdraw", "id": int(row.unit.id)})
 
-func _layout_roads() -> void:
+const CREW_ROW_H := 28.0
+
+# Crews assigned to a call (travelling there or working on it), own crews first.
+func _crews_on_call(incident: Dictionary) -> Array:
+	var rows: Array = []
+	for unit in sim.units:
+		if int(unit.get("target", -1)) != int(incident.id) or int(unit.get("clear_target", -1)) >= 0: continue
+		if str(unit.get("state", "")) not in ["travel", "working"]: continue
+		var own: bool = _owned(str(unit.kind))
+		rows.append({"unit": unit, "own": own, "can_withdraw": own and withdraw_enabled and sim.can_withdraw(int(unit.id))})
+	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.own and not b.own)
+	return rows
+
+func _crew_row_rect(card: Rect2, index: int) -> Rect2:
+	return Rect2(card.position + Vector2(8, 86 + CREW_ROW_H * index), Vector2(card.size.x - 16, CREW_ROW_H - 4))
+
+func _withdraw_button_rect(card: Rect2, index: int) -> Rect2:
+	var row := _crew_row_rect(card, index)
+	return Rect2(Vector2(row.end.x - 84, row.position.y + 1), Vector2(84, row.size.y - 2))
+
+func _close_button_rect(card: Rect2) -> Rect2:
+	return Rect2(card.end.x - 70, card.position.y + 6, 62, 20)
+
+func _scout_button_rect(card: Rect2) -> Rect2:
+	return Rect2(card.position + Vector2(8, 56), Vector2(118, 22))
+
+# Closed roads are collected before call pins. Pins are NOT pushed off the road:
+# when zoomed out that moved a call's marker a whole block away from its
+# building. The road stays clickable through its badge and label, which are
+# always on top (playtest 13.10: the road was hard to click).
+func _reserve_road_areas() -> void:
+	_road_areas.clear()
 	if not sim.has_method("road_conditions"):
 		return
 	for zone in sim.road_conditions():
-		var area := Rect2(_world(zone.get("position", Vector2.ZERO)), zone.get("size", Vector2.ZERO) * map_rect.size)
-		area = area.intersection(view_rect)
+		var full := Rect2(_world(zone.get("position", Vector2.ZERO)), zone.get("size", Vector2.ZERO) * map_rect.size)
+		var area: Rect2 = full.intersection(view_rect)
 		if area.size.x <= 0 or area.size.y <= 0:
 			continue
-		var speed: float = float(zone.get("speed_factor", 1.0))
-		var label: String = "%s · %d%% speed · %ds" % [zone.get("name", "Slow road"), roundi(speed * 100), ceili(float(zone.get("remaining", 0)))]
-		var width: float = minf(310, ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 26)
-		var size := Vector2(width, 24)
-		var choices: Array[Vector2] = [Vector2(area.position.x, area.position.y - 30), Vector2(area.position.x, area.end.y + 7), area.get_center() + Vector2(22, -38), Vector2(area.position.x - width - 8, area.get_center().y - 12), Vector2(area.end.x + 8, area.get_center().y - 12)]
+		_road_areas.append({"zone": zone, "area": area})
+
+func _layout_roads() -> void:
+	for reserved in _road_areas:
+		var zone: Dictionary = reserved.zone
+		var area: Rect2 = reserved.area
+		var road_id: int = int(zone.get("road_event_id", -1))
+		var road: Dictionary = sim.get_road_event(road_id) if road_id >= 0 and sim.has_method("get_road_event") else {}
+		var label: String = "%s · %ds" % [zone.get("name", "Slow traffic"), ceili(float(zone.get("remaining", 0)))]
+		var kind: String = str(road.get("clear_kind", ""))
+		if bool(road.get("hazard", false)):
+			_layout_hazard(road, area, zone)
+			continue
+		if not road.is_empty():
+			var who: String = str({"police": "POLICE", "engineer": "ENGINEERS", "fire": "FIRE", "medic": "MEDICS"}.get(kind, kind.to_upper()))
+			var crew: Dictionary = _unit(int(road.assigned_unit))
+			if str(road.status) == "clearing":
+				label = "%s CLEARING %s" % [str(crew.get("crew_name", "CREW")).to_upper(), str(road.street).to_upper()]
+			elif not crew.is_empty():
+				label = "%s ON THE WAY · %s" % [str(crew.get("crew_name", "CREW")).to_upper(), str(road.street).to_upper()]
+			else:
+				label = "%s · ONLY %s CAN CLEAR · %ds" % [str(road.name).to_upper(), who, ceili(float(zone.get("remaining", 0)))]
+		var width: float = minf(480, ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x + 40)
+		var size := Vector2(width, 28)
+		var choices: Array[Vector2] = [Vector2(area.get_center().x - width * .5, area.position.y - 36), Vector2(area.get_center().x - width * .5, area.end.y + 8), Vector2(area.position.x, area.position.y - 36), Vector2(area.position.x - width - 8, area.get_center().y - 14), Vector2(area.end.x + 8, area.get_center().y - 14)]
 		var rect: Rect2 = _place_rect(choices, size)
-		_roads.append({"area": area, "rect": rect, "text": label})
+		_roads.append({"area": area, "rect": rect, "text": label, "road": road, "kind": kind})
 		_occupied.append(rect.grow(5))
+		if not road.is_empty():
+			# The striped road sits below calls and crews so it never steals their
+			# clicks; its badge and label are always on top, so it can always be clicked.
+			_hits.insert(0, {"rect": area.grow(10), "type": "road", "id": road_id, "area": true})
+			_hits.append({"rect": Rect2(area.get_center() - Vector2(34, 18), Vector2(68, 36)), "type": "road", "id": road_id})
+			_hits.append({"rect": rect, "type": "road", "id": road_id})
+
+# Blackouts get a substation badge (where an engineer restores power) and a
+# label; storms get a label only (nobody can clear them, so nothing to click).
+func _layout_hazard(road: Dictionary, area: Rect2, zone: Dictionary) -> void:
+	var road_id: int = int(road.id)
+	var seconds: int = ceili(float(zone.get("remaining", 0)))
+	var crew: Dictionary = _unit(int(road.get("assigned_unit", -1)))
+	var label: String
+	var anchor: Vector2
+	if str(road.type) == "blackout":
+		anchor = _world(Vector2(road.get("target", Vector2(road.position) + Vector2(road.size) * .5)))
+		if str(road.status) == "clearing": label = "%s RESTORING POWER · %s" % [str(crew.get("crew_name", "CREW")).to_upper(), str(road.street).to_upper()]
+		elif not crew.is_empty(): label = "%s ON THE WAY TO THE SUBSTATION" % str(crew.get("crew_name", "CREW")).to_upper()
+		else: label = "BLACKOUT · %s · ENGINEER TO SUBSTATION · %ds" % [str(road.street).to_upper(), seconds]
+	else:
+		anchor = area.get_center() + Vector2(0, 40)
+		label = "%s · EVERYONE DRIVES SLOWLY · %ds" % [str(road.name).to_upper(), seconds]
+	var width: float = minf(520, ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x + 40)
+	var size := Vector2(width, 28)
+	var badge := Rect2(anchor - Vector2(36, 20), Vector2(72, 40))
+	if str(road.type) == "blackout": _occupied.append(badge.grow(6))
+	var choices: Array[Vector2] = [anchor + Vector2(-width * .5, -66), anchor + Vector2(-width * .5, 34), anchor + Vector2(44, -14), anchor + Vector2(-width - 44, -14)]
+	var rect: Rect2 = _place_rect(choices, size)
+	_roads.append({"area": area, "rect": rect, "text": label, "road": road, "kind": str(road.clear_kind), "hazard": true, "anchor": anchor})
+	_occupied.append(rect.grow(5))
+	if str(road.type) == "blackout":
+		_hits.append({"rect": badge.grow(6), "type": "road", "id": road_id})
+		_hits.append({"rect": rect, "type": "road", "id": road_id})
 
 func _layout_bases() -> void:
 	var groups: Array[Dictionary] = []
@@ -368,11 +519,13 @@ func _layout_bases() -> void:
 			_station_members[int(unit.id)] = str(group.key)
 	for group in groups:
 		var point: Vector2 = _world(group.home)
+		if not view_rect.has_point(point): continue
 		if _base_origins.get(group.key, Vector2(INF, INF)) != point:
 			_base_positions.erase(group.key)
 			_base_origins[group.key] = point
-		var size := Vector2(58, 32)
-		var choices: Array[Vector2] = [point + Vector2(14, 13), point + Vector2(-72, 13), point + Vector2(14, -44), point + Vector2(-72, -44)]
+		# 20% bigger than before (playtest 15.10: easy to miss).
+		var size := Vector2(70, 38)
+		var choices: Array[Vector2] = [point + Vector2(14, 13), point + Vector2(-84, 13), point + Vector2(14, -52), point + Vector2(-84, -52)]
 		var rect: Rect2 = _base_positions.get(group.key, Rect2())
 		if not rect.has_area() or not _rect_free(rect):
 			rect = _place_rect(choices, size)
@@ -425,6 +578,7 @@ func _layout_mobile_crews() -> void:
 		if _station_members.has(int(unit.id)): continue
 		var id: int = int(unit.id)
 		var point: Vector2 = _world(unit.pos)
+		if not view_rect.has_point(point): continue
 		var marker := Rect2(point - Vector2(15, 15), Vector2(30, 30))
 		var hit := {"rect": marker.grow(8), "type": "unit", "id": id}
 		_crews.append({"unit": unit, "rect": marker, "point": point, "base": false, "expanded": false, "marker": marker, "hit": hit})
@@ -518,23 +672,142 @@ func _draw() -> void:
 		_draw_crew(item)
 
 func _draw_roads() -> void:
+	# Flooded bridges (level 3): blue stripes, nobody can cross until it reopens.
+	if sim.has_method("flooded_bridges"):
+		for flood: Dictionary in sim.flooded_bridges():
+			var area := Rect2(_world(flood.position), Vector2(flood.size) * map_rect.size)
+			draw_rect(area, Color(0.12, 0.35, 0.65, 0.55))
+			for y in range(int(area.position.y), int(area.end.y), 16):
+				draw_line(Vector2(area.position.x, y), Vector2(area.end.x, minf(y + area.size.x * .6, area.end.y)), Color("9fd3ff"), 3, false)
+			draw_rect(area, Color("9fd3ff"), false, 3)
+			var label: String = "%s FLOODED · %ds" % [str(flood.name).to_upper(), ceili(float(flood.remaining))]
+			var width: float = ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x + 24
+			var rect := Rect2(Vector2(area.get_center().x - width * .5, area.position.y - 34), Vector2(width, 26))
+			_panel(rect, Color("12304ff2"), Color("9fd3ff"), 2)
+			_text(label, rect.position + Vector2(12, 18), 12, CREAM)
+	_draw_forecast()
 	for item in _roads:
 		var rect: Rect2 = item.area
-		draw_rect(rect, Color(1.0, .66, .29, .15))
-		draw_rect(rect, Color("daa763"), false, 1)
-		for x in range(int(rect.position.x), int(rect.end.x), 18):
-			draw_line(Vector2(x, rect.position.y), Vector2(minf(x + 6, rect.end.x), minf(rect.position.y + 6, rect.end.y)), Color("e6bf7990"), 2, false)
+		var road: Dictionary = item.get("road", {})
+		if bool(item.get("hazard", false)):
+			var tint: Color = HAZARD_COLOR.get(str(road.type), GOLD)
+			draw_rect(rect, Color(tint, .55), false, 3)
+			continue
+		if road.is_empty():
+			draw_rect(rect, Color(1.0, .66, .29, .15))
+			draw_rect(rect, Color("daa763"), false, 1)
+			continue
+		var kind: String = str(item.kind)
+		var tint: Color = ROLE_COLOR.get(kind, GOLD)
+		var hovered: bool = int(road.id) == hovered_road_id
+		var invites: bool = int(road.assigned_unit) < 0 and _unit(selected_unit_id).get("kind", "") == kind
+		# A burning car or a pile-up is drawn on the road itself (town_view), so
+		# those closures get lighter stripes that leave the scene visible.
+		var scene: bool = str(road.get("type", "")) in ["road_fire", "accident"]
+		draw_rect(rect, Color(.55, .12, .10, .22 if scene else .55))
+		# Hazard stripes in the colour of the department that can clear it.
+		var stripe: Color = Color(tint, .38 if scene else .85)
+		var step: int = 22
+		var horizontal: bool = rect.size.x >= rect.size.y
+		if horizontal:
+			for x in range(int(rect.position.x) - int(rect.size.y), int(rect.end.x), step):
+				var a := Vector2(x, rect.end.y)
+				var b := Vector2(x + rect.size.y, rect.position.y)
+				var from: Vector2 = a
+				var to: Vector2 = b
+				if from.x < rect.position.x:
+					from = from.lerp(to, (rect.position.x - from.x) / (to.x - from.x))
+				if to.x > rect.end.x:
+					to = to.lerp(from, (to.x - rect.end.x) / (to.x - from.x))
+				if to.x > from.x: draw_line(from, to, stripe, 4 if scene else 6, false)
+		else:
+			for y in range(int(rect.position.y) - int(rect.size.x), int(rect.end.y), step):
+				var from := Vector2(rect.position.x, y + rect.size.x)
+				var to := Vector2(rect.end.x, y)
+				if to.y < rect.position.y:
+					to = from.lerp(to, (from.y - rect.position.y) / (from.y - to.y))
+				if from.y > rect.end.y:
+					from = to.lerp(from, (rect.end.y - to.y) / (from.y - to.y))
+				if from.y > to.y: draw_line(from, to, stripe, 6, false)
+		var pulse: float = 0.0 if reduced_motion else (sin(_elapsed * 6.0) + 1.0) * .5
+		var border: Color = GOLD if invites else Color("ff6b57")
+		draw_rect(rect, Color(border, .75 + .25 * pulse) if invites or hovered else Color(border, .9), false, 4 if invites or hovered else 3)
+		# Barrier badge in the middle: department tag + clearing progress.
+		var center: Vector2 = rect.get_center()
+		var badge := Rect2(center - Vector2(30, 15), Vector2(60, 30))
+		_panel(badge, Color(INK, .95), tint, 2)
+		_btext(ROLE_SHORT.get(kind, "?"), badge.position + Vector2(30, 21), 15, tint, true)
+		if str(road.status) == "clearing":
+			var bar := Rect2(badge.position + Vector2(4, 24), Vector2(52, 4))
+			draw_rect(bar, Color(CREAM, .25))
+			draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(float(road.get("clear_progress", 0.0)), 0.0, 1.0), bar.size.y)), GREEN)
+
+const HAZARD_COLOR := {"blackout": Color("bda6ff"), "sandstorm": Color("f0b36b"), "squall": Color("9fc4e0"), "flood": Color("9fd3ff")}
+
+func _draw_hazard_marker(item: Dictionary) -> void:
+	var road: Dictionary = item.road
+	if str(road.type) != "blackout": return
+	var anchor: Vector2 = item.anchor
+	var hovered: bool = int(road.id) == hovered_road_id
+	var invites: bool = int(road.assigned_unit) < 0 and _unit(selected_unit_id).get("kind", "") == "engineer"
+	var pulse: float = 0.0 if reduced_motion else (sin(_elapsed * 6.0) + 1.0) * .5
+	draw_circle(anchor, 34.0 + pulse * 6.0, Color(ROLE_COLOR.engineer, .18))
+	var badge := Rect2(anchor - Vector2(36, 20), Vector2(72, 40))
+	_panel(badge, Color(INK, .96), GOLD if invites or hovered else ROLE_COLOR.engineer, 3 if invites or hovered else 2)
+	# Lightning bolt + ENG: an engineer here turns the lights back on.
+	var b: Vector2 = badge.position + Vector2(14, 8)
+	draw_colored_polygon(PackedVector2Array([b + Vector2(6, 0), b + Vector2(0, 13), b + Vector2(5, 13), b + Vector2(2, 24), b + Vector2(12, 8), b + Vector2(7, 8)]), ROLE_COLOR.engineer)
+	_btext("ENG", badge.position + Vector2(48, 26), 14, ROLE_COLOR.engineer, true)
+	if str(road.status) == "clearing":
+		var bar := Rect2(badge.position + Vector2(5, 33), Vector2(62, 4))
+		draw_rect(bar, Color(CREAM, .25))
+		draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(float(road.get("clear_progress", 0.0)), 0.0, 1.0), bar.size.y)), GREEN)
+
+# Hazards about to start: a dashed outline with a countdown, so the team can
+# move crews out of the way (or into position) before it hits.
+func _draw_forecast() -> void:
+	if not sim.has_method("upcoming_hazards"): return
+	for item: Dictionary in sim.upcoming_hazards():
+		var full := Rect2(_world(item.position), Vector2(item.size) * map_rect.size)
+		var area: Rect2 = full.intersection(view_rect)
+		if area.size.x <= 0 or area.size.y <= 0: continue
+		var tint: Color = HAZARD_COLOR.get(str(item.type), GOLD)
+		var blink: float = 1.0 if reduced_motion else (.55 + .45 * (sin(_elapsed * 8.0) + 1.0) * .5)
+		var dash: float = 18.0
+		for edge: Array in [[area.position, Vector2(area.end.x, area.position.y)], [Vector2(area.end.x, area.position.y), area.end], [area.end, Vector2(area.position.x, area.end.y)], [Vector2(area.position.x, area.end.y), area.position]]:
+			var a: Vector2 = edge[0]
+			var b: Vector2 = edge[1]
+			var length: float = a.distance_to(b)
+			var t: float = 0.0
+			while t < length:
+				draw_line(a.lerp(b, t / length), a.lerp(b, minf(length, t + dash * .6) / length), Color(tint, blink), 3, false)
+				t += dash
+		var label: String = "%s IN %ds" % [str(item.title).to_upper(), ceili(float(item["in"]))]
+		var width: float = ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x + 28
+		# Small areas (a bridge): label just above it. Districts: label in the middle.
+		var label_y: float = area.position.y - 38.0 if area.size.y < 300.0 else area.get_center().y - 60.0
+		var at := Vector2(clampf(area.get_center().x - width * .5, view_rect.position.x + 8, view_rect.end.x - width - 8), clampf(label_y, view_rect.position.y + 150, view_rect.end.y - 60))
+		var rect := Rect2(at, Vector2(width, 28))
+		_panel(rect, Color(INK, .92), Color(tint, blink), 2)
+		_text(label, rect.position + Vector2(14, 19), 13, tint)
 
 func _draw_road_labels() -> void:
 	for item in _roads:
 		var rect: Rect2 = item.rect
 		var area: Rect2 = item.area
+		var road: Dictionary = item.get("road", {})
+		var tint: Color = ROLE_COLOR.get(str(item.get("kind", "")), GOLD) if not road.is_empty() else GOLD
+		if bool(item.get("hazard", false)): tint = HAZARD_COLOR.get(str(road.get("type", "")), GOLD)
 		var anchor: Vector2 = rect.get_center().clamp(area.position, area.end)
-		draw_line(anchor, rect.get_center(), Color("e6bf79aa"), 1, false)
-		_panel(rect, Color("493e2df5"), Color("b88f5d"))
-		draw_rect(Rect2(rect.position + Vector2(6, 7), Vector2(8, 10)), GOLD)
-		draw_line(rect.position + Vector2(6, 14), rect.position + Vector2(13, 8), INK, 2, false)
-		_text(_fit(item.text, rect.size.x - 24, 11), rect.position + Vector2(20, 17), 11, GOLD)
+		if item.has("anchor"): anchor = item.anchor
+		draw_line(anchor, rect.get_center(), Color(tint, .7), 2, false)
+		var hovered: bool = not road.is_empty() and int(road.id) == hovered_road_id
+		var hazard: bool = bool(item.get("hazard", false))
+		_panel(rect, Color("1c2340f2") if hazard else (Color("3a1f1cf2") if not road.is_empty() else Color("493e2df5")), tint if not hovered else GOLD, 2 if hovered or hazard else 1)
+		draw_rect(Rect2(rect.position + Vector2(8, 9), Vector2(10, 10)), tint if hazard else (Color("ff6b57") if not road.is_empty() else GOLD))
+		_text(_fit(item.text, rect.size.x - 30, 12), rect.position + Vector2(24, 19), 12, CREAM if not road.is_empty() else GOLD)
+	for item in _roads:
+		if bool(item.get("hazard", false)): _draw_hazard_marker(item)
 
 func _remaining_route(unit: Dictionary) -> Array[Vector2]:
 	var result: Array[Vector2] = [_world(unit.get("pos", Vector2.ZERO))]
@@ -559,14 +832,34 @@ func _draw_routes() -> void:
 		var route: Array[Vector2] = [_world(_preview.get("pos", Vector2.ZERO))]
 		for point in _preview.get("path", []):
 			route.append(_world(point))
-		_draw_route(route, GOLD, true, true)
+		# Preview in the department's colour (Police purple, Fire orange...).
+		var kind: String = str(_preview.get("kind", _unit(int(_preview.get("unit_id", -1))).get("kind", "")))
+		_draw_route(route, ROLE_COLOR.get(kind, GOLD), true, true)
+
+func _clip_route_segment(start: Vector2, finish: Vector2) -> PackedVector2Array:
+	var delta := finish - start
+	var enter := 0.0
+	var leave := 1.0
+	var bounds := view_rect.grow(-5)
+	for axis in range(2):
+		if absf(delta[axis]) < .0001:
+			if start[axis] < bounds.position[axis] or start[axis] > bounds.end[axis]: return PackedVector2Array()
+		else:
+			var a: float = (bounds.position[axis] - start[axis]) / delta[axis]
+			var b: float = (bounds.end[axis] - start[axis]) / delta[axis]
+			enter = maxf(enter, minf(a, b))
+			leave = minf(leave, maxf(a, b))
+			if enter > leave: return PackedVector2Array()
+	return PackedVector2Array([start + delta * enter, start + delta * leave])
 
 func _draw_route(points: Array[Vector2], color: Color, dashed: bool, emphasis: bool) -> void:
 	if points.size() < 2:
 		return
 	for i in range(points.size() - 1):
-		var start: Vector2 = points[i]
-		var finish: Vector2 = points[i + 1]
+		var segment := _clip_route_segment(points[i], points[i + 1])
+		if segment.is_empty(): continue
+		var start: Vector2 = segment[0]
+		var finish: Vector2 = segment[1]
 		if start.distance_to(finish) < 1:
 			continue
 		var width: float = 3 if emphasis else 2
@@ -586,6 +879,7 @@ func _draw_route(points: Array[Vector2], color: Color, dashed: bool, emphasis: b
 				var perpendicular := Vector2(-direction.y, direction.x)
 				draw_colored_polygon(PackedVector2Array([center + direction * 6, center - direction * 4 + perpendicular * 4, center - direction * 4 - perpendicular * 4]), color)
 	var origin: Vector2 = points[0]
+	if not view_rect.has_point(origin): return
 	draw_rect(Rect2(origin - Vector2(4, 4), Vector2(8, 8)), INK)
 	draw_rect(Rect2(origin - Vector2(2, 2), Vector2(4, 4)), color)
 
@@ -600,8 +894,9 @@ func _draw_station(item: Dictionary) -> void:
 	var hovered: bool = str(item.key) == _hovered_base_key
 	var bright: bool = chosen or hovered or role_filter == item.kind
 	_panel(rect, Color("234851f0") if bright else Color("17363dda"), GOLD if chosen else (color if bright else Color("5a7473")), 3 if chosen else (2 if bright else 1))
-	_role_icon(str(item.kind), rect.position + Vector2(16, 16), color)
-	_text(str(item.ready), rect.position + Vector2(34, 22), 17, CREAM if int(item.ready) > 0 else MUTED)
+	_role_icon(str(item.kind), rect.position + Vector2(19, 19), color, 1.2)
+	# 2.11: a teammate's station does not show how many of their crews are free.
+	if _owned(str(item.kind)): _text(str(item.ready), rect.position + Vector2(41, 27), 20, CREAM if int(item.ready) > 0 else MUTED)
 	if chosen:
 		var pulse: float = 0.0 if reduced_motion else (sin(_elapsed * 6.0) + 1.0) * 2.0
 		draw_rect(rect.grow(4 + pulse), GOLD, false, 2)
@@ -646,14 +941,14 @@ func _draw_pin(point: Vector2, incident: Dictionary) -> void:
 	if not reduced_motion:
 		if age >= 0.0 and age < 5.0:
 			var wave: float = fposmod(age * 2.0, 1.0)
-			draw_arc(point, 30 + wave * 44, 0, TAU, 40, Color(GOLD, 1.0 - wave), 5, false)
+			draw_arc(point, 30 + wave * 30, 0, TAU, 40, Color(GOLD, .72 * (1.0 - wave)), 3, false)
 		elif urgent and waiting:
 			var wave: float = fposmod(_elapsed * 1.4, 1.0)
-			draw_arc(point, 30 + wave * 60, 0, TAU, 40, Color(RED, 1.0 - wave), 6, false)
-			draw_arc(point, 30 + fposmod(wave + .5, 1.0) * 60, 0, TAU, 40, Color(RED, (1.0 - fposmod(wave + .5, 1.0)) * .6), 3, false)
+			draw_arc(point, 30 + wave * 36, 0, TAU, 40, Color(RED, 1.0 - wave), 6, false)
+			draw_arc(point, 30 + fposmod(wave + .5, 1.0) * 36, 0, TAU, 40, Color(RED, (1.0 - fposmod(wave + .5, 1.0)) * .6), 3, false)
 		elif waiting:
 			var wave: float = fposmod(_elapsed * 0.45 + int(incident.id) * 0.37, 1.0)
-			draw_arc(point, 30 + wave * 34, 0, TAU, 36, Color(color, 0.75 * (1.0 - wave)), 3, false)
+			draw_arc(point, 30 + wave * 19, 0, TAU, 36, Color(color, 0.35 * (1.0 - wave)), 2, false)
 	# Shadow + countdown ring around the marker.
 	draw_circle(point + Vector2(3, 4), 30, Color(0, 0, 0, .35))
 	draw_circle(point, 30, Color(INK, .92))
@@ -681,9 +976,7 @@ func _draw_pin(point: Vector2, incident: Dictionary) -> void:
 	if selected:
 		draw_arc(point, 36, 0, TAU, 40, CREAM, 3, false)
 	# Time left, big and outlined, above the marker.
-	_btext("%d" % ceili(deadline), point + Vector2(0, -42), 21, RED if urgent else CREAM, true)
-	if age >= 0.0 and age < 6.0:
-		_btext("NEW", point + Vector2(28, -24), 13, GOLD)
+	_btext("PRACTICE" if sim.is_practice() else "%d" % ceili(deadline), point + Vector2(0, -42), 13 if sim.is_practice() else 21, RED if urgent else CREAM, true)
 
 # How many crews this call still needs (unknown calls count as needing help until a crew arrives).
 func _missing(incident: Dictionary) -> int:
@@ -733,7 +1026,21 @@ func _draw_call(item: Dictionary) -> void:
 	var color: Color = _pin_color(incident)
 	draw_line(point, pin, Color("e1d5af99"), 1, false)
 	draw_rect(Rect2(point - Vector2(3, 3), Vector2(6, 6)), INK, false, 1)
-	_draw_pin(pin, incident)
+	# New calls drop in with a bounce and send out a shockwave ring.
+	var age: float = float(sim.elapsed) - float(incident.get("created_at", -10.0))
+	if age >= 0.0 and age < 1.1 and not reduced_motion:
+		var wave: float = age / 1.1
+		draw_arc(pin, 26 + wave * 90, 0, TAU, 48, Color(GOLD, 1.0 - wave), 6 * (1.0 - wave) + 1, true)
+		draw_arc(pin, 26 + wave * 55, 0, TAU, 40, Color(CREAM, (1.0 - wave) * .6), 2, true)
+	if age >= 0.0 and age < 0.45 and not reduced_motion:
+		var k: float = age / 0.45
+		var drop: float = -70.0 * pow(1.0 - k, 2)
+		var squash: float = 1.0 + 0.25 * sin(k * PI) * (1.0 - k)
+		draw_set_transform(pin - pin * squash + Vector2(0, drop), 0, Vector2.ONE * squash)
+		_draw_pin(pin, incident)
+		draw_set_transform(Vector2.ZERO, 0, Vector2.ONE)
+	else:
+		_draw_pin(pin, incident)
 	_draw_needs(pin + Vector2(0, 34), incident)
 	var progress: float = float(incident.get("progress", 0))
 	if progress > 0:
@@ -743,12 +1050,17 @@ func _draw_call(item: Dictionary) -> void:
 	draw_line(pin, rect.get_center(), Color(color, .7), 1, false)
 	_panel(rect, Color("173741f5"), GOLD if selected else color, 2 if selected else 1)
 	draw_rect(Rect2(rect.position, Vector2(3, rect.size.y)), color)
-	_btext(_fit(str(incident.get("name", "Incoming report")), rect.size.x - 20, 17), rect.position + Vector2(10, 23), 17, CREAM)
+	_btext(_fit(str(incident.get("name", "Incoming report")), rect.size.x - (92 if selected else 20), 17), rect.position + Vector2(10, 23), 17, CREAM)
+	if selected:
+		var close: Rect2 = _close_button_rect(rect)
+		var over_close: bool = _pointer_valid and close.grow(3).has_point(_pointer)
+		_panel(close, Color(CREAM, .9) if over_close else Color(INK, .9), Color(CREAM, .5), 1)
+		_btext("CLOSE  x", close.position + Vector2(close.size.x * .5, 15), 11, INK if over_close else CREAM, true)
 	# Second line: what a crew would achieve here, or what is still missing.
 	var line: String = ""
 	var line_color: Color = MUTED
 	if not known:
-		line = "Unknown needs · Q to scout"
+		line = "Unconfirmed report"
 		line_color = GOLD
 	elif int(_preview_target) == int(incident.id) and not _preview.is_empty():
 		var name: String = str(_preview.get("name", "Crew"))
@@ -763,20 +1075,61 @@ func _draw_call(item: Dictionary) -> void:
 		line_color = _risk_color(item.estimate) if float(item.estimate.get("finish_eta", -1)) >= 0 else color
 	_btext(_fit(line, rect.size.x - 20, 15), rect.position + Vector2(10, 48), 15, line_color)
 	var hint: String = ""
-	if selected_unit_id >= 0 and hovered and known:
+	if selected_unit_id >= 0 and dispatch_enabled and hovered and known:
 		hint = "CLICK TO SEND"
 	elif known and _missing(incident) > 0:
 		var keys: Array[String] = []
 		for kind in ROLES:
 			if _assigned(incident, kind) < int(incident.get("needs", {}).get(kind, 0)) and _owned(kind):
 				keys.append("%s %s" % [KEY_OF[kind], ROLE_SHORT[kind]])
-		if not keys.is_empty(): hint = "PRESS  " + "   ".join(keys)
+		if not keys.is_empty(): hint = "   ".join(keys)
 	elif selected and _crew_on_scene(incident) and int(incident.get("supply_count", 0)) < 2:
-		hint = "E  SUPPLIES (%d LEFT)" % int(sim.supplies)
+		hint = "E  SUPPLIES: %d" % int(sim.supplies)
 	if not known:
-		hint = "Q  SCOUT"
+		var button: Rect2 = _scout_button_rect(rect)
+		var over: bool = button.has_point(_pointer) and _pointer_valid
+		var wait: float = maxf(0.0, float(sim.get("scout_cooldown"))) if sim.get("scout_cooldown") != null else 0.0
+		if wait > 0.0:
+			# Field team busy: show the countdown on the button itself (playtest 19.10).
+			_panel(button, Color(INK, .95), Color(GOLD, .45), 2)
+			var total: float = float(sim.scout_cooldown_total()) if sim.has_method("scout_cooldown_total") else 8.0
+			var fill: float = clampf(1.0 - wait / maxf(0.1, total), 0.0, 1.0)
+			draw_rect(Rect2(button.position + Vector2(2, button.size.y - 4), Vector2((button.size.x - 4) * fill, 2)), Color(GOLD, .8))
+			_btext("SCOUT IN %ds" % ceili(wait), button.position + Vector2(button.size.x * .5, 16), 13, Color(GOLD, .6), true)
+		else:
+			_panel(button, Color(GOLD, .95) if over else Color(INK, .95), GOLD, 2)
+			_btext("SCOUT  (Q)", button.position + Vector2(button.size.x * .5, 16), 13, INK if over else GOLD, true)
+		hint = ""
 	if hint != "":
 		_btext(hint, rect.position + Vector2(10, 71), 12, GOLD)
+	_draw_crew_rows(item)
+
+func _draw_crew_rows(item: Dictionary) -> void:
+	var rows: Array = item.get("crew_rows", [])
+	if rows.is_empty(): return
+	var rect: Rect2 = item.card
+	draw_line(rect.position + Vector2(8, 81), Vector2(rect.end.x - 8, rect.position.y + 81), Color(CREAM, .18), 1)
+	for i in range(rows.size()):
+		var row: Dictionary = rows[i]
+		var unit: Dictionary = row.unit
+		var kind := str(unit.kind)
+		var area := _crew_row_rect(rect, i)
+		var color: Color = ROLE_COLOR.get(kind, CREAM)
+		draw_rect(area, Color(color, .10))
+		draw_rect(Rect2(area.position, Vector2(3, area.size.y)), color)
+		# 2.11: teammates' crews show who is assigned, not where they are.
+		var state := ("ON SCENE" if str(unit.state) == "working" else "EN ROUTE") if bool(row.own) else ""
+		var label := "%s  %s" % [ROLE_SHORT.get(kind, kind.to_upper()), str(unit.get("crew_name", unit.get("name", "Crew")))]
+		var text_width := area.size.x - (100.0 if bool(row.can_withdraw) else 16.0) - 62.0
+		_btext(_fit(label, text_width, 13), area.position + Vector2(9, 17), 13, color)
+		_btext(state, area.position + Vector2(9 + text_width + 4, 17), 10, GREEN if state == "ON SCENE" else MUTED)
+		if bool(row.can_withdraw):
+			var button := _withdraw_button_rect(rect, i)
+			var over: bool = _pointer_valid and button.grow(2).has_point(_pointer)
+			_panel(button, Color(RED, .95) if over else Color(INK, .95), RED, 1)
+			_btext("WITHDRAW", button.position + Vector2(button.size.x * .5, 16), 11, INK if over else RED, true)
+		elif not bool(row.own):
+			_btext("TEAMMATE", Vector2(area.end.x - 8, area.position.y + 17) - Vector2(56, 0), 10, MUTED)
 
 func _crew_on_scene(incident: Dictionary) -> bool:
 	for unit in sim.units:
@@ -792,13 +1145,13 @@ func _margin_text(estimate: Dictionary) -> String:
 			for kind in ROLES:
 				if _assigned(call, kind) < int(call.get("needs", {}).get(kind, 0)) and not (not estimate.is_empty() and str(estimate.get("kind", "")) == kind):
 					missing.append(ROLE_SHORT[kind])
-		return "also needs " + " + ".join(missing) if not missing.is_empty() else "waiting for crews"
+		return "Needs " + " + ".join(missing) if not missing.is_empty() else "Awaiting crews"
 	var margin: float = float(estimate.get("margin", 0))
 	return ("IN TIME  +%ds" % floori(margin)) if margin >= 0 else ("TOO LATE  -%ds" % ceili(-margin))
 
 func _team_status(incident: Dictionary) -> String:
 	if not bool(incident.get("discovered", true)):
-		return "Unknown needs · Q to scout"
+		return "Unconfirmed report"
 	var missing: Array[String] = []
 	for kind in ROLES:
 		if _assigned(incident, kind) < int(incident.get("needs", {}).get(kind, 0)):
@@ -825,6 +1178,7 @@ func _draw_crew(item: Dictionary) -> void:
 	var hovered: bool = int(unit.id) == hovered_unit_id
 	var available: bool = _available(unit)
 	var center: Vector2 = item.point
+	if not view_rect.grow(-18).has_point(center): return
 	var marker: Rect2 = item.marker
 	if selected:
 		var pulse: float = 0.0 if reduced_motion else (sin(_elapsed * 6.0) + 1.0) * 2.0
@@ -840,7 +1194,8 @@ func _draw_crew(item: Dictionary) -> void:
 	if selected or hovered:
 		var name: String = str(unit.get("crew_name", unit.get("name", "Crew")))
 		var state: String = str(unit.get("state", "idle"))
-		var tag: String = name if available else ("%s · busy" % name if state in ["travel", "working"] else "%s · resting" % name)
+		var status: String = {"travel": "en route", "working": "on scene", "clearing": "clearing", "return": "returning", "rest": "resting"}.get(state, "busy")
+		var tag: String = name if available else "%s · %s" % [name, status]
 		var tw: float = ThemeDB.fallback_font.get_string_size(tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
 		var tag_rect := Rect2(center + Vector2(-tw * .5 - 6, 22), Vector2(tw + 12, 18))
 		draw_rect(tag_rect, INK)

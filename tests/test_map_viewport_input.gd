@@ -1,0 +1,132 @@
+extends SceneTree
+
+var game: Node
+var failures: Array[String] = []
+var evidence: Array[Dictionary] = []
+var label := "fixed"
+
+func _initialize() -> void:
+	call_deferred("run")
+
+func check(ok: bool, message: String) -> void:
+	if not ok: failures.append(message)
+
+func button(at: Vector2, pressed: bool, index: MouseButton = MOUSE_BUTTON_LEFT) -> void:
+	var event := InputEventMouseButton.new()
+	# Inject in window coordinates, as the desktop driver does. The viewport
+	# must undo its stretch transform before the game's _input receives it.
+	event.position = root.get_final_transform() * (at + game.global_position)
+	event.global_position = event.position
+	event.button_index = index
+	event.pressed = pressed
+	event.button_mask = MOUSE_BUTTON_MASK_LEFT if pressed and index == MOUSE_BUTTON_LEFT else 0
+	Input.parse_input_event(event)
+
+func motion(at: Vector2, relative: Vector2) -> void:
+	var event := InputEventMouseMotion.new()
+	event.position = root.get_final_transform() * (at + game.global_position)
+	event.global_position = event.position
+	event.relative = root.get_final_transform().basis_xform(relative)
+	event.button_mask = MOUSE_BUTTON_MASK_LEFT
+	Input.parse_input_event(event)
+
+func frame() -> void:
+	game._process(0)
+	game.tactical_map.refresh()
+	await process_frame
+	if DisplayServer.get_name() != "headless": await RenderingServer.frame_post_draw
+
+func snapshot(name: String) -> void:
+	await frame()
+	evidence.append({"name": name, "window_size": str(root.size), "viewport_size": str(root.get_visible_rect().size), "stretch": str(root.get_final_transform()), "zoom": game.map_zoom, "pan": str(game.map_pan), "center": str(game._map_center())})
+	if DisplayServer.get_name() != "headless":
+		root.get_texture().get_image().save_png("res://test_output/navigation-%s-%s.png" % [label, name])
+
+func run() -> void:
+	if "--baseline" in OS.get_cmdline_user_args(): label = "baseline"
+	DirAccess.make_dir_recursive_absolute("res://test_output")
+	game = load("res://scripts/main.gd").new()
+	game.test_mode = true
+	root.add_child(game)
+	game.set_process(false)
+	game.audio.set_music_enabled(false)
+	game.audio.set_sfx_enabled(false)
+	game._begin_shift(0)
+	game.toast_left = 0
+	await snapshot("default")
+	# Playtest 15.10: every level starts on the whole town.
+	check(game._is_map_overview(), "New shifts start on the whole town")
+	var kinds: Dictionary = {}
+	for unit: Dictionary in game.sim.units:
+		if kinds.has(unit.kind): continue
+		kinds[unit.kind] = true
+		var station_point: Vector2 = game._map_rect().position + Vector2(unit.home) * game._map_rect().size
+		check(game.MAP_VIEW.has_point(station_point), "Initial exploration includes the main " + str(unit.kind) + " station")
+	var point := Vector2(700, 450)
+	# 4.11 (Andrei): the whole town is the only view. Nothing a player does with
+	# the mouse or keyboard zooms in or moves it.
+	var whole_zoom: float = game.map_zoom
+	var before: Vector2 = game.map_pan
+	button(point, true)
+	check(game._map_press_pending, "Real viewport routes map press to gesture handler")
+	check(game._map_press_position.distance_to(point) < .1, "Viewport maps desktop position to game coordinates")
+	motion(point + Vector2(180, 95), Vector2(180, 95))
+	button(point + Vector2(180, 95), false)
+	check(game.map_pan == before and is_equal_approx(game.map_zoom, whole_zoom), "A real drag leaves the whole town in place")
+	await snapshot("dragged")
+	for i in range(4): button(point, true, MOUSE_BUTTON_WHEEL_UP)
+	for i in range(4): button(point, true, MOUSE_BUTTON_WHEEL_DOWN)
+	check(game._is_map_overview() and game.map_pan == before, "The wheel does not zoom")
+	var key := InputEventKey.new()
+	key.keycode = KEY_RIGHT
+	key.pressed = true
+	Input.parse_input_event(key)
+	key = key.duplicate()
+	key.pressed = false
+	Input.parse_input_event(key)
+	check(game.map_pan == before, "Arrow keys do not move the map")
+	button(point, true, MOUSE_BUTTON_MIDDLE)
+	motion(point + Vector2(80, 40), Vector2(80, 40))
+	button(point + Vector2(80, 40), false, MOUSE_BUTTON_MIDDLE)
+	check(game._is_map_overview() and game.map_pan == before, "Middle-button drag does not move the map")
+	await snapshot("whole-town")
+	# Exercise the actual window stretch rather than passing preconverted events
+	# straight to _input. An odd aspect ratio also covers letterbox conversion.
+	root.size = Vector2i(1100, 700)
+	await frame()
+	game.map_zoom = 1.5
+	game._center_map(Vector2(.5, .5))
+	await frame()
+	check(game._is_map_overview(), "Even a requested zoom stays on the whole town after a resize")
+	button(point, true)
+	check(game._map_press_position.distance_to(point) < .1, "Resized desktop pointer keeps correct game coordinates")
+	button(point, false)
+	await snapshot("resized")
+	# Where the OVERVIEW/EXPLORE button used to be, a click does nothing to the view.
+	before = game.map_pan
+	button(Vector2(-35, 34), true)
+	button(Vector2(-35, 34), false)
+	check(game._is_map_overview() and game.map_pan == before, "No zoom button in the top-left corner")
+	# Panning out over the tutorial's controls must never leave a held gesture.
+	game._begin_tutorial(false)
+	await frame()
+	button(point, true)
+	motion(Vector2(710, 610), Vector2(10, 160))
+	button(Vector2(710, 610), false)
+	check(not game._map_press_pending and not game.map_dragging, "Tutorial panel cannot swallow the camera's mouse release")
+	before = game.map_pan
+	motion(point, Vector2(-10, -160))
+	check(game.map_pan == before, "Mouse movement after tutorial release never drags by itself")
+	game._end_tutorial(false, false)
+	var log := FileAccess.open("res://test_output/navigation-%s.json" % label, FileAccess.WRITE)
+	log.store_string(JSON.stringify({"evidence": evidence, "failures": failures}, "\t"))
+	log.close()
+	game._stop_capture()
+	game.voice.shutdown()
+	game.queue_free()
+	await process_frame
+	await process_frame
+	if failures.is_empty(): print("PASS: real viewport input on the whole-town-only map: drags, wheel, keys and middle button never move it; resized-window coordinates")
+	else:
+		for failure in failures: printerr("FAIL: ", failure)
+	quit(0 if failures.is_empty() else 1)

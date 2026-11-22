@@ -2,67 +2,77 @@ class_name ResponderArt
 extends RefCounted
 
 
-const OUTLINE := Color("233c47")
+const OUTLINE := Color("405862")
 const SKINS: Array[Color] = [Color("e5bc91"), Color("b88162"), Color("805949"), Color("eecbac"), Color("c89970"), Color("986c54")]
 const HAIR: Array[Color] = [Color("453f3b"), Color("b97142"), Color("654839"), Color("d6bb75"), Color("383d46"), Color("857773")]
 
-static func _r(canvas: CanvasItem, origin: Vector2, scale: float, x: float, y: float, w: float, h: float, color: Color) -> void:
-	canvas.draw_rect(Rect2((origin + Vector2(x, y) * scale).floor(), Vector2(maxf(1.0, w * scale), maxf(1.0, h * scale)).floor()), color)
+static func _r(canvas: CanvasItem, origin: Vector2, scale: float, x: float, y: float, w: float, h: float, color: Color, alpha: float = 1.0) -> void:
+	canvas.draw_rect(Rect2((origin + Vector2(x, y) * scale).floor(), Vector2(maxf(1.0, w * scale), maxf(1.0, h * scale)).floor()), Color(color, color.a * alpha))
 
 static func _line(canvas: CanvasItem, a: Vector2, b: Vector2, color: Color, width: float = 1.0) -> void:
 	canvas.draw_line(a.floor(), b.floor(), color, maxf(1, floorf(width)), false)
 
 static func uniform(kind: String) -> Color:
-	return {"fire": Color("cf7253"), "medic": Color("66b29d"), "engineer": Color("d7ae55"), "police": Color("4f63b0"), "civilian": Color("a39cbd")}.get(kind, Color("81a4a1"))
+	return {"fire": Color("d48a70"), "medic": Color("82b7a5"), "engineer": Color("d9bd79"), "police": Color("8196bd"), "civilian": Color("b3abc7")}.get(kind, Color("81a4a1"))
 
-static func draw_portrait(canvas: CanvasItem, position: Vector2, kind: String, appearance: int, scale: float = 1.0) -> void:
+static func draw_portrait_rect(canvas: CanvasItem, area: Rect2, kind: String, alpha: float = 1.0) -> void:
+	if area.size.x <= 0.0 or area.size.y <= 0.0:
+		return
+	var role := "medic" if kind == "medical" else kind
+	var appearance: int = {"fire": 1, "medic": 2, "engineer": 3, "police": 4}.get(role, 0)
+	var scale := minf(area.size.x / 16.0, area.size.y / 18.0)
+	var position := area.position + (area.size - Vector2(16, 18) * scale) * 0.5
+	draw_portrait(canvas, position, role, appearance, scale, clampf(alpha, 0.0, 1.0))
+
+static func draw_portrait(canvas: CanvasItem, position: Vector2, kind: String, appearance: int, scale: float = 1.0, alpha: float = 1.0) -> void:
 	var variant: int = absi(appearance)
 	var skin: Color = SKINS[variant % SKINS.size()]
 	var hair: Color = HAIR[(variant * 5 + variant / 6) % HAIR.size()]
 	var suit: Color = uniform(kind)
-	_r(canvas, position, scale, 0, 0, 16, 18, Color("18313b"))
-	_r(canvas, position, scale, 1, 1, 14, 16, suit.darkened(.5))
-	_r(canvas, position, scale, 1, 14, 14, 3, Color("2b5057"))
-	_r(canvas, position, scale, 3, 12, 10, 5, suit)
-	_r(canvas, position, scale, 11, 13, 2, 4, suit.darkened(.2))
-	_r(canvas, position, scale, 4, 15, 8, 1, Color("e7d596"))
-	_r(canvas, position, scale, 7, 11, 3, 2, skin.darkened(.15))
-	_r(canvas, position, scale, 5, 5, 7, 7, skin)
-	_r(canvas, position, scale, 4, 5, 2, 6, hair)
-	_r(canvas, position, scale, 5, 4, 7, 2, hair)
-	_r(canvas, position, scale, 10, 8, 1, 1, OUTLINE)
-	_r(canvas, position, scale, 12, 9, 1, 1, skin)
+	_r(canvas, position, scale, 0, 0, 16, 18, Color("526b71"), alpha)
+	_r(canvas, position, scale, 1, 1, 14, 16, suit.darkened(.25), alpha)
+	_r(canvas, position, scale, 1, 14, 14, 3, Color("78918b"), alpha)
+	_r(canvas, position, scale, 3, 12, 10, 5, suit, alpha)
+	_r(canvas, position, scale, 11, 13, 2, 4, suit.darkened(.2), alpha)
+	_r(canvas, position, scale, 4, 15, 8, 1, Color("e7d596"), alpha)
+	_r(canvas, position, scale, 7, 11, 3, 2, skin.darkened(.15), alpha)
+	_r(canvas, position, scale, 5, 5, 7, 7, skin, alpha)
+	_r(canvas, position, scale, 4, 5, 2, 6, hair, alpha)
+	_r(canvas, position, scale, 5, 4, 7, 2, hair, alpha)
+	_r(canvas, position, scale, 10, 8, 1, 1, OUTLINE, alpha)
+	_r(canvas, position, scale, 12, 9, 1, 1, skin, alpha)
 	if variant % 3 == 0:
-		_r(canvas, position, scale, 5, 10, 3, 2, hair)
+		_r(canvas, position, scale, 5, 10, 3, 2, hair, alpha)
 	if variant % 4 == 1:
-		_r(canvas, position, scale, 3, 7, 2, 6, hair)
+		_r(canvas, position, scale, 3, 7, 2, 6, hair, alpha)
 	if variant % 5 == 2:
-		_r(canvas, position, scale, 8, 8, 4, 1, Color("718a84"))
+		_r(canvas, position, scale, 8, 8, 4, 1, Color("718a84"), alpha)
 	if kind in ["fire", "engineer"]:
 		var helmet: Color = Color("e5d7b2") if variant % 3 == 1 else Color("e8bc68")
-		_r(canvas, position, scale, 4, 2, 8, 4, helmet)
-		_r(canvas, position, scale, 3, 5, 11, 1, helmet.darkened(.18))
-		_r(canvas, position, scale, 6, 2, 1, 3, helmet.lightened(.2))
-		_r(canvas, position, scale, 8, 4, 2, 1, Color("ae7155"))
+		_r(canvas, position, scale, 4, 2, 8, 4, helmet, alpha)
+		_r(canvas, position, scale, 3, 5, 11, 1, helmet.darkened(.18), alpha)
+		_r(canvas, position, scale, 6, 2, 1, 3, helmet.lightened(.2), alpha)
+		_r(canvas, position, scale, 8, 4, 2, 1, Color("ae7155"), alpha)
 	elif kind == "police":
-		_r(canvas, position, scale, 4, 2, 9, 3, Color("27346a"))
-		_r(canvas, position, scale, 3, 5, 11, 1, Color("1d2852"))
-		_r(canvas, position, scale, 7, 3, 2, 1, Color("e7d596"))
-		_r(canvas, position, scale, 9, 13, 2, 2, Color("e7d596"))
+		_r(canvas, position, scale, 4, 2, 9, 3, Color("556b91"), alpha)
+		_r(canvas, position, scale, 3, 5, 11, 1, Color("455a79"), alpha)
+		_r(canvas, position, scale, 7, 3, 2, 1, Color("e7d596"), alpha)
+		_r(canvas, position, scale, 9, 13, 2, 2, Color("e7d596"), alpha)
 	elif kind == "medic":
 		if variant % 2 == 0:
-			_r(canvas, position, scale, 4, 3, 8, 3, Color("e3ead0"))
-			_r(canvas, position, scale, 8, 3, 1, 3, Color("bd6e64"))
-		_r(canvas, position, scale, 6, 13, 1, 3, Color("e7ecd4"))
-		_r(canvas, position, scale, 5, 14, 3, 1, Color("e7ecd4"))
+			_r(canvas, position, scale, 4, 3, 8, 3, Color("e3ead0"), alpha)
+			_r(canvas, position, scale, 8, 3, 1, 3, Color("bd6e64"), alpha)
+		_r(canvas, position, scale, 6, 13, 1, 3, Color("e7ecd4"), alpha)
+		_r(canvas, position, scale, 5, 14, 3, 1, Color("e7ecd4"), alpha)
+
 
 static func draw_person(canvas: CanvasItem, position: Vector2, kind: String, appearance: int, action: String, time: float, facing: int = 1, scale: float = 1.0) -> void:
 	var variant: int = absi(appearance)
 	var skin: Color = SKINS[variant % SKINS.size()]
 	var hair: Color = HAIR[(variant * 5 + variant / 6) % HAIR.size()]
 	var suit: Color = uniform(kind)
-	var boots := Color("2c3e47")
-	var pants := Color("365565")
+	var boots := Color("40545d")
+	var pants := Color("566e7a")
 	var stripe := Color("d8ecce") if kind == "medic" else (Color("c9d8ef") if kind == "police" else Color("efcf80"))
 	var kneeling: bool = action in ["treat", "repair", "sandbag", "cpr"]
 	var walking: bool = action in ["walk", "carry"]
@@ -127,8 +137,8 @@ static func draw_person(canvas: CanvasItem, position: Vector2, kind: String, app
 		_r(canvas, position, scale, -2, -17 + dy, 1, 2, helmet.lightened(.20))
 		_r(canvas, position, scale, 0, -16 + dy, 2, 1, Color("a87155") if kind == "fire" else Color("e7dcac"))
 	elif kind == "police":
-		_r(canvas, position, scale, -3, -17 + dy, 6, 2, Color("27346a"))
-		_r(canvas, position, scale, -4, -15 + dy, 8, 1, Color("1d2852"))
+		_r(canvas, position, scale, -3, -17 + dy, 6, 2, Color("556b91"))
+		_r(canvas, position, scale, -4, -15 + dy, 8, 1, Color("455a79"))
 		_r(canvas, position, scale, -1, -17 + dy, 2, 1, Color("e7d596"))
 	elif kind == "medic" and variant % 2 == 0:
 		_r(canvas, position, scale, -3, -16 + dy, 6, 2, Color("e4ead0"))

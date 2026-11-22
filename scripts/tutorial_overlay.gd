@@ -6,17 +6,16 @@ extends Node2D
 signal advance_requested
 signal skip_requested
 
-const CREAM := Color("f2e7ce")
-const PAPER := Color("fbf1dc")
-const INK := Color("203b46")
-const MUTED := Color("6e7c77")
+const CREAM := Color("f3f0e7")
+const PAPER := Color("fffcf4")
+const INK := Color("223944")
+const MUTED := Color("687c7f")
 const DEFAULT_PORTRAITS := "res://assets/art/tutorial_portraits.png"
-const ORIGINAL_CONCEPTS := "res://assets/art/crew_concepts.png"
 const PEOPLE := {
-	"nova": {"name": "Nova", "role": "DISPATCHER", "quarter": Vector2i(0, 0), "accent": Color("d28b66"), "wash": Color("e7debc"), "fallback": Rect2(.294, .175, .149, .522)},
-	"bram": {"name": "Bram", "role": "FIRE CAPTAIN", "quarter": Vector2i(1, 0), "accent": Color("d67d61"), "wash": Color("ebd8bf"), "fallback": Rect2(.429, .166, .212, .541)},
-	"elio": {"name": "Elio", "role": "MEDIC", "quarter": Vector2i(0, 1), "accent": Color("69a89c"), "wash": Color("d9e4cd"), "fallback": Rect2(.620, .137, .187, .560)},
-	"tess": {"name": "Tess", "role": "ENGINEER", "quarter": Vector2i(1, 1), "accent": Color("c9a14f"), "wash": Color("e8dfba"), "fallback": Rect2(.807, .194, .191, .505)}
+	"nova": {"name": "Nova", "role": "COORDINATOR", "kind": "police", "quarter": Vector2i(0, 0), "accent": Color("8196bd"), "wash": Color("e3e8eb")},
+	"bram": {"name": "Bram", "role": "FIRE CAPTAIN", "kind": "fire", "quarter": Vector2i(1, 0), "accent": Color("d48a70"), "wash": Color("f1e4d6")},
+	"elio": {"name": "Elio", "role": "MEDIC", "kind": "medic", "quarter": Vector2i(0, 1), "accent": Color("82b7a5"), "wash": Color("e1eadf")},
+	"tess": {"name": "Tess", "role": "ENGINEER", "kind": "engineer", "quarter": Vector2i(1, 1), "accent": Color("d9bd79"), "wash": Color("f0e7d0")}
 }
 
 var data: Dictionary = {}
@@ -25,7 +24,6 @@ var reduced_motion: bool = false
 var panel_size := Vector2(1048, 264)
 
 var _portrait_texture: Texture2D
-var _using_atlas: bool = false
 var _speaker: String = "nova"
 var _previous_step: int = -999
 var _portrait_age: float = 1.0
@@ -44,15 +42,10 @@ func _ready() -> void:
 func _load_portraits() -> void:
 	if ResourceLoader.exists(portrait_path):
 		_portrait_texture = load(portrait_path) as Texture2D
-		_using_atlas = _portrait_texture != null
 	elif FileAccess.file_exists(portrait_path):
 		var image := Image.load_from_file(ProjectSettings.globalize_path(portrait_path))
 		if image != null and not image.is_empty():
 			_portrait_texture = ImageTexture.create_from_image(image)
-			_using_atlas = true
-	if _portrait_texture == null and ResourceLoader.exists(ORIGINAL_CONCEPTS):
-		_portrait_texture = load(ORIGINAL_CONCEPTS) as Texture2D
-		_using_atlas = false
 
 func _process(delta: float) -> void:
 	if data.is_empty() or not visible:
@@ -211,12 +204,12 @@ func _draw() -> void:
 		var arrow: Vector2 = advance_rect.position + Vector2(advance_rect.size.x - 19, 17)
 		draw_line(arrow + Vector2(-3, -4), arrow + Vector2(1, 0), PAPER, 1.5, true)
 		draw_line(arrow + Vector2(1, 0), arrow + Vector2(-3, 4), PAPER, 1.5, true)
-		_text("Take your time.  Enter to continue.", Vector2(264, 239), 13, MUTED)
+		_text("Enter to continue", Vector2(264, 239), 13, MUTED)
 	else:
 		var turn_rect := Rect2(panel_size.x - 192, 216, 168, 36)
 		_panel(turn_rect, Color("e3e2c9"), Color("bac5ad"), 7, 1)
 		_center_text("CREW AT WORK" if observing else "YOUR TURN", turn_rect, 13, Color("587663"))
-		var turn_hint: String = "Watch the crew work…" if observing else "Try the highlighted action above."
+		var turn_hint: String = "Crew responding…" if observing else "Try the highlighted action."
 		if bool(data.get("map_selection_required",false)):
 			turn_hint = "Number keys highlight. Click the crew on the map."
 		_text(turn_hint, Vector2(264, 239), 13, MUTED)
@@ -258,21 +251,13 @@ func _draw_portrait(area: Rect2, person: Dictionary) -> void:
 	if _portrait_texture == null:
 		return
 	var texture_size: Vector2 = _portrait_texture.get_size()
-	var source: Rect2
-	if _using_atlas:
-		var half_size: Vector2 = texture_size * .5
-		source = Rect2(Vector2(person.quarter) * half_size, half_size)
-		if str(person.name) == "Nova":
-			
-			
-			source.size.x = maxf(1.0, source.size.x - 28.0)
-	else:
-		var region: Rect2 = person.fallback
-		source = Rect2(region.position * texture_size, region.size * texture_size)
+	var cell := texture_size * 0.5
+	var source := Rect2(Vector2(person.quarter) * cell, cell)
 	var scale: float = minf(area.size.x / source.size.x, area.size.y / source.size.y)
 	var size: Vector2 = source.size * scale
-	var portrait_rect := Rect2(area.position + (area.size - size) * .5, size)
+	var portrait_rect := Rect2(area.position + (area.size - size) * Vector2(0.5, 1.0), size)
+	draw_circle(area.get_center() + Vector2(0, 10), minf(area.size.x, area.size.y) * 0.43, Color(person.accent, 0.13))
 	var alpha: float = 1.0 if reduced_motion else clampf(_portrait_age / .18, 0, 1)
 	if not reduced_motion:
 		portrait_rect.position.y += (1 - alpha) * 4
-	draw_texture_rect_region(_portrait_texture, portrait_rect, source, Color(1, 1, 1, alpha), false)
+	draw_texture_rect_region(_portrait_texture, portrait_rect, source, Color(1, 1, 1, alpha), false, true)

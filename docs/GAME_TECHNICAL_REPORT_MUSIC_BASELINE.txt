@@ -1,0 +1,488 @@
+BEACON BAY - TECHNICAL REPORT AND MUSIC DEVELOPMENT BASELINE
+===========================================================
+Date: 13 October 2026
+Project version: 0.8.0 (project.godot)
+Repository revision inspected: 4300137
+Purpose: Explain the current game before developing music intended to increase
+players' perceived tension and urgency.
+
+Evidence and scope
+------------------
+This report is based on inspection of the local source, assets, tests, and
+documentation. The working tree was clean before this report was added.
+Implementation details below describe the inspected code, not a new design.
+Proposals are explicitly identified. No game code or audio assets were changed.
+The game was not launched, audio was not auditioned, and tests were not rerun
+for this documentation task. Historical test results are identified separately.
+File references are relative to the project root; function names provide stable
+lookup points if line numbers change.
+
+1. CURRENT STATE AT A GLANCE
+--------------------------
+Beacon Bay is a real-time cooperative rescue/dispatch game for one to four
+players. Players manage departments rather than directly controlling a single
+character. They allocate crews to overlapping emergencies, coordinate joint
+responses, and protect the town's confidence while meeting rescue targets.
+
+The campaign contains six 330-second shifts: 33 minutes of scheduled gameplay
+before tutorials, menus, breaks, replays, or early losses. The world is 2304 x
+1536 pixels, with 48 incident locations and 12 crews: three per department.
+The presentation is a pixel-art town, tactical map, crew cards, incident
+information, and rescue close-ups.
+
+The central finding for this phase is that MUSIC IS CURRENTLY NON-ADAPTIVE.
+One gentle 72 BPM score loops at a Music bus setting of -20 dB. The game still
+calculates pressure and passes it to AudioDirector, but that value does not
+affect music playback. Older calm/tense/panic tracks exist but are not selected.
+Urgency currently comes primarily from gameplay, visual information, and SFX.
+
+2. PLAYER EXPERIENCE AND GAMEPLAY LOOP
+-------------------------------------
+The main flow includes title/campaign selection, tutorial, solo or network
+play, shift results, upgrades, and replay/progression. A saved solo shift can
+be resumed. The tutorial has 15 stages and authored practice calls; it disables
+the normal arrival schedule, disruptions, and traffic.
+
+During a shift the player repeatedly:
+  1. Notices a new call and checks its location, deadline, and known needs.
+  2. Scouts an unconfirmed report or commits crews with incomplete information.
+  3. Selects crews and dispatches the departments the call requires.
+  4. Monitors travel, missing teams, hazard growth, and remaining work.
+  5. Uses supplies or the shared coffee boost when useful.
+  6. Reassigns available crews as calls resolve and new calls arrive.
+
+Main controls documented in README.md and implemented through main.gd:
+  - Select a crew, then click a call to dispatch.
+  - Hover a call and use 1-4 for the corresponding department's available crew.
+  - Q: scout; E: supply; Space: coffee boost; F: rescue close-up.
+  - Left or middle drag: pan; wheel: zoom; WASD/arrows: pan.
+  - Minimap: reposition view; OVERVIEW/EXPLORE: switch map framing.
+  - Right-click/Esc: clear selection; Esc also provides menu access by context.
+  - V: push-to-talk when microphone input is enabled.
+
+Map clicks act on release; dragging across a crew or call does not dispatch.
+All ordinary play runs at normal simulation speed. Solo menus pause the active
+simulation; personal menus in multiplayer do not pause the shared shift.
+
+3. DEPARTMENTS, CALLS, AND CREW STATE
+-----------------------------------
+Departments: Fire, Medical (internal key: medic), Engineering, Police.
+Incident categories: fire, medical, flood, power, police.
+
+Normal campaign calls require multiple departments from the outset:
+  Severity 1: two departments; base work duration 14.2 seconds.
+  Severity 2: three departments; base work duration 18.4 seconds.
+  Severity 3: all four departments; base work duration 22.6 seconds.
+
+Required departments are taken in this order as severity increases:
+  Fire:    Fire -> Medical -> Police -> Engineering
+  Medical: Medical -> Police -> Fire -> Engineering
+  Flood:   Engineering -> Medical -> Fire -> Police
+  Power:   Engineering -> Police -> Fire -> Medical
+  Police:  Police -> Medical -> Fire -> Engineering
+
+Each required department contributes one crew. Four-department calls can occur
+in every shift after the opening minute. The generation logic forces them by
+specified spawn counts when its elapsed-time conditions are satisfied; this
+does not guarantee those counts are reached by a struggling team.
+
+Crew state flow:
+  idle -> travel -> working -> return -> rest -> idle
+
+Returning crews can usually be diverted before reaching their station. Crews
+already travelling to a call or working cannot be freely reassigned through
+the normal dispatch availability rule. Department orders have a 0.65-second
+cooldown. Automatic selection compares eligible crews' route ETAs.
+
+On arrival, crews take 1.6 seconds to deploy. Rescue progress starts only when
+the complete required team is present and deployed. Partial teams help reduce
+hazard but do not advance rescue completion. An unsuitable crew spends about
+5.6 seconds on scene assessing the call, reveals its needs, then returns with
+a six-second diversion restriction. Wrong dispatches consume availability and
+are counted in the results.
+
+Unconfirmed calls hide the response requirements. Baseline report clarity is
+66% in shifts 1-2 and 57% in later shifts, with authored opening exceptions.
+Blackout/comms conditions make incoming reports unconfirmed and can obscure
+existing reports that were neither scouted nor confirmed on scene.
+
+Sources: simulation.gd dispatch(), _unit_available(), _spawn_incident(),
+_tick_unit(), _tick_incident(); campaign.gd responder_profile().
+
+4. DEADLINES, HAZARDS, TRAVEL, AND SUPPORT
+---------------------------------------
+Deadlines decrease by one second per active gameplay second, including while
+crews travel, deploy, and work. Merely assigning all departments does not stop
+the countdown or guarantee success.
+
+Initial deadline is calculated approximately as:
+  1.12 * arrival_budget + 1.35 * base_work_duration + decision_slack
+  + random(-2, 4) + 7 * radio_upgrade_level
+
+Arrival budget uses the slowest department's best estimated route, with an
+eight-second allowance for a crew that is unavailable. Decision slack begins
+at 18 seconds and decreases by 1.2 seconds per shift index; some calls reduce
+this slack to 58%. Unconfirmed reports get four extra seconds. The first call
+of the first shift gets ten extra seconds. This is an estimate-based allowance,
+not a guarantee that the actual team will arrive before failure.
+
+Hazard starts at 0.08 + 0.08 * severity and is clamped to 0-1.
+Without suitable crews on scene it normally grows at:
+  0.012 + 0.0014 * zero_based_shift_index per second.
+Suitable crews en route multiply this growth by 0.68; coffee boost multiplies
+it by 0.65. Partial deployed teams reduce hazard by 0.015/second; complete teams
+reduce it by 0.04/second. Escalation stages occur at 0.34, 0.60, and 0.86.
+Escalation does not add departments to an existing call in the inspected code.
+
+Work rate is:
+  (1 + 0.12 * training_level + call_work_bonus)
+  * coffee_multiplier * clear_conditions_multiplier * (1 - 0.1 * hazard)
+Coffee multiplier is 1.65 while active; clear conditions provide 1.2.
+Work progress increases by delta * work_rate / base_work_duration.
+
+Travel follows candidate routes on a street grid, choosing the lowest estimated
+travel time rather than simply straight-line distance. Base speed is 120 world
+pixels/second. Engines add 14% per level, fatigue reduces speed by up to 12%,
+and coffee multiplies travel speed by 1.5. Traffic and disruptions slow specific
+road zones; they are not a uniform slowdown applied everywhere on the map.
+After jobs, fatigue increases; rest and idle time reduce it.
+
+Support actions:
+  Scout: reveals needs; DOES NOT add deadline time. Base cooldown eight seconds,
+    reduced by 2.5 seconds per scouting level, with a three-second minimum.
+  Supply: requires a suitable crew on scene; maximum two uses per call.
+    Adds up to 18 seconds, subject to the deadline cap; adds 0.3 work bonus;
+    reduces hazard by 0.3; stabilizes against growth for 12 seconds.
+    Starts at three supplies; regeneration is 45 seconds minus five per upgrade
+    level. Shortage disruptions pause regeneration.
+  Coffee: lasts 20 seconds; base recharge 95 seconds, minus 15 per rally level.
+    Also adds up to eight seconds to active calls, subject to its cap, and
+    restores up to three confidence points.
+  Rapid response: assigning the full team to a discovered call within eight
+    seconds of creation adds 0.1 work bonus and later awards bonus points.
+
+Sources: simulation.gd scout(), supply(), use_special(), _work_rate(),
+_update_hazard(), road_conditions(), _best_route(), _travel_speed().
+
+5. CAMPAIGN PACING AND OUTCOMES
+-----------------------------
+Effective campaign values (after overrides in campaign.gd shifts()):
+
+  Shift  Title          Rescue target  Base interval  Base active cap
+  1      First Light         60            18.5 s           4
+  2      Market Day          72            16.7 s           5
+  3      Rising Water        78            15.5 s           5
+  4      After Dark          90            14.3 s           6
+  5      Stormfront         104            13.2 s           6
+  6      Beacon Night       116            12.2 s           6
+
+Targets count people, not resolved calls. A call contains 2 + severity + a
+random 0-2 people. Earlier values in the scenario dictionary are overwritten;
+using those earlier values would misreport the current difficulty.
+
+Each shift uses nine fixed normal/high/low phases under schedule version
+beacon-chaos-v1. Arrival opportunities use a separate seeded random generator.
+Intervals multiply by 1.0 in normal, 0.58 in high, and 1.85 in low phases, plus
+seeded jitter of 0.92-1.08. High phases add one slot to the active-call cap.
+No arrival opportunities are scheduled at or after 285 seconds, leaving the
+last 45 seconds for finishing existing calls.
+
+Example, shift 1 active-time phase boundaries:
+  0 normal; 42 high; 73 low; 106 normal; 142 high; 174 low;
+  204 high; 244 normal; 278 low; shift ends at 330 seconds.
+
+When the active cap is full, that arrival opportunity is skipped, not postponed.
+Phase changes remain fixed regardless of player performance. The phase labels
+and transitions are deliberately hidden from players: no phase banners,
+countdowns, or phase sound cues. They are available to local research logging.
+Fixed opportunities do not mean identical actual call histories: skips, crew
+positions, deadline allowances, and player outcomes can diverge between teams.
+
+Additional authored disruptions include market traffic, roadworks, rain,
+blackout, comms interference, storms, shortages, and helpful clear conditions.
+These are separate from the hidden phase schedule and may generate visible
+messages and an alarm cue.
+
+A shift ends at 330 active seconds or when confidence reaches zero.
+Winning requires both the rescue target and at least 50 confidence.
+Timed-out calls lose 8 + 2 * severity confidence and reset the combo. Calls
+still open at shift end are failed with a separate four-point penalty each.
+Resolving a call restores two confidence points, capped at 100.
+
+Resolved-call points = 75 + 25 * severity + remaining-time bonus (0-30)
+  + 10 * min(combo, 10) + 15 if scouted + 25 if rapid response.
+Every fifth consecutive resolution grants a supply, up to capacity.
+
+Stars: one for winning; two if also confidence >=75 and failures <=3;
+three if confidence >=92, no failures, and rescues >= target + 8.
+Credits awarded = 35 + 4 * resolved_calls + 22 * stars + 30 if won.
+End score also adds int(confidence * 3) + 100 * stars.
+Upgrades cover engines, training, radio, supplies, rest, rally, and scouting;
+purchases are disallowed while the simulation is running.
+
+Sources: campaign.gd chaos_schedule(), arrival_schedule(), shifts(), upgrades();
+simulation.gd _tick_arrivals(), _resolve(), _fail(), _finish_shift().
+
+6. TECHNICAL ARCHITECTURE AND MULTIPLAYER
+--------------------------------------
+Engine configuration: Godot feature target 4.7, GL Compatibility renderer,
+1600 x 900 reference viewport. The configured version is not evidence of the
+engine executable installed on this computer.
+
+Main modules:
+  scenes/main.tscn: Node2D entry scene using scripts/main.gd.
+  main.gd: screens, input, HUD, simulation orchestration, audio events, saving.
+  simulation.gd: rules and serializable state; RefCounted simulation object.
+  campaign.gd: shifts, schedules, locations, responder profiles, upgrades.
+  town_view.gd / tactical_map_overlay.gd / incident_focus.gd: map presentation.
+  pixel_town_art.gd / responder_art.gd / hero_sprite_art.gd: visual assets/code.
+  tutorial_director.gd / tutorial_overlay.gd: guided practice and presentation.
+  audio_director.gd: music, effect loading, cue pool, ticking, bus levels.
+  network_session.gd: ENet sessions, ownership, commands, snapshots, voice relay.
+  team_voice*.gd: microphone playback/mixing and local WAV capture support.
+  research_logger.gd: opt-in local event/mouse JSONL logging.
+
+The simulation subdivides tick calls into steps no larger than 0.1 seconds.
+The host/server is authoritative. Clients simulate between snapshots, discard
+their locally generated simulation events, and correct from host state. The
+host attempts snapshots approximately every 0.12 seconds. Events also travel
+separately, which matters for avoiding duplicated audio cues.
+
+Networking uses port 24680 and protocol version 8. Compressed snapshots up to
+the configured 1100-byte limit use the small-snapshot route; larger snapshots
+use a reliable channel. Sequence checks reject stale/duplicate state updates.
+Desktop hosting and dedicated-server flows are present.
+
+Department allocation by player count:
+  1: all departments.
+  2: Fire + Engineering / Medical + Police.
+  3: Fire + Police / Medical / Engineering.
+  4: one department each.
+
+Save data uses user://beacon_bay_save.json. Campaign progress, credits, upgrades,
+settings, and optional running-session snapshots are persisted. Solo gameplay
+autosaves roughly every 15 seconds. Snapshot data includes phase and arrival
+position so continuation retains pacing; map migration supports older saves.
+
+7. CURRENT MUSIC AND SOUND IMPLEMENTATION
+----------------------------------------
+Playback chain:
+  Simulation pressure -> main.gd pressure_display smoothing
+  -> AudioDirector.set_intensity(value) -> stored value only.
+
+Actual music chain:
+  music_soft override, if present -> otherwise beacon_bay_soft_v080.wav
+  -> CoastlineScore AudioStreamPlayer -> Music bus -> Master.
+
+The default generated score uses soft sine-based keys, slow chord swells,
+extended chords, and sparse melody. The generator specifies 72 BPM, 16 bars,
+approximately 53.333 seconds, stereo PCM16 at 24 kHz. Note tails wrap around
+the loop boundary. These are generator specifications, not fresh measurements
+or listening judgments from this review.
+
+AudioDirector defaults:
+  Music enabled: true; SFX enabled: true.
+  Music bus: -20 dB; SFX bus: -6 dB.
+  Music gain fades in over four seconds and out over two seconds using a
+    smoothstep-shaped envelope. Bus gain and player fade gain are separate.
+  Ten reusable SFX players plus a dedicated countdown-tick player.
+  Music starts during application setup. It is not explicitly restarted at
+    each shift, so musical position is not synchronized to shift elapsed time.
+  No pressure-driven layer mixing, tempo control, or track switching exists.
+  No music/voice ducking is implemented in AudioDirector.
+
+Retained alternative assets include music_calm.mp3, music_tense.mp3,
+music_panic.mp3, beacon_bay_90bpm.wav, beacon_bay_tension.wav, and
+beacon_bay_pressure.wav. Their presence does not make them active. Their
+musical suitability, loudness, compatibility, and loop seams need auditioning.
+
+Drop-in loading searches assets/audio/custom/ first, then assets/audio/.
+Within each folder, precedence is .ogg, then .mp3, then .wav. The music override
+key is music_soft. A differently named tense file will not be selected merely
+by placing it in the folder. New assets must be imported and included in builds.
+
+Runtime event-to-SFX mapping:
+  New incident: new_call (fallback alarm).
+  Dispatch: dispatch; selected crew: select (fallback click).
+  Full required team on scene: arrival.
+  Escalation, critical, or urgent: urgent, gated by a five-second UI cooldown.
+  Disruption/warning: alarm.
+  Rescue complete: rescue; failure/mismatch: fail.
+  Rapid response/combo: combo; scout/supply: upgrade.
+  Coffee: boost (fallback upgrade); shift start: shift.
+  Results: win (fallback shift) or lose (fallback fail).
+
+The normal urgent event fires below 15 seconds. Critical fires when hazard
+reaches stage 3 or deadline falls below 12 seconds. Pressure's urgent count
+uses a separate 20-second threshold.
+
+Countdown ticking activates below ten seconds only if the call still lacks
+required assigned crews. Assigned crews can still be travelling: the tick is
+not a complete forecast of whether a rescue will finish in time. A short tick
+plays every second; a clip longer than 1.5 seconds is looped while needed.
+
+Cue throttles limit repeated sounds: e.g. new_call/alarm 1.4 seconds,
+urgent 3.5 seconds inside AudioDirector, and shared attention-cue spacing of
+1.1 seconds. Thus not every emitted event produces an audible cue. The older
+surge cue remains loadable, but hidden-wave events return before audio playback.
+
+Sources: audio_director.gd; main.gd _ready(), _process(), _handle_game_event();
+assets/audio/generate_soft_music_v080.py; assets/audio/custom/SOUND_LIST.txt.
+
+8. PRESSURE SIGNAL AND ITS LIMITS FOR MUSIC
+-----------------------------------------
+Existing pressure_level() formula:
+  clamp(0.11 * active_calls + 0.075 * summed_active_hazard
+        + 0.10 * calls_with_deadline_below_20_seconds, 0, 1).
+
+main.gd smooths this using lerp weight 1 - exp(-3 * delta) while screen == game.
+Outside that screen it sends intensity zero and disables ticking, even when
+a multiplayer shift continues behind a personal menu.
+
+This is a gameplay-state indicator, not a validated measure of human workload
+or stress. It does not directly include available crews, missing departments,
+completion margin, individual department responsibility, or communication load.
+Six active calls alone contribute 0.66 even if all are under control. A single
+imminent failure can still yield a relatively low total. Using this signal
+unchanged for music may therefore emphasize backlog over immediate danger.
+
+The simulation already exposes completion estimates and remaining margin,
+including route, deployment, work, hazard, and boost effects. They are useful
+candidate inputs but remain predictions. Any new mapping should respect
+unconfirmed information and avoid revealing hidden call needs through sound.
+
+9. MUSIC PHASE: PROPOSED DEVELOPMENT DIRECTION (NOT IMPLEMENTED)
+--------------------------------------------------------------
+Goal: create a stronger sense of time pressure while keeping dispatch cues
+and teammate speech intelligible. Increased urgency is a design hypothesis
+that must be assessed with players; source inspection cannot establish it.
+
+First choose what the music condition is meant to test:
+  A. Constant tense score: replace the background character for the whole shift.
+     This is the smallest change and makes a calm-versus-tense comparison easier
+     to interpret when gameplay and playback level are held consistent.
+  B. Reactive score: change musical density with visible current gameplay risk.
+     This adds feedback as well as a different musical character; it is a
+     different experimental condition from simply using a tense soundtrack.
+
+Suggested first prototype: a fixed tense loop, loudness-matched to the current
+score, evaluated against the existing calm version. Then evaluate reactive
+layers separately if adaptation is part of the intended design.
+
+Composition ideas for auditioning, not established findings:
+  - A clear recurring pulse or ostinato instead of the present sparse keys.
+  - More rhythmic subdivision, shorter note envelopes, restrained percussion,
+    and less frequent harmonic resolution.
+  - A moderate faster-tempo candidate, for example 100-120 BPM, alongside a
+    denser version at the existing tempo to separate tempo from orchestration.
+  - Avoid relying on a volume increase alone; reserve distinct sonic space
+    for alarms, dispatch feedback, and speech.
+  - Preserve moments of reduced density so the soundtrack has dynamic contrast.
+
+For a later reactive implementation:
+  - Keep stems harmonically compatible, equal in duration, and phase-aligned.
+  - Use visible backlog plus actionable risk; consider completion margin and
+    missing crews rather than only the current aggregate pressure value.
+  - Add hysteresis and minimum dwell time to prevent rapid state oscillation.
+    Initial tuning candidates: rise over 2-4 seconds; release over 6-10 seconds.
+  - Transition at appropriate beat/bar boundaries and test loop seams.
+  - Define behavior for tutorial, solo pause, shared menus, results, reconnect,
+    late joining, and save/resume. Current application-start looping does not
+    give identical musical position at identical gameplay times.
+  - Decide whether every teammate hears a shared music state or personal risk.
+    If a shared state must be exact, use authoritative timing/state rather than
+    each client's independently smoothed display pressure.
+
+Preserve the current hidden-wave protocol unless the study explicitly changes
+it. Do not make music announce upcoming high phases or consume chaos_context()
+as an anticipatory cue. Such mapping would expose currently hidden information
+and change both the gameplay feedback and the experimental condition.
+
+Likely implementation touchpoints:
+  audio_director.gd: asset selection, stems/transitions, gain control.
+  main.gd: music context and lifecycle handling.
+  research_logger.gd/main.gd: music-condition and transition metadata.
+  assets/audio/: new score/stems plus reproducible source where applicable.
+  tests/test_music_audio.gd: replace obsolete soft-only requirements with the
+    intended new audio contract, while preserving loop/mute/fade/mix checks.
+  README.md, SOUND_LIST.txt, ASSET_CREDITS.md: describe and credit final assets.
+
+10. RESEARCH LOGGING AND EVALUATION PLAN
+--------------------------------------
+Existing opt-in local capture records mouse motion/buttons/wheel, gameplay
+events, periodic context, shift results, and hidden phase/skipped-arrival
+events. JSONL records include local monotonic elapsed time, UTC, shift elapsed,
+shift index, and sequence. Local voice capture is handled separately from the
+research logger. It saves in-game transmitted voice with teammate consent;
+it does not record system audio, the soundtrack, or external voice applications.
+Capture defaults off each launch and excludes the tutorial.
+
+Consequently, voice WAVs cannot establish exactly which music was audible.
+For music experiments, proposed additional metadata should include condition,
+asset/version, gain, music enabled state, playback origin/position, adaptive
+state or stem gains, and timestamped transitions. Record changes during play
+so muted sessions or changed settings are distinguishable.
+
+Useful existing behavioral outcomes include rescues, failures, confidence,
+wrong dispatches, rapid responses, peak calls, supply/scout use, and event-based
+response latency. They are performance observations, not direct stress scores.
+There is no current classifier, workload model, or mandatory questionnaire.
+
+Suggested evaluation:
+  1. Compare calm and tense versions with the same gameplay settings, upgrade
+     state, team size, and shift; account for skipped arrivals and learning.
+  2. Match playback loudness and document headphones/output volume.
+  3. Counterbalance condition order across groups where feasible.
+  4. Collect brief perceived urgency/tension and speech-clarity feedback in the
+     evaluation procedure; a new in-game survey is not currently implemented.
+  5. Inspect both performance and subjective reports. Higher failure counts
+     alone do not establish successful or desirable urgency induction.
+
+11. VERIFICATION STATUS AND DOCUMENTATION GAPS
+--------------------------------------------
+Existing automated suites cover simulation/tutorial, map navigation and real
+viewport input, capture, music output, session lifecycle, snapshot transport,
+and multi-peer network/voice behavior.
+
+docs/GAME_POLISH_VALIDATION.md records prior successful checks dated 12 October
+2026. It reports soft music output around -26.59 dBFS peak / -38.42 dBFS RMS
+in normal playback and -27.14 / -38.19 in a busy sample. These are historical
+measurements from that validation, not results reproduced for this report.
+That document also describes an earlier worktree/revision; its pass record
+must not be treated as a fresh certification of revision 4300137.
+
+The current music test explicitly requires the soft WAV, no tense/panic layers,
+an unchanged stream at maximum intensity, default bus levels, quiet output,
+fade behavior, and mute/restart. A successful tension redesign will require
+intentional changes to those soft-only assertions, not simply ignoring failures.
+
+Before accepting new music, verify actual audio output, clipping/headroom,
+loop seams, transitions, cue intelligibility, speech intelligibility, mute,
+pause/menu behavior, and multiplayer consistency. Human listening with real
+headsets remains necessary. Existing documentation already identifies physical
+microphones, separate machines, WAN conditions, and live Azure deployment as
+areas requiring real-team verification.
+
+Documentation mismatches worth correcting during implementation:
+  - campaign.gd's Market Day introduction says scouting buys breathing room;
+    the actual scout action only reveals information and adds no time.
+  - SOUND_LIST.txt describes a surge warning cue, although the current hidden
+    schedule suppresses player-facing surge events.
+  - SOUND_LIST.txt describes arrival as an individual crew reaching the scene;
+    main.gd maps the audible arrival cue to the complete-team arrival event.
+  - main.gd's scout/supply feedback shares wording about safer/faster rescue;
+    that generic text overstates what scouting currently does.
+  - README.md has an empty 'Softer music' section.
+
+12. READINESS CONCLUSION
+-----------------------
+The project contains an implemented cooperative gameplay loop, deterministic
+arrival opportunities, campaign progression, network support, local research
+capture, and an audio subsystem with a usable pressure-input hook. Its present
+music intentionally stays gentle regardless of emergency load.
+
+The next music phase can start with a controlled tense-score prototype without
+changing the rescue rules. A reactive score is a larger follow-up involving
+risk mapping, transition logic, playback lifecycle, multiplayer behavior, and
+condition logging. The immediate decision is whether the intended intervention
+is a consistently tense soundtrack or music that reacts to gameplay risk.

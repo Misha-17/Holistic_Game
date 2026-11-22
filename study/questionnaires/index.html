@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beacon Bay Workload Questionnaires</title>
+<style>
+:root {
+  --bg: #f6f5f1; --panel: #fcfcfb; --ink: #16201f; --ink2: #4c5654; --muted: #87908d;
+  --line: #dcdbd3; --accent: #1d6f7a; --accent-ink: #ffffff; --curve: #1d6f7a; --mark: #c4492d;
+  --opt: #e9efe9; --warn: #9a4a12;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121615; --panel: #1a1f1e; --ink: #eef1ef; --ink2: #b9c2bf; --muted: #7d8784;
+    --line: #2e3533; --accent: #4fb3bf; --accent-ink: #0d1413; --curve: #5cc3cf; --mark: #f08a6c;
+    --opt: #1f2a28; --warn: #f0a46c;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121615; --panel: #1a1f1e; --ink: #eef1ef; --ink2: #b9c2bf; --muted: #7d8784;
+  --line: #2e3533; --accent: #4fb3bf; --accent-ink: #0d1413; --curve: #5cc3cf; --mark: #f08a6c;
+  --opt: #1f2a28; --warn: #f0a46c;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); }
+body { font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 19px; margin: 0 0 6px; }
+p { margin: 0 0 12px; }
+.sub { color: var(--ink2); margin-bottom: 20px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px 16px; }
+label.field { display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: var(--ink2); }
+input[type=text], input[type=number], select, textarea {
+  font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+}
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+button {
+  font: inherit; border-radius: 6px; padding: 9px 16px; cursor: pointer; border: 1px solid var(--line);
+  background: var(--panel); color: var(--ink);
+}
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible, .chip:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.check { display: flex; gap: 8px; align-items: center; font-size: 15px; }
+.steps { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.step { font-size: 13px; padding: 4px 10px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.step.on { color: var(--ink); border-color: var(--accent); }
+.hidden { display: none !important; }
+.note { font-size: 14px; color: var(--ink2); }
+.error { color: var(--warn); font-size: 14px; min-height: 21px; }
+/* DYWA */
+.dywa-wrap { position: relative; width: 100%; touch-action: none; user-select: none; }
+canvas#dywa { width: 100%; height: 420px; display: block; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); cursor: crosshair; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.chip { font-size: 14px; padding: 6px 12px; border-radius: 99px; border: 1px solid var(--line); background: var(--bg); cursor: pointer; color: var(--ink); }
+.chip[aria-pressed=true] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.annot-list { list-style: none; padding: 0; margin: 8px 0 0; }
+.annot-list li { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-top: 1px solid var(--line); font-size: 15px; }
+.annot-list .t { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 52px; }
+.popover { position: absolute; z-index: 5; width: min(360px, 92%); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 14px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+/* DLR-WAT */
+.item { padding: 16px 0; border-top: 1px solid var(--line); }
+.item:first-of-type { border-top: 0; }
+.item .q { font-weight: 600; margin-bottom: 2px; }
+.item .hint { font-size: 14px; color: var(--ink2); margin-bottom: 10px; }
+.scale { position: relative; height: 54px; touch-action: none; cursor: pointer; }
+.scale .track { position: absolute; left: 0; right: 0; top: 20px; height: 6px; border-radius: 3px; background: var(--line); }
+.scale .opt { position: absolute; top: 8px; height: 30px; width: 2px; background: var(--accent); }
+.scale .thumb { position: absolute; top: 11px; width: 24px; height: 24px; margin-left: -12px; border-radius: 50%;
+  background: var(--accent); border: 3px solid var(--panel); box-shadow: 0 0 0 1px var(--accent); }
+.scale .ends { position: absolute; left: 0; right: 0; top: 34px; display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); }
+.scale .mid { position: absolute; top: 34px; transform: translateX(-50%); font-size: 13px; color: var(--accent); white-space: nowrap; }
+.scale:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; border-radius: 6px; }
+.unset .thumb { display: none; }
+table.saved { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.saved th, table.saved td { text-align: left; padding: 6px 8px; border-top: 1px solid var(--line); }
+@media (max-width: 560px) { canvas#dywa { height: 320px; } .panel { padding: 14px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Workload questionnaires</h1>
+  <p class="sub">Beacon Bay study. Fill this in right after each level. Works offline; nothing is sent anywhere.</p>
+
+  <div class="steps" id="steps"></div>
+
+  <!-- SETUP (researcher) -->
+  <section class="panel" id="s-setup">
+    <h2>Setup (researcher)</h2>
+    <p class="note">The level run ID is on the game's results screen and in <code>manifest.json</code>. With it, answers join the game logs exactly; without it they join by player role, level and time.</p>
+    <div class="grid">
+      <label class="field">Participant ID<input type="text" id="participant" autocomplete="off" required></label>
+      <label class="field">Department
+        <select id="role"><option value="">Select</option><option value="fire">Fire</option><option value="medic">Medical</option><option value="police">Police</option><option value="engineer">Engineering</option></select>
+      </label>
+      <label class="field">Level
+        <select id="level">
+          <option value="0">0 - Training Harbor</option><option value="1">1 - First Light</option><option value="2">2 - Market Day</option>
+          <option value="3">3 - Two Banks</option><option value="4">4 - Lights Out</option><option value="5">5 - Dune Springs</option><option value="6">6 - Beacon Night</option>
+        </select>
+      </label>
+      <label class="field">Level length (seconds)<input type="number" id="duration" min="30" max="1200" step="1" value="330"></label>
+      <label class="field">Capture session ID (optional)<input type="text" id="session" autocomplete="off" placeholder="session_..."></label>
+      <label class="field">Level run ID (optional)<input type="text" id="runid" autocomplete="off" placeholder="level5_..."></label>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <label class="check"><input type="checkbox" id="use-dywa" checked> DYWA (workload curve)</label>
+      <label class="check"><input type="checkbox" id="use-wat" checked> DLR-WAT (eight scales)</label>
+    </div>
+    <p class="error" id="setup-error" role="alert"></p>
+    <div class="row"><button class="primary" id="start">Start</button></div>
+  </section>
+
+  <!-- DYWA -->
+  <section class="panel hidden" id="s-dywa">
+    <h2>How did your workload change during the level?</h2>
+    <p id="dywa-instr-1">Draw one line from left to right that shows your mental workload over the whole level. Left is the start of the level, right is the end. The middle line is your optimal workload. There are no right or wrong answers; draw what you experienced.</p>
+    <div class="dywa-wrap" id="dywa-wrap">
+      <canvas id="dywa" aria-label="Workload curve drawing area" role="img"></canvas>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="dywa-clear">Clear and redraw</button>
+      <button class="primary" id="dywa-to-events" disabled>Next: mark events</button>
+      <span class="note" id="dywa-status"></span>
+    </div>
+    <div id="dywa-events" class="hidden" style="margin-top:16px">
+      <p><strong>Mark the moments where your workload went up or down.</strong> Click on your line at that moment, then say what caused it. Add as many as you remember, or none.</p>
+      <ul class="annot-list" id="annot-list"></ul>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="dywa-done">Done with the curve</button>
+      </div>
+    </div>
+    <div class="popover hidden" id="popover" role="dialog" aria-label="Describe this moment">
+      <div class="note" id="pop-when"></div>
+      <div class="row" style="margin:6px 0"><span class="note">Workload</span>
+        <button class="chip" data-dir="up" aria-pressed="false">went up</button>
+        <button class="chip" data-dir="down" aria-pressed="false">went down</button>
+      </div>
+      <div class="chips" id="pop-cats"></div>
+      <label class="field">In your own words (optional)<input type="text" id="pop-text" maxlength="160"></label>
+      <div class="row" style="margin-top:10px"><button class="primary" id="pop-save">Add</button><button id="pop-cancel">Cancel</button></div>
+    </div>
+  </section>
+
+  <!-- DLR-WAT -->
+  <section class="panel hidden" id="s-wat">
+    <h2>How was your workload in this level?</h2>
+    <p>For each scale, click or tap where your experience was. The middle mark is your personal optimum: neither too little nor too much. Left of it means less than optimal (underload), right of it means more than optimal (overload).</p>
+    <div id="wat-items"></div>
+    <p class="error" id="wat-error" role="alert"></p>
+    <div class="row"><button class="primary" id="wat-done">Done</button></div>
+  </section>
+
+  <!-- SAVE -->
+  <section class="panel hidden" id="s-save">
+    <h2>Thank you</h2>
+    <p>Your answers are saved. Please tell the researcher you are done.</p>
+    <div class="row">
+      <button class="primary" id="download-one">Download this response (JSON)</button>
+      <button id="next-level">Next questionnaire</button>
+    </div>
+  </section>
+
+  <section class="panel" id="s-saved">
+    <h2>Saved on this computer</h2>
+    <p class="note">Responses stay in this browser until you export them. Export after each session and keep the file with the game's research folder.</p>
+    <table class="saved"><thead><tr><th>Participant</th><th>Department</th><th>Level</th><th>Saved (UTC)</th><th>Parts</th></tr></thead><tbody id="saved-body"></tbody></table>
+    <div class="row" style="margin-top:12px">
+      <button id="export-json">Export all (JSON)</button>
+      <button id="export-csv">Export all (CSV, one row per response)</button>
+      <button id="clear-saved">Delete saved responses</button>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------- config
+// DYWA: Gampe, Hamann & Carstengerdes (2026), DLR-IB-FL-BS-2026-89; GUI DOI 10.5281/zenodo.22890862.
+// Curve over task progression on a 1-5 scale: 1 very low, 3 optimal, 5 very high. Retrospective,
+// drawn right after the task; participants mark events that raised or lowered workload.
+const DYWA_MIN = 1, DYWA_MAX = 5, DYWA_OPT = 3, CURVE_POINTS = 101;
+const DYWA_CATEGORIES = [
+  "Many calls at once", "A call that needed my crew", "Deadline running out", "Unconfirmed call / scouting",
+  "Road blocked or flooded", "Storm, blackout or weather", "Coordinating with teammates", "No free crew",
+  "Mistake or denied action", "Quiet: nothing to do", "Things calmed down"
+];
+// DLR-WAT: eight scales (Brandenburger, Dressler & Grippenkoven; Grippenkoven & Brandenburger 2018).
+// 0-200 with 100 = personal optimum; frustration 100-200 (100 = none); task accomplishment 0-100 (100 = full).
+const WAT_ITEMS = [
+  {id: "information_intake", name: "Information intake", q: "Taking in information", hint: "Watching the map, the calls, your crews and listening to your team.", min: 0, max: 200, mental: true},
+  {id: "knowledge_retrieval", name: "Knowledge retrieval", q: "Recalling what you know", hint: "Remembering the rules, which crew fits which call, routes and what teammates said.", min: 0, max: 200, mental: true},
+  {id: "decision_making", name: "Decision making", q: "Making decisions", hint: "Choosing which call to handle and which crew to send.", min: 0, max: 200, mental: true},
+  {id: "motor_physical", name: "Motor and physical", q: "Physical actions", hint: "Moving the mouse, clicking and using the keyboard.", min: 0, max: 200},
+  {id: "temporal", name: "Temporal", q: "Time pressure", hint: "How much time you had for your tasks.", min: 0, max: 200},
+  {id: "effort", name: "Effort", q: "Effort", hint: "How hard you had to work to do the task.", min: 0, max: 200},
+  {id: "frustration", name: "Frustration", q: "Frustration", hint: "How irritated, stressed or annoyed you felt.", min: 100, max: 200, left: "No frustration", right: "Maximal frustration"},
+  {id: "task_accomplishment", name: "Task accomplishment", q: "Task accomplishment", hint: "How well you accomplished the task.", min: 0, max: 100, left: "Not at all", right: "Completely"}
+];
+const STORE_KEY = "beaconbay.questionnaires.v1";
+
+// ---------------------------------------------------------------- state
+let setup = null;
+let response = null;
+let flow = [];
+let plan = [];
+const $ = (id) => document.getElementById(id);
+
+function loadSaved() { try { return JSON.parse(localStorage.getItem(STORE_KEY) || "[]"); } catch (e) { return memorySaved; } }
+let memorySaved = [];
+function storeSaved(list) { memorySaved = list; try { localStorage.setItem(STORE_KEY, JSON.stringify(list)); } catch (e) { /* private mode: keep in memory */ } }
+
+function show(id) {
+  for (const s of ["s-setup", "s-dywa", "s-wat", "s-save"]) $(s).classList.toggle("hidden", s !== id);
+  // The list of saved responses is for the researcher; participants don't see it while answering.
+  $("s-saved").classList.toggle("hidden", id === "s-dywa" || id === "s-wat");
+  const labels = {"s-setup": "Setup", "s-dywa": "Workload curve", "s-wat": "Eight scales", "s-save": "Saved"};
+  $("steps").innerHTML = ["s-setup", ...plan, "s-save"].map(s => `<span class="step ${s === id ? "on" : ""}">${labels[s]}</span>`).join("");
+  window.scrollTo({top: 0});
+}
+
+// ---------------------------------------------------------------- setup
+$("start").addEventListener("click", () => {
+  const participant = $("participant").value.trim();
+  const role = $("role").value;
+  const duration = Number($("duration").value);
+  flow = [];
+  if ($("use-dywa").checked) flow.push("s-dywa");
+  if ($("use-wat").checked) flow.push("s-wat");
+  const problems = [];
+  if (!participant) problems.push("participant ID");
+  if (!role) problems.push("department");
+  if (!(duration >= 30)) problems.push("level length");
+  if (!flow.length) problems.push("at least one questionnaire");
+  plan = flow.slice();
+  if (problems.length) { $("setup-error").textContent = "Missing: " + problems.join(", ") + "."; return; }
+  $("setup-error").textContent = "";
+  setup = {participant, role, level: Number($("level").value), duration, session: $("session").value.trim(), runid: $("runid").value.trim()};
+  response = {
+    schema: "beacon-bay-questionnaire-v1", participant_id: participant, role, level_number: setup.level,
+    capture_session_id: setup.session || null, level_run_id: setup.runid || null,
+    started_utc: new Date().toISOString(), started_unix_ms: Date.now()
+  };
+  next();
+});
+
+function next() {
+  const current = flow.shift();
+  if (current === "s-dywa") startDywa();
+  else if (current === "s-wat") startWat();
+  else finish();
+}
+
+// ---------------------------------------------------------------- DYWA
+const canvas = $("dywa");
+const ctx = canvas.getContext("2d");
+let raw = [];            // [progress 0-1, workload 1-5, ms since drawing started]
+let curve = null;        // CURVE_POINTS samples
+let annotations = [];
+let drawing = false, drawStart = 0, annotating = false, pending = null;
+const PAD = {l: 92, r: 18, t: 18, b: 44};
+
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function plotRect() { const w = canvas.clientWidth, h = canvas.clientHeight; return {x: PAD.l, y: PAD.t, w: w - PAD.l - PAD.r, h: h - PAD.t - PAD.b}; }
+function toXY(p, v) { const r = plotRect(); return [r.x + p * r.w, r.y + (DYWA_MAX - v) / (DYWA_MAX - DYWA_MIN) * r.h]; }
+function fromEvent(ev) {
+  const b = canvas.getBoundingClientRect(), r = plotRect();
+  const p = Math.min(1, Math.max(0, (ev.clientX - b.left - r.x) / r.w));
+  const v = Math.min(DYWA_MAX, Math.max(DYWA_MIN, DYWA_MAX - (ev.clientY - b.top - r.y) / r.h * (DYWA_MAX - DYWA_MIN)));
+  return [p, v];
+}
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(canvas.clientWidth * dpr);
+  canvas.height = Math.round(canvas.clientHeight * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  render();
+}
+function fmt(s) { const m = Math.floor(s / 60), r = Math.round(s % 60); return `${m}:${String(r).padStart(2, "0")}`; }
+
+function render() {
+  if (!setup) return;
+  const r = plotRect();
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  ctx.font = "13px system-ui, -apple-system, Segoe UI, sans-serif";
+  // optimal band and grid
+  const [, yOpt] = toXY(0, DYWA_OPT);
+  ctx.fillStyle = css("--opt");
+  const [, yBandTop] = toXY(0, DYWA_OPT + 0.25), [, yBandBot] = toXY(0, DYWA_OPT - 0.25);
+  ctx.fillRect(r.x, yBandTop, r.w, yBandBot - yBandTop);
+  ctx.strokeStyle = css("--line"); ctx.lineWidth = 1;
+  for (let v = DYWA_MIN; v <= DYWA_MAX; v++) { const [, y] = toXY(0, v); ctx.beginPath(); ctx.moveTo(r.x, y); ctx.lineTo(r.x + r.w, y); ctx.stroke(); }
+  ctx.strokeStyle = css("--accent"); ctx.setLineDash([6, 5]); ctx.beginPath(); ctx.moveTo(r.x, yOpt); ctx.lineTo(r.x + r.w, yOpt); ctx.stroke(); ctx.setLineDash([]);
+  // y labels
+  ctx.fillStyle = css("--ink2"); ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  const yl = {5: "Very high", 3: "Optimal", 1: "Very low"};
+  for (const v of [5, 3, 1]) { const [, y] = toXY(0, v); ctx.fillText(yl[v], r.x - 10, y); }
+  // x ticks: every minute of the level
+  ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillStyle = css("--muted");
+  for (let s = 0; s <= setup.duration + 0.01; s += 60) { const [x] = toXY(s / setup.duration, DYWA_MIN); ctx.fillText(fmt(s), x, r.y + r.h + 8); }
+  ctx.textAlign = "left"; ctx.fillText("Start", r.x, r.y + r.h + 24); ctx.textAlign = "right"; ctx.fillText("End", r.x + r.w, r.y + r.h + 24);
+  // curve
+  const pts = curve ? curve.map((v, i) => [i / (CURVE_POINTS - 1), v]) : raw.map(p => [p[0], p[1]]);
+  if (pts.length > 1) {
+    ctx.strokeStyle = css("--curve"); ctx.lineWidth = 3; ctx.lineJoin = "round"; ctx.lineCap = "round";
+    ctx.beginPath();
+    pts.forEach(([p, v], i) => { const [x, y] = toXY(p, v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke();
+  }
+  // annotations: arrows pointing at the curve
+  annotations.forEach((a, i) => {
+    const [x, y] = toXY(a.progress, a.workload);
+    const up = a.direction !== "down";
+    const tip = up ? y - 6 : y + 6, tail = up ? y - 46 : y + 46;
+    ctx.strokeStyle = css("--mark"); ctx.fillStyle = css("--mark"); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x, tail); ctx.lineTo(x, tip); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, tip); ctx.lineTo(x - 6, tip + (up ? -10 : 10)); ctx.lineTo(x + 6, tip + (up ? -10 : 10)); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.arc(x, tail, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ffffff"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(String(i + 1), x, tail + 0.5);
+  });
+}
+
+function resampleCurve() {
+  // Average of the drawn points per progress bin; gaps are filled by linear interpolation.
+  const sorted = raw.slice().sort((a, b) => a[0] - b[0]);
+  const bins = Array.from({length: CURVE_POINTS}, () => []);
+  for (const [p, v] of sorted) bins[Math.round(p * (CURVE_POINTS - 1))].push(v);
+  const known = bins.map((b, i) => b.length ? [i, b.reduce((s, x) => s + x, 0) / b.length] : null).filter(Boolean);
+  if (known.length < 2) return null;
+  const out = [];
+  for (let i = 0; i < CURVE_POINTS; i++) {
+    let lo = known[0], hi = known[known.length - 1];
+    for (const k of known) { if (k[0] <= i) lo = k; if (k[0] >= i) { hi = k; break; } }
+    out.push(hi[0] === lo[0] ? lo[1] : lo[1] + (hi[1] - lo[1]) * (i - lo[0]) / (hi[0] - lo[0]));
+  }
+  return out.map(v => Math.round(v * 1000) / 1000);
+}
+function coverage() { if (!raw.length) return 0; const ps = raw.map(p => p[0]); return Math.max(...ps) - Math.min(...ps); }
+
+canvas.addEventListener("pointerdown", (ev) => {
+  if (annotating) { placeAnnotation(ev); return; }
+  canvas.setPointerCapture(ev.pointerId);
+  drawing = true; drawStart = performance.now(); raw = []; curve = null; annotations = [];
+  raw.push([...fromEvent(ev), 0]);
+  render();
+});
+canvas.addEventListener("pointermove", (ev) => {
+  if (!drawing) return;
+  const events = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [ev];
+  for (const e of events) raw.push([...fromEvent(e), Math.round(performance.now() - drawStart)]);
+  render();
+});
+function endDraw() {
+  if (!drawing) return;
+  drawing = false;
+  const cov = coverage();
+  if (cov >= 0.9) {
+    curve = resampleCurve();
+    $("dywa-status").textContent = "";
+    $("dywa-to-events").disabled = !curve;
+  } else {
+    $("dywa-status").textContent = "Please draw across the whole level, from the start (left) to the end (right).";
+    $("dywa-to-events").disabled = true;
+  }
+  render();
+}
+canvas.addEventListener("pointerup", endDraw);
+canvas.addEventListener("pointercancel", endDraw);
+
+$("dywa-clear").addEventListener("click", () => {
+  raw = []; curve = null; annotations = []; annotating = false;
+  $("dywa-events").classList.add("hidden"); $("dywa-to-events").disabled = true; $("dywa-status").textContent = "";
+  $("annot-list").innerHTML = ""; closePopover(); render();
+});
+$("dywa-to-events").addEventListener("click", () => {
+  annotating = true;
+  $("dywa-events").classList.remove("hidden");
+  $("dywa-to-events").disabled = true;
+  canvas.style.cursor = "pointer";
+});
+
+function buildChips() {
+  $("pop-cats").innerHTML = DYWA_CATEGORIES.map(c => `<button class="chip" data-cat="${c}" aria-pressed="false">${c}</button>`).join("");
+}
+document.addEventListener("click", (ev) => {
+  const chip = ev.target.closest(".chip");
+  if (!chip || !$("popover").contains(chip)) return;
+  const group = chip.dataset.dir ? "[data-dir]" : "[data-cat]";
+  const pressed = chip.getAttribute("aria-pressed") === "true";
+  if (chip.dataset.dir) $("popover").querySelectorAll(group).forEach(c => c.setAttribute("aria-pressed", "false"));
+  chip.setAttribute("aria-pressed", pressed ? "false" : "true");
+});
+
+function placeAnnotation(ev) {
+  const [p] = fromEvent(ev);
+  const v = curve[Math.round(p * (CURVE_POINTS - 1))];
+  pending = {progress: Math.round(p * 1000) / 1000, workload: v};
+  const before = curve[Math.max(0, Math.round(p * (CURVE_POINTS - 1)) - 4)];
+  const guess = v >= before ? "up" : "down";
+  buildChips();
+  $("popover").querySelectorAll("[data-dir]").forEach(c => c.setAttribute("aria-pressed", c.dataset.dir === guess ? "true" : "false"));
+  $("pop-text").value = "";
+  $("pop-when").textContent = `At ${fmt(p * setup.duration)} into the level`;
+  const wrap = $("dywa-wrap").getBoundingClientRect(), b = canvas.getBoundingClientRect();
+  const pop = $("popover");
+  pop.classList.remove("hidden");
+  const left = Math.min(Math.max(0, ev.clientX - wrap.left - pop.offsetWidth / 2), wrap.width - pop.offsetWidth);
+  pop.style.left = left + "px";
+  pop.style.top = (ev.clientY - b.top + 16) + "px";
+  pop.querySelector(".chip").focus();
+}
+function closePopover() { $("popover").classList.add("hidden"); pending = null; }
+$("pop-cancel").addEventListener("click", closePopover);
+$("pop-save").addEventListener("click", () => {
+  if (!pending) return;
+  const dir = [...$("popover").querySelectorAll("[data-dir]")].find(c => c.getAttribute("aria-pressed") === "true");
+  const cats = [...$("popover").querySelectorAll("[data-cat]")].filter(c => c.getAttribute("aria-pressed") === "true").map(c => c.dataset.cat);
+  annotations.push({...pending, time_s: Math.round(pending.progress * setup.duration * 10) / 10,
+    direction: dir ? dir.dataset.dir : null, categories: cats, text: $("pop-text").value.trim()});
+  annotations.sort((a, b) => a.progress - b.progress);
+  closePopover(); renderAnnotList(); render();
+});
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closePopover(); });
+
+function renderAnnotList() {
+  $("annot-list").innerHTML = annotations.map((a, i) =>
+    `<li><span class="t">${i + 1}. ${fmt(a.time_s)}</span><span>${a.direction === "down" ? "Down" : (a.direction === "up" ? "Up" : "")}${a.categories.length ? ": " + a.categories.join(", ") : ""}${a.text ? " - " + escapeHtml(a.text) : ""}</span>` +
+    `<button data-remove="${i}" aria-label="Remove event ${i + 1}" style="margin-left:auto;padding:2px 10px">Remove</button></li>`).join("");
+}
+$("annot-list").addEventListener("click", (ev) => {
+  const i = ev.target.dataset.remove;
+  if (i === undefined) return;
+  annotations.splice(Number(i), 1); renderAnnotList(); render();
+});
+function escapeHtml(s) { return s.replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c])); }
+
+function startDywa() {
+  raw = []; curve = null; annotations = []; annotating = false;
+  $("dywa-events").classList.add("hidden"); $("dywa-to-events").disabled = true; $("annot-list").innerHTML = "";
+  canvas.style.cursor = "crosshair";
+  show("s-dywa");
+  resize();
+}
+$("dywa-done").addEventListener("click", () => {
+  const mean = curve.reduce((s, v) => s + v, 0) / curve.length;
+  response.dywa = {
+    instrument: "DYWA (Gampe, Hamann & Carstengerdes, 2026)", scale: {min: DYWA_MIN, max: DYWA_MAX, optimal: DYWA_OPT, anchors: {"1": "Very low", "3": "Optimal", "5": "Very high"}},
+    task_duration_s: setup.duration, curve: curve.map((v, i) => [Math.round(i / (CURVE_POINTS - 1) * 1000) / 1000, v]),
+    raw: raw.map(p => [Math.round(p[0] * 10000) / 10000, Math.round(p[1] * 1000) / 1000, p[2]]),
+    annotations, summary: {mean: round3(mean), max: Math.max(...curve), min: Math.min(...curve),
+      mean_deviation_from_optimal: round3(mean - DYWA_OPT), events: annotations.length},
+    completed_unix_ms: Date.now()
+  };
+  next();
+});
+function round3(v) { return Math.round(v * 1000) / 1000; }
+
+// ---------------------------------------------------------------- DLR-WAT
+const watValues = {};
+function startWat() {
+  for (const k in watValues) delete watValues[k];
+  $("wat-items").innerHTML = WAT_ITEMS.map(it => {
+    const optimum = it.min === 0 && it.max === 200;
+    return `<div class="item"><div class="q">${it.q}</div><div class="hint">${it.hint}</div>
+      <div class="scale unset" id="sc-${it.id}" tabindex="0" role="slider" aria-label="${it.q}" aria-valuemin="${it.min}" aria-valuemax="${it.max}" aria-valuetext="not answered">
+        <div class="track"></div>${optimum ? '<div class="opt" style="left:50%"></div><div class="mid" style="left:50%">Optimum</div>' : ""}
+        <div class="thumb"></div>
+        <div class="ends"><span>${it.left || "Maximal underload"}</span><span>${it.right || "Maximal overload"}</span></div>
+      </div></div>`;
+  }).join("");
+  for (const it of WAT_ITEMS) bindScale(it);
+  show("s-wat");
+}
+function bindScale(it) {
+  const el = $("sc-" + it.id);
+  const set = (value) => {
+    value = Math.round(Math.min(it.max, Math.max(it.min, value)));
+    watValues[it.id] = value;
+    el.classList.remove("unset");
+    el.querySelector(".thumb").style.left = ((value - it.min) / (it.max - it.min) * 100) + "%";
+    el.setAttribute("aria-valuenow", value);
+    el.setAttribute("aria-valuetext", String(value));
+  };
+  const fromPointer = (ev) => { const b = el.getBoundingClientRect(); set(it.min + (ev.clientX - b.left) / b.width * (it.max - it.min)); };
+  let dragging = false;
+  el.addEventListener("pointerdown", (ev) => { dragging = true; el.setPointerCapture(ev.pointerId); fromPointer(ev); });
+  el.addEventListener("pointermove", (ev) => { if (dragging) fromPointer(ev); });
+  el.addEventListener("pointerup", () => { dragging = false; });
+  el.addEventListener("keydown", (ev) => {
+    const cur = watValues[it.id] ?? (it.min + it.max) / 2, step = ev.shiftKey ? 10 : 2;
+    if (ev.key === "ArrowLeft" || ev.key === "ArrowDown") { set(cur - step); ev.preventDefault(); }
+    if (ev.key === "ArrowRight" || ev.key === "ArrowUp") { set(cur + step); ev.preventDefault(); }
+  });
+}
+$("wat-done").addEventListener("click", () => {
+  const missing = WAT_ITEMS.filter(it => watValues[it.id] === undefined);
+  if (missing.length) { $("wat-error").textContent = "Please answer: " + missing.map(it => it.q).join(", ") + "."; return; }
+  $("wat-error").textContent = "";
+  const mental = WAT_ITEMS.filter(it => it.mental).map(it => watValues[it.id]);
+  const all = WAT_ITEMS.map(it => watValues[it.id]);
+  response.dlr_wat = {
+    instrument: "DLR-WAT", scale: "0-200, 100 = personal optimum; frustration 100-200; task accomplishment 0-100",
+    items: Object.fromEntries(WAT_ITEMS.map(it => [it.id, watValues[it.id]])),
+    deviation_from_optimum: Object.fromEntries(WAT_ITEMS.filter(it => it.min === 0 && it.max === 200).map(it => [it.id, watValues[it.id] - 100])),
+    mental_workload_mean: round3(mental.reduce((s, v) => s + v, 0) / mental.length),
+    overall_mean: round3(all.reduce((s, v) => s + v, 0) / all.length),
+    completed_unix_ms: Date.now()
+  };
+  next();
+});
+
+// ---------------------------------------------------------------- save / export
+function finish() {
+  response.completed_utc = new Date().toISOString();
+  response.completed_unix_ms = Date.now();
+  const list = loadSaved();
+  list.push(response);
+  storeSaved(list);
+  renderSaved();
+  show("s-save");
+}
+function download(name, text, type) {
+  const blob = new Blob([text], {type});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function fileStem(r) { return `questionnaire_${r.participant_id.replace(/[^A-Za-z0-9_-]/g, "_")}_level${r.level_number}_${r.completed_unix_ms}`; }
+$("download-one").addEventListener("click", () => download(fileStem(response) + ".json", JSON.stringify(response, null, 2), "application/json"));
+$("next-level").addEventListener("click", () => {
+  const lvl = $("level");
+  if (lvl.selectedIndex < lvl.options.length - 1) lvl.selectedIndex += 1;
+  $("runid").value = "";
+  show("s-setup");
+});
+$("export-json").addEventListener("click", () => {
+  const list = loadSaved();
+  download(`questionnaires_all_${Date.now()}.json`, JSON.stringify({schema: "beacon-bay-questionnaire-v1", exported_utc: new Date().toISOString(), responses: list}, null, 2), "application/json");
+});
+$("export-csv").addEventListener("click", () => {
+  const list = loadSaved();
+  const cols = ["participant_id", "role", "level_number", "capture_session_id", "level_run_id", "completed_utc", "completed_unix_ms",
+    ...WAT_ITEMS.map(it => "wat_" + it.id), "wat_mental_mean", "wat_overall_mean",
+    "dywa_mean", "dywa_max", "dywa_min", "dywa_mean_dev_optimal", "dywa_events", ...Array.from({length: 11}, (_, i) => `dywa_p${i * 10}`)];
+  const rows = list.map(r => {
+    const w = r.dlr_wat || {}, d = r.dywa || {};
+    const at = (p) => d.curve ? d.curve[Math.round(p / 100 * (CURVE_POINTS - 1))][1] : "";
+    return [r.participant_id, r.role, r.level_number, r.capture_session_id || "", r.level_run_id || "", r.completed_utc, r.completed_unix_ms,
+      ...WAT_ITEMS.map(it => w.items ? w.items[it.id] : ""), w.mental_workload_mean ?? "", w.overall_mean ?? "",
+      d.summary ? d.summary.mean : "", d.summary ? d.summary.max : "", d.summary ? d.summary.min : "", d.summary ? d.summary.mean_deviation_from_optimal : "",
+      d.summary ? d.summary.events : "", ...Array.from({length: 11}, (_, i) => at(i * 10))];
+  });
+  const esc = (v) => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
+  download(`questionnaires_all_${Date.now()}.csv`, [cols, ...rows].map(r => r.map(esc).join(",")).join("\n") + "\n", "text/csv");
+});
+$("clear-saved").addEventListener("click", () => {
+  if (!loadSaved().length) return;
+  const sure = window.prompt("Type DELETE to remove all saved responses from this browser (export them first).");
+  if (sure === "DELETE") { storeSaved([]); renderSaved(); }
+});
+function renderSaved() {
+  const list = loadSaved();
+  $("saved-body").innerHTML = list.length ? list.slice().reverse().map(r =>
+    `<tr><td>${escapeHtml(r.participant_id)}</td><td>${r.role}</td><td>${r.level_number}</td><td>${(r.completed_utc || "").replace("T", " ").slice(0, 19)}</td><td>${[r.dywa ? "DYWA" : "", r.dlr_wat ? "DLR-WAT" : ""].filter(Boolean).join(" + ")}</td></tr>`).join("")
+    : `<tr><td colspan="5" class="note">Nothing saved yet.</td></tr>`;
+}
+window.addEventListener("resize", () => { if (!$("s-dywa").classList.contains("hidden")) resize(); });
+renderSaved();
+show("s-setup");
+</script>
+</body>
+</html>

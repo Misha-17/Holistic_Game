@@ -40,7 +40,7 @@ func begin(practice_sim: RescueSimulation) -> void:
 	sim.start_shift(0)
 	sim._rng.seed = 44004
 	sim._shift = sim._shift.duplicate(true)
-	for key: String in ["surges", "disruptions", "traffic"]: sim._shift[key] = []
+	for key: String in ["surges", "disruptions", "traffic", "chaos_phases", "arrival_schedule"]: sim._shift[key] = []
 	sim._shift["interval"] = 1000000.0
 	sim._shift["max_active"] = 3
 	sim._next_spawn = 1000000.0
@@ -203,7 +203,7 @@ func current() -> Dictionary:
 		Step.DISPATCH_ENGINEER:
 			_set_card(card,"Tess","A different skill can work in parallel","Bram is busy at the bakery. Pick me at the engineer station, then click Harbor Workshop to send me.","Click Tess's station, then Harbor Workshop.",_engineer_id,"map_unit:engineer",["select","select_unit","dispatch:engineer"])
 		Step.RALLY:
-			_set_card(card,"Nova","One boost helps both crews","Bram and Tess are on the road. The coffee boost makes every crew move and work faster for twenty seconds. Save it for when several calls need help.","Press Space for a coffee boost.",_fire_id,"special",["select","select_unit","special"])
+			_set_card(card,"Nova","One boost helps both crews","Bram and Tess are on the road. The speed boost makes every crew drive and work faster for twenty seconds, and gives every open call a few extra seconds. Save it for when several calls need help.","Press Space for a speed boost.",_fire_id,"special",["select","select_unit","special"])
 		Step.WATCH_TEAM:
 			_set_card(card,"Tess","Two routes. Two jobs getting done.","Bram contains the bakery while I repair the workshop. Each route takes time and each rescue still needs work after arrival. Both calls must finish.","Watch both calls resolve.",_engineer_id,"map",["select","select_unit"])
 			card.can_advance = _is_resolved(_fire_id) and _is_resolved(_engineer_id)
@@ -226,7 +226,7 @@ func current() -> Dictionary:
 			card.allowed = ["select"]
 		Step.COMPLETE:
 			card.title = "Ready to read the town"
-			card.text = "Pick a crew (station or vehicle), then click the call. Q scouts a ? call. E helps a crew on scene. Space is the coffee boost. Shortcut: hover a call and press 1-4 to send the nearest crew of that type. Right-click clears your selection."
+			card.text = "Pick a crew (station or vehicle), then click the call. Q scouts a ? call. E helps a crew on scene. Space is the speed boost. Shortcut: hover a call and press 1-4 to send the nearest crew of that type. Right-click clears your selection."
 			card.objective = "Practice complete. Your campaign progress stays untouched."
 			card.next_label = "READY FOR BEACON BAY"
 			card.can_advance = active

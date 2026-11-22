@@ -7,8 +7,19 @@ signal event_received(data: Dictionary)
 signal roster_changed
 signal message_received(text: String)
 signal disconnected
+signal voice_packet_received(peer_id: int, sequence: int, pcm: PackedByteArray)
+signal voice_participants_changed
+## Study data from another player, delivered to the session leader's game
+## (2.11: only the leader's computer stores files). rel_path is relative to that
+## player's folder; mode is "append" or "replace".
 
 const PORT := 24680
+const PROTOCOL_VERSION := 15 # 9.11: study data is stored on each player's own computer again (no relay). 14: stable player keys, reserved departments.
+const MAX_PLAYER_NAME_LENGTH := 20
+const UNRELIABLE_SNAPSHOT_LIMIT := 1100 # Leave room for RPC/ENet headers below the path MTU.
+# ENet channels: 0 control, 1 voice audio, 2 voice state, 3 large state/events.
+# (Channel 4, the 2.11 study-data relay to the session leader, was removed on 9.11.)
+const CHANNELS := 4
 # Every player has the same job: command one (or more) emergency departments.
 # Departments are split automatically by how many people are in the room.
 const DEPARTMENTS: Array[String] = ["fire", "medic", "engineer", "police"]
@@ -19,15 +30,40 @@ const SPLITS := {
 	3: [["fire", "police"], ["medic"], ["engineer"]],
 	4: [["fire"], ["medic"], ["engineer"], ["police"]],
 }
-const ACTIONS := ["dispatch", "scout", "supply", "special", "ping", "start_shift"]
+const ACTIONS := ["dispatch", "withdraw", "clear_road", "scout", "supply", "special", "ping", "start_shift", "change_role", "level_ready", "entry_start", "entry_cancel"]
 var active := false
+var port := PORT
 var hosting := false
 var dedicated := false
 # Seat number in the room (0 = host). Kept under the old name so research logs stay comparable.
 var role := 0
 var roster: Dictionary = {}
+# Bundle ranks can change between levels without changing player/voice identity.
+var role_assignments: Dictionary = {}
+var local_player_name := ""
+var player_names: Dictionary = {}
+## A random id stored on this computer (main.gd), sent when joining. The host
+## uses it to recognise a player who reconnects with a new network id: they get
+## their seat and departments back, and their voice continues in the same track.
+var local_player_key := ""
+var player_keys: Dictionary = {} # peer id -> player key (connected players)
+## Number of department bundles in use. Fixed while roles are locked, so a player
+## leaving or joining never moves anyone else's departments (2.11).
+var team_size := 0
+## Host: true except in the co-op lobby. While locked, a departing player's seat
+## and departments are reserved for them, and new arrivals wait for the next level.
+var roles_locked := false
+## Seats and departments of players who dropped out while roles were locked.
+## player key -> {"seat", "rank", "name"}. Host only, but broadcast for the UI.
+var reserved: Dictionary = {}
+## The session leader starts levels and is the one computer that stores study
+## files. On a dedicated server it is the first player who joined; it moves to
+## the next player only while the leader is disconnected.
+var leader_key := ""
 var status := "Offline"
 var _last_snapshot: Dictionary = {}
+var _snapshot_sequence := 0
+var _received_snapshot_sequence := -1
 var _command_windows: Dictionary = {}
 # Internet play: the host tries to open the port on its router (UPnP) in the background.
 var internet_status := ""
@@ -37,12 +73,22 @@ var _upnp_thread: Thread
 var _connect_started_ms := -1
 var _join_address := ""
 const CONNECT_TIMEOUT_MS := 9000
+const VOICE_PACKET_BYTES := 640 # 20 ms, 16 kHz mono PCM16.
+var voice_participants: Dictionary = {}
+var _local_voice_state := {"mic": false, "consent": false, "recording": false}
+var _voice_windows: Dictionary = {}
+var _voice_sequences: Dictionary = {}
+var _voice_state_windows: Dictionary = {}
 
 func _enter_tree() -> void:
 	
 	name = "NetworkSession"
 
 func _ready() -> void:
+	for argument in OS.get_cmdline_user_args() + OS.get_cmdline_args():
+		if argument.begins_with("--port="):
+			var value := argument.trim_prefix("--port=")
+			if value.is_valid_int() and int(value) >= 1024 and int(value) <= 65535: port = int(value)
 	multiplayer.peer_connected.connect(_peer_connected)
 	multiplayer.peer_disconnected.connect(_peer_disconnected)
 	multiplayer.connected_to_server.connect(_connected)
@@ -53,9 +99,9 @@ func host(server_only: bool = false) -> Error:
 	close()
 	dedicated = server_only
 	var peer := ENetMultiplayerPeer.new()
-	var err := peer.create_server(PORT, 4 if dedicated else 3)
+	var err := peer.create_server(port, 4 if dedicated else 3, CHANNELS)
 	if err != OK:
-		status = "Could not open port %d (is another copy of the game already hosting?)" % PORT
+		status = "Could not open port %d (is another copy of the game already hosting?)" % port
 		return err
 	# Snapshots are large; compression keeps them under one network packet.
 	peer.host.compress(ENetConnection.COMPRESS_RANGE_CODER)
@@ -66,23 +112,36 @@ func host(server_only: bool = false) -> Error:
 	hosting = true
 	role = -1 if dedicated else 0
 	roster = {} if dedicated else {1: 0}
-	status = "Room open · port %d" % PORT
+	player_keys = {} if dedicated else {1: _clean_key(local_player_key, 1)}
+	reserved.clear()
+	leader_key = "" if dedicated else str(player_keys[1])
+	team_size = 0
+	_reconcile_role_assignments()
+	if not dedicated:
+		player_names[1] = clean_player_name(local_player_name)
+		print("%s hosting as %s chief" % [player_log_label(1), departments_text(1)])
+	if not dedicated: voice_participants[1] = _local_voice_state.duplicate()
+	status = "Room open · port %d" % port
 	roster_changed.emit()
 	return OK
 
 func join(address: String) -> Error:
 	close()
 	var target := address.strip_edges()
-	var port := PORT
+	var target_port := port
 	# Accept "1.2.3.4:24680" as well as a bare address.
 	if target.count(":") == 1:
-		port = int(target.get_slice(":", 1))
+		var value := target.get_slice(":", 1)
+		if not value.is_valid_int() or int(value) < 1024 or int(value) > 65535:
+			status = "Use a port between 1024 and 65535"
+			return ERR_INVALID_PARAMETER
+		target_port = int(value)
 		target = target.get_slice(":", 0)
 	if target.is_empty():
 		status = "Type the host's IP address first"
 		return ERR_INVALID_PARAMETER
 	var peer := ENetMultiplayerPeer.new()
-	var err := peer.create_client(target, port)
+	var err := peer.create_client(target, target_port, CHANNELS)
 	if err != OK:
 		status = "Could not connect to %s" % target
 		return err
@@ -124,7 +183,21 @@ func close() -> void:
 	active = false
 	hosting = false
 	roster.clear()
+	role_assignments.clear()
+	player_names.clear()
+	player_keys.clear()
+	reserved.clear()
+	leader_key = ""
+	team_size = 0
+	roles_locked = false
+	voice_participants.clear()
+	_voice_windows.clear()
+	_voice_sequences.clear()
+	_voice_state_windows.clear()
+	voice_participants_changed.emit()
 	_last_snapshot.clear()
+	_snapshot_sequence = 0
+	_received_snapshot_sequence = -1
 	_command_windows.clear()
 	role = 0
 	status = "Offline"
@@ -135,16 +208,25 @@ func send_command(action: String, payload: Dictionary = {}) -> void:
 	var clean_payload := _clean_payload(action, payload)
 	if not active or hosting:
 		command_received.emit(action, clean_payload, 1)
-	else:
+	elif _server_available():
 		_command.rpc_id(1, action, clean_payload)
 
 func broadcast(data: Dictionary) -> void:
 	if active and hosting:
+		_snapshot_sequence += 1
 		_last_snapshot = data.duplicate(true)
-		if multiplayer.get_peers().size() > 0:
-			# The game state is ~10x smaller compressed, so it fits in a few network packets.
+		var recipients := _connected_recipients()
+		if not recipients.is_empty():
 			var raw := var_to_bytes(data)
-			_state.rpc(raw.compress(FileAccess.COMPRESSION_ZSTD), raw.size())
+			var packed := raw.compress(FileAccess.COMPRESSION_ZSTD)
+			if packed.size() <= UNRELIABLE_SNAPSHOT_LIMIT:
+				for recipient in recipients:
+					_state.rpc_id(recipient, _snapshot_sequence, packed, raw.size())
+			else:
+				# Expanded-map snapshots can exceed the MTU. ENet's reliable path
+				# handles fragmentation, isolated from voice and control channels.
+				for recipient in recipients:
+					_large_state.rpc_id(recipient, _snapshot_sequence, packed, raw.size())
 
 static func _unpack(packed: PackedByteArray, size: int) -> Dictionary:
 	if size <= 0 or size > 8 * 1024 * 1024:
@@ -155,22 +237,39 @@ static func _unpack(packed: PackedByteArray, size: int) -> Dictionary:
 	var value: Variant = bytes_to_var(raw)
 	return value if value is Dictionary else {}
 
+func _connected_recipients() -> Array[int]:
+	var result: Array[int] = []
+	if not active or not hosting: return result
+	var enet := multiplayer.multiplayer_peer as ENetMultiplayerPeer
+	if enet == null: return result
+	# SceneMultiplayer can still list a transport whose channels have closed.
+	for id in multiplayer.get_peers():
+		if not roster.has(id): continue
+		var peer := enet.get_peer(id)
+		if peer != null and peer.get_state() == ENetPacketPeer.STATE_CONNECTED:
+			result.append(id)
+	return result
+
 func broadcast_event(data: Dictionary) -> void:
 	
 	
-	if active and hosting and multiplayer.get_peers().size() > 0:
-		_event.rpc(data)
+	for recipient in _connected_recipients():
+		_event.rpc_id(recipient, data)
 
 func can_do(action: String, peer_id: int = -1, payload: Dictionary = {}) -> bool:
 	if action == "start_shift": return can_start_session(peer_id)
 	if not ACTIONS.has(action):
 		return false
 	if not active:
-		return peer_id < 0 or peer_id == 1
+		return action != "change_role" and (peer_id < 0 or peer_id == 1)
 	var actor := multiplayer.get_unique_id() if peer_id < 0 else peer_id
 	if not roster.has(actor):
 		return false
-	if action == "dispatch":
+	if action in ["entry_start", "entry_cancel"]:
+		return can_start_session(actor) if dedicated else actor == 1
+	if action == "change_role":
+		return payload.get("target_peer_id") is int and int(payload.target_peer_id) != actor and roster.has(int(payload.target_peer_id))
+	if action in ["dispatch", "withdraw", "clear_road"]:
 		return owns(str(payload.get("kind", "")), actor)
 	# Scouting, supplies, the team boost and pings are shared by everyone.
 	return true
@@ -178,8 +277,34 @@ func can_do(action: String, peer_id: int = -1, payload: Dictionary = {}) -> bool
 func can_start_session(peer_id: int = -1) -> bool:
 	if not active or not dedicated or roster.is_empty(): return false
 	var actor := multiplayer.get_unique_id() if peer_id < 0 else peer_id
+	return actor == leader_peer()
+
+## The session leader's network id: the host in a LAN game; on a dedicated
+## server the first player who joined (by player key), or while they are away
+## the earliest-joined player still connected. -1 when nobody is there.
+func leader_peer() -> int:
+	if not active: return 1
+	if not dedicated: return 1
+	for peer_id in player_keys:
+		if roster.has(peer_id) and str(player_keys[peer_id]) == leader_key and not leader_key.is_empty(): return int(peer_id)
 	# Dictionary insertion order keeps this independent of department/seat assignment.
-	return actor == int(roster.keys()[0])
+	return int(roster.keys()[0]) if not roster.is_empty() else -1
+
+## True on the one computer that stores study files for this session (solo
+## players always store their own).
+func is_leader() -> bool:
+	if not active: return true
+	if hosting: return not dedicated
+	return leader_peer() == multiplayer.get_unique_id()
+
+func player_key(peer_id: int) -> String:
+	return str(player_keys.get(peer_id, "peer%d" % peer_id))
+
+static func _clean_key(value: String, peer_id: int) -> String:
+	var result := ""
+	for character in value.left(32):
+		if character in "abcdef0123456789": result += character
+	return result if result.length() >= 8 else "peer%d" % peer_id
 
 func departments_for(peer_id: int = -1) -> Array:
 	if not active:
@@ -187,13 +312,93 @@ func departments_for(peer_id: int = -1) -> Array:
 	var actor := multiplayer.get_unique_id() if peer_id < 0 else peer_id
 	if not roster.has(actor):
 		return []
-	var seats: Array = roster.values()
-	seats.sort()
-	var split: Array = SPLITS.get(clampi(seats.size(), 1, 4), SPLITS[1])
-	var rank: int = seats.find(int(roster[actor]))
+	var bundles := team_size if team_size > 0 else roster.size()
+	var split: Array = SPLITS.get(clampi(bundles, 1, 4), SPLITS[1])
+	var rank := int(role_assignments.get(actor, -1))
+	if not _valid_role_assignments(roster, role_assignments):
+		# Also supports local fixtures that populate the roster without a handshake.
+		var seats: Array = roster.values()
+		seats.sort()
+		rank = seats.find(int(roster[actor]))
 	if rank < 0 or rank >= split.size():
 		return []
 	return split[rank].duplicate()
+
+func swap_role(peer_id: int, target_peer_id: int) -> bool:
+	# The authoritative game checks whether the level is over before calling.
+	if not active or not hosting or not can_do("change_role", peer_id, {"target_peer_id": target_peer_id}):
+		return false
+	if not role_assignments.has(peer_id) or not role_assignments.has(target_peer_id): _reconcile_role_assignments()
+	var previous := int(role_assignments[peer_id])
+	role_assignments[peer_id] = role_assignments[target_peer_id]
+	role_assignments[target_peer_id] = previous
+	_broadcast_roster()
+	roster_changed.emit()
+	announce("Roles changed. %s: %s. %s: %s." % [player_label(peer_id), departments_text(peer_id), player_label(target_peer_id), departments_text(target_peer_id)])
+	return true
+
+func _reconcile_role_assignments() -> void:
+	# Full re-split (lobby, or the start of a level): keep the chosen order of
+	# connected players (waiting players last), then share all four departments
+	# with the split for the new player count. Seats stay unchanged.
+	reserved.clear()
+	var peers: Array = roster.keys()
+	peers.sort_custom(func(a, b):
+		var a_rank := int(role_assignments.get(a, -1))
+		var b_rank := int(role_assignments.get(b, -1))
+		if a_rank < 0: a_rank = 4 + int(roster[a])
+		if b_rank < 0: b_rank = 4 + int(roster[b])
+		return int(roster[a]) < int(roster[b]) if a_rank == b_rank else a_rank < b_rank)
+	var updated: Dictionary = {}
+	for rank in peers.size():
+		updated[peers[rank]] = rank
+	role_assignments = updated
+	team_size = peers.size()
+	if dedicated and not roster.is_empty() and not _key_connected(leader_key):
+		leader_key = player_key(int(roster.keys()[0]))
+
+## Host: called when a level starts and when the lobby opens. Players who did not
+## come back lose their reservation; players waiting since mid-level get a
+## department. Returns true if anyone's departments changed.
+func rebalance_roles() -> bool:
+	if not active or not hosting: return false
+	var before := {}
+	for peer_id in roster: before[peer_id] = departments_for(int(peer_id))
+	var had_reserved := not reserved.is_empty()
+	_reconcile_role_assignments()
+	var changed := had_reserved
+	for peer_id in roster:
+		if departments_for(int(peer_id)) != before.get(peer_id, []): changed = true
+	if changed:
+		_broadcast_roster()
+		roster_changed.emit()
+		announce("Departments for this level: %s" % assignment_summary())
+	return changed
+
+## Host: lock roles outside the lobby. Unlocking (back in the lobby) re-splits.
+func set_roles_locked(value: bool) -> void:
+	if roles_locked == value: return
+	roles_locked = value
+	if not value and active and hosting: rebalance_roles()
+
+func _key_connected(key: String) -> bool:
+	if key.is_empty(): return false
+	for peer_id in player_keys:
+		if roster.has(peer_id) and str(player_keys[peer_id]) == key: return true
+	return false
+
+func _valid_role_assignments(data: Dictionary, assignments: Dictionary, bundles: int = -1) -> bool:
+	if data.size() != assignments.size(): return false
+	var size := bundles if bundles > 0 else (team_size if team_size > 0 else data.size())
+	if size < 1 or size > 4: return false
+	var used: Array[int] = []
+	for peer_id in assignments:
+		if not peer_id is int or not data.has(peer_id) or not assignments[peer_id] is int: return false
+		var rank := int(assignments[peer_id])
+		if rank == -1: continue # waiting for the next level
+		if rank < 0 or rank >= size or used.has(rank): return false
+		used.append(rank)
+	return true
 
 func owns(kind: String, peer_id: int = -1) -> bool:
 	if kind == "medical":
@@ -209,13 +414,37 @@ func owner_of(kind: String) -> int:
 func player_label(peer_id: int) -> String:
 	if not roster.has(peer_id):
 		return "Player"
+	var chosen := str(player_names.get(peer_id, ""))
+	if not chosen.is_empty(): return chosen
 	return "Player %d" % (int(roster[peer_id]) + 1)
+
+func player_log_label(peer_id: int) -> String:
+	var slot := "Player %d" % (int(roster.get(peer_id, 0)) + 1)
+	var chosen := str(player_names.get(peer_id, ""))
+	return slot if chosen.is_empty() else "%s - %s" % [slot, chosen]
+
+static func clean_player_name(value: String) -> String:
+	var cleaned := ""
+	# Plain display names only; exclude controls, markup and log line breaks.
+	for character in value.left(128):
+		var code := character.unicode_at(0)
+		if (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or (code >= 48 and code <= 57) or character in [" ", "-", "'"]:
+			cleaned += character
+	return " ".join(cleaned.split(" ", false)).strip_edges().left(MAX_PLAYER_NAME_LENGTH)
+
+func _valid_player_names(data: Dictionary, names: Dictionary) -> bool:
+	if data.size() != names.size(): return false
+	for id in names:
+		if not data.has(id) or not names[id] is String: return false
+		if str(names[id]).length() > MAX_PLAYER_NAME_LENGTH or clean_player_name(names[id]) != names[id]: return false
+	return true
 
 func departments_text(peer_id: int = -1) -> String:
 	var names: Array[String] = []
 	for kind in departments_for(peer_id):
 		names.append(str(DEPARTMENT_NAMES.get(kind, kind)).to_upper())
-	return " + ".join(names) if not names.is_empty() else "NO DEPARTMENT"
+	if names.is_empty(): return "WAITING FOR NEXT LEVEL" if roster.has(multiplayer.get_unique_id() if peer_id < 0 else peer_id) and active else "NO DEPARTMENT"
+	return " + ".join(names)
 
 func assignment_summary() -> String:
 	var parts: Array[String] = []
@@ -229,27 +458,52 @@ func _peer_connected(_id: int) -> void:
 	pass
 
 func _peer_disconnected(id: int) -> void:
+	# Duplicate or unregistered departures do not change the team.
+	if not roster.has(id): return
 	var label := player_label(id)
+	if hosting and roster.has(id): print(player_log_label(id) + " disconnected")
+	var key := player_key(id)
+	var rank := int(role_assignments.get(id, -1))
+	var kept := hosting and roles_locked and rank >= 0
+	if kept:
+		# 2.11: nobody else's departments change. The seat and departments wait
+		# for this player; their crews keep working but get no new orders.
+		reserved[key] = {"seat": int(roster[id]), "rank": rank, "name": str(player_names.get(id, ""))}
 	roster.erase(id)
+	role_assignments.erase(id)
+	player_keys.erase(id)
+	if not kept: _reconcile_role_assignments()
+	player_names.erase(id)
 	_command_windows.erase(id)
+	voice_participants.erase(id)
+	_voice_windows.erase(id)
+	_voice_sequences.erase(id)
+	_voice_state_windows.erase(id)
+	voice_participants_changed.emit()
+	if hosting: _broadcast_voice_states.call_deferred()
 	if hosting:
 		if dedicated: _broadcast_roster.call_deferred()
-		else: _roster.rpc(roster, dedicated)
+		else: _broadcast_roster()
 	roster_changed.emit()
 	if hosting:
-		var text := "%s left. Departments reshuffled. %s" % [label, assignment_summary()]
-		if dedicated: announce.call_deferred(text)
-		else: announce(text)
+		var text := ("%s disconnected. Their departments wait for them; nobody else's change." % label) if kept else ("%s left. Departments reshuffled. %s" % [label, assignment_summary()])
+		announce.call_deferred(text)
 
 func _broadcast_roster() -> void:
 	# Wait until ENet finishes removing disconnected peers before sending.
 	if active and hosting and multiplayer.get_peers().size() > 0:
-		_roster.rpc(roster, dedicated)
+		_roster.rpc(roster, dedicated, player_names, role_assignments, _roster_extra())
+
+func _roster_extra() -> Dictionary:
+	var names_waiting: Array[String] = []
+	for key in reserved: names_waiting.append(str(reserved[key].get("name", "")))
+	return {"keys": player_keys.duplicate(), "team_size": team_size, "leader_key": leader_key, "reserved": reserved.duplicate(true)}
 
 func _connected() -> void:
-	_connect_started_ms = -1
-	status = "Connected to Beacon Bay"
-	_hello.rpc_id(1)
+	# Keep the timeout active until the versioned roster handshake succeeds.
+	_connect_started_ms = Time.get_ticks_msec()
+	status = "Checking game version..."
+	_hello.rpc_id(1, PROTOCOL_VERSION, clean_player_name(local_player_name), _clean_key(local_player_key, 0))
 
 func _failed() -> void:
 	close()
@@ -257,38 +511,100 @@ func _failed() -> void:
 	disconnected.emit()
 
 @rpc("any_peer", "call_remote", "reliable")
-func _hello() -> void:
+func _hello(protocol: int = 0, requested_name: String = "", requested_key: String = "") -> void:
 	if not active or not hosting:
 		return
 	var sender := multiplayer.get_remote_sender_id()
 	if sender <= 1 or not multiplayer.get_peers().has(sender):
 		return
+	if protocol != PROTOCOL_VERSION:
+		_message.rpc_id(sender, "Game versions differ. Use the same updated client and server build.")
+		get_tree().create_timer(0.4).timeout.connect(func():
+			if active and hosting and multiplayer.get_peers().has(sender):
+				multiplayer.multiplayer_peer.disconnect_peer(sender))
+		return
 	
 	if roster.has(sender):
-		_roster.rpc_id(sender, roster, dedicated)
+		_roster.rpc_id(sender, roster, dedicated, player_names, role_assignments, _roster_extra())
 		return
+	var key := _clean_key(requested_key, sender)
+	# Two copies of the game on one computer share a key: the second one is a new player.
+	if _key_connected(key): key = "%sp%d" % [key.left(20), sender]
+	var returning: Dictionary = reserved.get(key, {})
+	var used_seats: Array = roster.values()
+	for entry: Dictionary in reserved.values():
+		if entry != returning: used_seats.append(int(entry.seat))
 	var assigned := -1
-	for i in range(0 if dedicated else 1, 4):
-		if not roster.values().has(i):
-			assigned = i
-			break
+	if not returning.is_empty() and not roster.values().has(int(returning.seat)):
+		assigned = int(returning.seat)
+	else:
+		for i in range(0 if dedicated else 1, 4):
+			if not used_seats.has(i):
+				assigned = i
+				break
 	if assigned < 0:
+		_message.rpc_id(sender, "This room is full (seats are kept for players who dropped out until the next level).")
+		get_tree().create_timer(0.4).timeout.connect(func():
+			if active and hosting and multiplayer.get_peers().has(sender):
+				multiplayer.multiplayer_peer.disconnect_peer(sender))
 		return
 	roster[sender] = assigned
-	_roster.rpc(roster, dedicated)
+	player_keys[sender] = key
+	player_names[sender] = clean_player_name(requested_name)
+	if leader_key.is_empty(): leader_key = key
+	var how := "joined"
+	if not returning.is_empty():
+		# Back after a dropout: same seat, same departments.
+		reserved.erase(key)
+		role_assignments[sender] = int(returning.rank)
+		how = "is back"
+	elif roles_locked:
+		# Mid-session: take a department bundle nobody holds, or wait for the
+		# next level. Nobody else's departments change.
+		var taken: Array = role_assignments.values()
+		for entry: Dictionary in reserved.values(): taken.append(int(entry.rank))
+		role_assignments[sender] = -1
+		for rank in range(maxi(team_size, 1)):
+			if not taken.has(rank):
+				role_assignments[sender] = rank
+				break
+		if team_size <= 0:
+			team_size = 1
+			role_assignments[sender] = 0
+	else:
+		_reconcile_role_assignments()
+	print("%s %s as %s chief" % [player_log_label(sender), how, departments_text(sender)])
+	voice_participants[sender] = {"mic": false, "consent": false, "recording": false}
+	_broadcast_roster()
+	_broadcast_voice_states()
 	if not _last_snapshot.is_empty():
 		var raw := var_to_bytes(_last_snapshot)
-		_initial_state.rpc_id(sender, raw.compress(FileAccess.COMPRESSION_ZSTD), raw.size())
+		_initial_state.rpc_id(sender, _snapshot_sequence, raw.compress(FileAccess.COMPRESSION_ZSTD), raw.size())
 	roster_changed.emit()
-	announce("%s joined. %s" % [player_label(sender), assignment_summary()])
+	if how == "is back": announce("%s is back as %s chief." % [player_label(sender), departments_text(sender)])
+	elif roles_locked: announce("%s joined as %s. %s" % [player_label(sender), departments_text(sender), "Nobody else's departments change." if int(role_assignments[sender]) >= 0 else "They get departments at the next level."])
+	else: announce("%s joined as %s chief. %s" % [player_label(sender), departments_text(sender), assignment_summary()])
 
 @rpc("authority", "call_remote", "reliable")
-func _roster(data: Dictionary, server_only: bool = false) -> void:
-	if hosting or multiplayer.get_remote_sender_id() != 1 or not _valid_roster(data, server_only):
+func _roster(data: Dictionary, server_only: bool = false, names: Dictionary = {}, assignments: Dictionary = {}, extra: Dictionary = {}) -> void:
+	var bundles := int(extra.get("team_size", 0)) if extra.get("team_size", 0) is int else -1
+	if hosting or multiplayer.get_remote_sender_id() != 1 or not _valid_roster(data, server_only) or not _valid_player_names(data, names) or not _valid_role_assignments(data, assignments, bundles) or not _valid_extra(data, extra):
 		return
+	team_size = bundles
+	player_keys = (extra.get("keys", {}) as Dictionary).duplicate()
+	leader_key = str(extra.get("leader_key", ""))
+	reserved = (extra.get("reserved", {}) as Dictionary).duplicate(true)
 	dedicated = server_only
+	_connect_started_ms = -1
+	status = "Connected to Beacon Bay"
 	roster = data.duplicate()
+	role_assignments = assignments.duplicate()
+	player_names = names.duplicate()
 	role = int(roster.get(multiplayer.get_unique_id(), 0))
+	for peer_id in voice_participants.keys():
+		if not roster.has(peer_id): voice_participants.erase(peer_id)
+	if roster.has(multiplayer.get_unique_id()) and _server_available():
+		_voice_state_request.rpc_id(1, _local_voice_state.mic, _local_voice_state.consent, _local_voice_state.recording)
 	roster_changed.emit()
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -306,16 +622,29 @@ func _command(action: String, payload: Dictionary) -> void:
 	command_received.emit(action, clean, sender)
 
 @rpc("authority", "call_remote", "unreliable_ordered")
-func _state(packed: PackedByteArray, size: int) -> void:
+func _state(sequence: int, packed: PackedByteArray, size: int) -> void:
 	if active and not hosting and multiplayer.get_remote_sender_id() == 1:
-		var data := _unpack(packed, size)
-		if not data.is_empty(): snapshot_received.emit(data)
+		_accept_snapshot(sequence, packed, size)
 
-@rpc("authority", "call_remote", "reliable")
-func _initial_state(packed: PackedByteArray, size: int) -> void:
+@rpc("authority", "call_remote", "reliable", 3)
+func _large_state(sequence: int, packed: PackedByteArray, size: int) -> void:
 	if active and not hosting and multiplayer.get_remote_sender_id() == 1:
-		var data := _unpack(packed, size)
-		if not data.is_empty(): snapshot_received.emit(data)
+		_accept_snapshot(sequence, packed, size)
+
+@rpc("authority", "call_remote", "reliable", 3)
+func _initial_state(sequence: int, packed: PackedByteArray, size: int) -> void:
+	if active and not hosting and multiplayer.get_remote_sender_id() == 1:
+		_accept_snapshot(sequence, packed, size)
+
+
+func _accept_snapshot(sequence: int, packed: PackedByteArray, size: int) -> void:
+	# One sequence space spans both transport channels and late-join state.
+	# An older reliable packet must never rewind a newer small snapshot.
+	if sequence < 0 or sequence <= _received_snapshot_sequence: return
+	var data := _unpack(packed, size)
+	if data.is_empty(): return
+	_received_snapshot_sequence = sequence
+	snapshot_received.emit(data)
 
 @rpc("authority", "call_remote", "reliable")
 func _event(data: Dictionary) -> void:
@@ -324,13 +653,22 @@ func _event(data: Dictionary) -> void:
 
 func announce(text: String) -> void:
 	message_received.emit(text)
-	if active and hosting and multiplayer.get_peers().size() > 0:
-		_message.rpc(text)
+	for recipient in _connected_recipients():
+		_message.rpc_id(recipient, text)
 
 @rpc("authority", "call_remote", "reliable")
 func _message(text: String) -> void:
 	if active and not hosting and multiplayer.get_remote_sender_id() == 1:
 		message_received.emit(text.left(240))
+
+func _valid_extra(data: Dictionary, extra: Dictionary) -> bool:
+	if extra.is_empty(): return true # older fixtures
+	if extra.size() > 4 or not extra.get("keys", {}) is Dictionary or not extra.get("leader_key", "") is String or not extra.get("reserved", {}) is Dictionary: return false
+	var keys: Dictionary = extra.get("keys", {})
+	if keys.size() > 4 or (extra.get("reserved", {}) as Dictionary).size() > 4: return false
+	for peer_id in keys:
+		if not peer_id is int or not data.has(peer_id) or not keys[peer_id] is String or str(keys[peer_id]).length() > 40: return false
+	return true
 
 func _valid_roster(data: Dictionary, server_only: bool = false) -> bool:
 	if data.size() > 4:
@@ -348,9 +686,17 @@ func _valid_roster(data: Dictionary, server_only: bool = false) -> bool:
 	return true
 
 func _valid_payload(action: String, payload: Dictionary) -> bool:
-	if action == "start_shift": return payload.is_empty()
+	if action in ["level_ready", "entry_start", "entry_cancel"]:
+		return payload.size() == 1 and payload.get("level_run_id") is String and not str(payload.level_run_id).is_empty() and str(payload.level_run_id).length() <= 120
+	if action == "start_shift":
+		# Optionally the level picked in the co-op lobby.
+		return payload.is_empty() or (payload.size() == 1 and payload.get("shift") is int and int(payload.shift) >= 0 and int(payload.shift) <= 6)
 	if payload.size() > 6:
 		return false
+	if action == "change_role":
+		return payload.get("target_peer_id") is int and int(payload.target_peer_id) > 0 and int(payload.target_peer_id) <= 2147483647
+	if action == "withdraw":
+		return payload.get("unit_id") is int and int(payload.unit_id) >= 0 and int(payload.unit_id) <= 1000 and payload.get("kind") is String and payload.kind in DEPARTMENTS
 	
 	if action in ["dispatch", "scout", "supply"]:
 		if not payload.get("incident_id") is int:
@@ -361,14 +707,30 @@ func _valid_payload(action: String, payload: Dictionary) -> bool:
 		if payload.has("unit_id") and (not payload.unit_id is int or int(payload.unit_id)<-1 or int(payload.unit_id)>1000):
 			return false
 		return payload.get("kind") is String and payload.kind in DEPARTMENTS
+	if action == "clear_road":
+		if not payload.get("road_event_id") is int or int(payload.road_event_id) <= 0 or int(payload.road_event_id) > 1000:
+			return false
+		if not payload.get("unit_id") is int or int(payload.unit_id) < 0 or int(payload.unit_id) > 1000:
+			return false
+		return payload.get("kind") is String and payload.kind in DEPARTMENTS
 	if action == "ping":
 		return payload.get("text", "Help needed") is String and str(payload.get("text", "Help needed")).length() <= 96
 	return ACTIONS.has(action)
 
 func _clean_payload(action: String, payload: Dictionary) -> Dictionary:
 	match action:
+		"level_ready", "entry_start", "entry_cancel":
+			return {"level_run_id": str(payload.level_run_id)}
+		"start_shift":
+			return {"shift": int(payload.shift)} if payload.has("shift") else {}
 		"dispatch":
 			return {"incident_id": int(payload.incident_id), "kind": str(payload.kind), "unit_id":int(payload.get("unit_id",-1))}
+		"withdraw":
+			return {"unit_id": int(payload.unit_id), "kind": str(payload.kind)}
+		"change_role":
+			return {"target_peer_id": int(payload.target_peer_id)}
+		"clear_road":
+			return {"road_event_id": int(payload.road_event_id), "kind": str(payload.kind), "unit_id": int(payload.unit_id)}
 		"scout", "supply":
 			return {"incident_id": int(payload.incident_id)}
 		"ping":
@@ -388,11 +750,11 @@ func _upnp_worker() -> void:
 	var result := {"ok": false, "text": "Internet: router did not allow automatic setup. Use LAN or a VPN like Tailscale.", "upnp": null, "ip": ""}
 	var err := upnp.discover(2000, 2, "InternetGatewayDevice")
 	if err == UPNP.UPNP_RESULT_SUCCESS and upnp.get_gateway() != null and upnp.get_gateway().is_valid_gateway():
-		if upnp.add_port_mapping(PORT, PORT, "Beacon Bay", "UDP", 0) == UPNP.UPNP_RESULT_SUCCESS:
+		if upnp.add_port_mapping(port, port, "Beacon Bay", "UDP", 0) == UPNP.UPNP_RESULT_SUCCESS:
 			var ip := upnp.query_external_address()
 			result = {"ok": true, "text": "", "upnp": upnp, "ip": ip}
 		else:
-			result.text = "Internet: router refused to open port %d. Use LAN or a VPN like Tailscale." % PORT
+			result.text = "Internet: router refused to open port %d. Use LAN or a VPN like Tailscale." % port
 	call_deferred("_upnp_done", result)
 
 func _upnp_done(result: Dictionary) -> void:
@@ -401,7 +763,7 @@ func _upnp_done(result: Dictionary) -> void:
 		_upnp_thread = null
 	var upnp: UPNP = result.get("upnp")
 	if not hosting:
-		if upnp != null: upnp.delete_port_mapping(PORT, "UDP")
+		if upnp != null: upnp.delete_port_mapping(port, "UDP")
 		return
 	_upnp = upnp
 	if bool(result.ok):
@@ -421,7 +783,7 @@ func _close_upnp() -> void:
 		# Let the background check finish; _upnp_done cleans up because we are no longer hosting.
 		return
 	if _upnp != null:
-		_upnp.delete_port_mapping(PORT, "UDP")
+		_upnp.delete_port_mapping(port, "UDP")
 		_upnp = null
 	internet_status = ""
 	internet_address = ""
@@ -431,7 +793,7 @@ func _exit_tree() -> void:
 		_upnp_thread.wait_to_finish()
 		_upnp_thread = null
 	if _upnp != null:
-		_upnp.delete_port_mapping(PORT, "UDP")
+		_upnp.delete_port_mapping(port, "UDP")
 		_upnp = null
 
 func _within_rate_limit(peer_id: int) -> bool:
@@ -442,3 +804,117 @@ func _within_rate_limit(peer_id: int) -> bool:
 	window.count = int(window.count) + 1
 	_command_windows[peer_id] = window
 	return int(window.count) <= 16
+
+
+# Voice uses its own unreliable ordered channel. A server forwards only roster
+# members' bounded packets and derives speaker identity from the RPC sender.
+func set_voice_state(mic: bool, consent: bool, recording: bool) -> void:
+	_local_voice_state = {"mic": mic, "consent": consent, "recording": recording}
+	if not active or (hosting and dedicated): return
+	if hosting:
+		voice_participants[1] = _local_voice_state.duplicate()
+		_broadcast_voice_states()
+	elif roster.has(multiplayer.get_unique_id()) and _server_available():
+		_voice_state_request.rpc_id(1, mic, consent, recording)
+
+
+func voice_recording_peers() -> Array[int]:
+	var result: Array[int] = []
+	for peer_id in voice_participants:
+		if roster.has(peer_id) and bool(voice_participants[peer_id].recording): result.append(int(peer_id))
+	return result
+
+
+func send_voice(sequence: int, pcm: PackedByteArray) -> void:
+	if not active or not _local_voice_state.mic or not _valid_voice_packet(sequence, pcm): return
+	if hosting:
+		if not dedicated and roster.has(1): _forward_voice(1, sequence, pcm)
+	elif roster.has(multiplayer.get_unique_id()) and _server_available():
+		_voice_upload.rpc_id(1, sequence, pcm)
+
+
+func _server_available() -> bool:
+	# ENet can emit peer_disconnected(1) before server_disconnected. Roster
+	# listeners run between those signals while active is still true.
+	return active and not hosting and multiplayer.has_multiplayer_peer() \
+		and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED \
+		and multiplayer.get_peers().has(1)
+
+
+@rpc("any_peer", "call_remote", "reliable", 2)
+func _voice_state_request(mic: bool, consent: bool, recording: bool) -> void:
+	if not active or not hosting: return
+	var sender := multiplayer.get_remote_sender_id()
+	if sender <= 1 or not roster.has(sender): return
+	if not _voice_rate_allowed(_voice_state_windows, sender, 12.0, 12.0): return
+	voice_participants[sender] = {"mic": mic, "consent": consent, "recording": recording}
+	_broadcast_voice_states()
+
+
+func _broadcast_voice_states() -> void:
+	if not active or not hosting: return
+	voice_participants_changed.emit()
+	for recipient in _connected_recipients():
+		_voice_states.rpc_id(recipient, voice_participants)
+
+
+@rpc("authority", "call_remote", "reliable", 2)
+func _voice_states(states: Dictionary) -> void:
+	if not active or hosting or multiplayer.get_remote_sender_id() != 1 or states.size() > 4: return
+	var clean: Dictionary = {}
+	for peer_id in states:
+		if not peer_id is int or peer_id <= 0 or not states[peer_id] is Dictionary: return
+		var entry: Dictionary = states[peer_id]
+		if entry.size() != 3: return
+		for key in ["mic", "consent", "recording"]:
+			if not entry.get(key) is bool: return
+		# Roster and status use different channels: retain a validated status if
+		# it arrives just before that participant's roster update.
+		clean[peer_id] = entry.duplicate()
+	voice_participants = clean
+	voice_participants_changed.emit()
+
+
+@rpc("any_peer", "call_remote", "unreliable_ordered", 1)
+func _voice_upload(sequence: int, pcm: PackedByteArray) -> void:
+	if not active or not hosting: return
+	var sender := multiplayer.get_remote_sender_id()
+	if sender <= 1 or not roster.has(sender): return
+	if not bool(voice_participants.get(sender, {}).get("mic", false)): return
+	if not _valid_voice_packet(sequence, pcm): return
+	if sequence <= int(_voice_sequences.get(sender, -1)): return
+	if not _voice_rate_allowed(_voice_windows, sender, 55.0, 12.0): return
+	_voice_sequences[sender] = sequence
+	_forward_voice(sender, sequence, pcm)
+
+
+func _forward_voice(sender: int, sequence: int, pcm: PackedByteArray) -> void:
+	if not dedicated and sender != 1: voice_packet_received.emit(sender, sequence, pcm)
+	for recipient in _connected_recipients():
+		if int(recipient) != sender:
+			_voice_delivery.rpc_id(int(recipient), sender, sequence, pcm)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered", 1)
+func _voice_delivery(sender: int, sequence: int, pcm: PackedByteArray) -> void:
+	if not active or hosting or multiplayer.get_remote_sender_id() != 1: return
+	if sender == multiplayer.get_unique_id() or not roster.has(sender): return
+	if not _valid_voice_packet(sequence, pcm): return
+	if sequence <= int(_voice_sequences.get(sender, -1)): return
+	_voice_sequences[sender] = sequence
+	voice_packet_received.emit(sender, sequence, pcm)
+
+
+static func _valid_voice_packet(sequence: int, pcm: PackedByteArray) -> bool:
+	return sequence >= 0 and sequence <= 2147483647 and pcm.size() == VOICE_PACKET_BYTES
+
+
+func _voice_rate_allowed(windows: Dictionary, peer_id: int, per_second: float, burst: float) -> bool:
+	var now := Time.get_ticks_msec()
+	var window: Dictionary = windows.get(peer_id, {"at": now, "tokens": burst})
+	window.tokens = minf(burst, float(window.tokens) + maxf(0.0, (now - int(window.at)) / 1000.0) * per_second)
+	window.at = now
+	var allowed := float(window.tokens) >= 1.0
+	if allowed: window.tokens = float(window.tokens) - 1.0
+	windows[peer_id] = window
+	return allowed

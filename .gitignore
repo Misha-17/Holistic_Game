@@ -5,6 +5,10 @@
 /.agents/
 /research/
 /logs/
+/.test-user/
+/.test-user-*/
+/test_output/
+/artifacts/
 **/__pycache__/
 *.pyc
 *.tmp
@@ -17,3 +21,8 @@ beacon_bay_save.json
 .env
 .env.*
 /assets/**/*.import
+export_presets.cfg
+
+# Questionnaire answers exported from the study page (participant data)
+study/**/*.json
+study/**/*.csv

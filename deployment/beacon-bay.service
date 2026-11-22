@@ -1,0 +1,22 @@
+[Unit]
+Description=Beacon Bay cooperative game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=beaconbay
+Group=beaconbay
+WorkingDirectory=/opt/beacon-bay
+ExecStart=/usr/local/bin/godot --headless --main-pack /opt/beacon-bay/BeaconBay.pck -- --server --port=24680
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=beacon-bay
+Environment=XDG_DATA_HOME=/var/lib/beacon-bay
+
+[Install]
+WantedBy=multi-user.target

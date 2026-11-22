@@ -1,97 +1,250 @@
 # Beacon Bay
 
-A 2D pixel rescue coordination game made with Godot. Six 5:30 shifts provide 33 minutes of active campaign time, plus a character-led tutorial and equipment upgrades.
+A cooperative pixel-art rescue game for one to four players. Fire, Medical, Engineering and Police each have four crews in every level; calls need several departments working together.
 
-## Run the game
+## Playtest 07.11 update (0.9.4, network protocol 15)
 
-Open `project.godot` in Godot 4.7 and press F5. The project uses the Compatibility renderer. The source and assets are included; no external add-ons are required.
+- **Every player stores their own study files again**, on their own computer, and sends them to the researcher after playing. The 2.11 relay to the session leader is removed: in the playtest the data reached the leader too slowly ("Study data waiting for the session leader: 24.5 MB") and a survey never arrived. Each computer saves the game events plus its own player's input, 60 Hz samples, survey answers and **only its own microphone** (teammates' voices are not saved a second time). The server stores nothing. **OPEN MY STUDY FILES** in Settings → Research opens the folder.
+- **Readable names.** One folder per session, named by date, time and the name typed in the lobby (blank: "Player 2" by seat; solo: "Player"):
 
-## Controls
+  ```
+  research/2026-11-07_19-30_Andrei/
+    READ ME - what these files are.txt
+    Andrei_session-info.json                      build, settings, list of level files
+    Andrei_all-levels_events.jsonl                every event of the session
+    Andrei_level-3_events.jsonl                   one level (played again: _try-2, _try-3)
+    Andrei_level-3_mouse-and-taskload-60hz.csv    60 rows per second for that level
+    Andrei_nasa-tlx.json                          survey answers
+    Andrei_voice/Andrei_voice.wav                 own microphone (+ session.json, timeline.jsonl, listen.html)
+  ```
 
-Select a numbered call, then choose a specific responder on the map. Hover over a station or vehicle to inspect its crew. Click the crew, review the route, then press Enter or the map's Send button.
+  Rows still carry `session_id`, `level_run_id` and the player key for joining teammates' files. A player who drops out and rejoins the same room within 15 minutes continues the same folder and level file (their voice continues in `Andrei_voice_2/`).
+- **Levels always run their full time.** A level used to end as soon as the last scheduled call had arrived and nothing was open ("Every call handled • shift complete"), up to ~40 s early, which players read as the level cutting off a call. Now the clock always runs out; the team only sees "Every call handled • stay ready until the shift ends" (research row `all_calls_handled`). Every team now plays the same length.
+- WITHDRAW MY DATA deletes this computer's session folder (including the voice folder), in solo and co-op alike; the participant code and the request to the leader are gone.
+- Fixed console spam ("Drawing is only allowed inside this node's `_draw()`") from the progress bar of the study PC check.
+- **Protocol 15: redeploy the Azure server**; older builds cannot join.
 
-- 1 / 2 / 3: highlight fire / medical / engineering crews
-- Q: scout the selected call
-- E: use supplies
-- Space: Rally the team
-- F: show the live rescue close-up
-- Tab: cycle calls
-- Escape: pause
-- F11: fullscreen
+## Study consent, withdrawal and one map view (04.11)
 
-Crew cards locate responders on the map. Different starting positions and road conditions affect response time. A wrong specialist spends the trip without completing the rescue. Play Meet the Crew to learn the controls through five practice rescues.
+- **Consent on the first screen.** When the game starts, players see the study information (what is recorded, where it is stored and analysed, anonymous publication, their rights) and choose **I AGREE · RECORD MY PLAY** or **PLAY WITHOUT DATA COLLECTION**. The answer holds until the game is closed and replaces the old question at the first level of each session. The text is **placeholder wording** in `scripts/study_info.gd` (square brackets mark details to fill in); bump `TEXT_VERSION` there when it changes. Every recorded session logs a `study_consent` row with that version. **STUDY INFORMATION** in Settings → Research shows the text again.
+- **Withdraw after playing.** **WITHDRAW MY DATA** on the main menu (shown after a recorded session, above SETTINGS / QUIT), on the results screen (between SETTINGS and MAIN MENU) and in Settings → Research. Clicking it only opens a confirmation (CANCEL / WITHDRAW AND DELETE; Esc cancels); confirming deletes what was recorded about that player in the session just played and stops recording them (**since 07.11: this computer's whole session folder, for everyone**; the leader/teammate cases below applied to 04.11 builds only):
+  - solo: the whole session folder and its voice folder;
+  - session leader in co-op: their own input rows, 60 Hz samples, survey answers and voice track (the shared game events stay, because teammates' files need them);
+  - other players: while still in the room, a request goes to the session leader's computer, which deletes their `players/<key>/` folder and their voice track. After leaving the room (the usual case on the main menu) the game cannot reach the leader, so it shows a **participant code** (the first 8 characters of their player key, e.g. `ABCD-1234`) to give the researcher, who deletes `players/<key>/` (the folder name starts with the code) and the matching `player_<key>.wav` by hand.
+  `research/withdrawals.jsonl` on the storing computer notes each withdrawal (session, player key, what was deleted) without any recorded data. Sessions from before a restart cannot be withdrawn in the game (the text points to the researcher).
+- **Only the whole-town view.** The EXPLORE / OVERVIEW button, wheel zoom, the drag view, panning (mouse, middle button, arrow keys) and the minimap are gone. Pressing and moving across a crew or call still never dispatches it by accident.
+- **Quitting:** the game now closes the microphone two frames before quitting. "WASAPI: GetBufferSize error" in the console after quitting comes from Godot's Windows audio driver during shutdown; voice files are already closed at that point, so recordings are not affected.
 
-## Project contents
+## Survey on the way out (04.11)
 
-- `scripts/`: game and character showcase code
-- `scenes/`: main game and separate character showcase
-- `assets/art/`: game art and concept studies
-- `assets/characters/`: transparent boards, pixel sprite atlases and animation resources
-- `assets/audio/`: original music, effects and their Python generator
+- **MAIN MENU on the results screen asks about the NASA-TLX first** (also from settings opened there): **YES, FILL IT IN** opens the survey and then goes to the main menu (submitted or skipped); **NO, GO TO MAIN MENU** goes straight there; Esc stays on the results screen. Sessions that end before Level 6 no longer depend on players remembering the title-screen survey button. A session that already has a survey (for example after Level 6) is not asked again. The answers are saved with `"source": "leaving_session"`.
+- In co-op a player filling in the survey on the way out is not pulled into the next level the host starts, and (04.11 builds) stayed connected until their answers had reached the session leader's computer; since 07.11 the answers are saved on the player's own computer.
 
-The separate character showcase can be run from `scenes/character_showcase.tscn` with F6.
+## Playtest 02.11 update (0.9.3, network protocol 14)
 
-## Department prototype (branch idea, Oct 2026)
+- **Reconnecting keeps everyone's departments.** Each computer has a stable player key (`user://player_key.txt`). If a player drops out during a level (or on the results screen), nobody else's departments change: the missing player's seat and departments wait for them, their crews keep working but get no new orders, and when they rejoin they get the same seat and departments back. Departments are re-split only when the next level starts, if the player has not come back. A new player who arrives mid-level waits for the next level instead of taking anyone's crews. In the lobby, joining and leaving re-split as before.
+- **One voice track per person.** (Since 07.11 each computer saves only its own player's voice, `<name>_voice.wav`.) Tracks are named after the player (`player_<key>.wav`), not the network connection, so a player who reconnects continues in the same track (the time they were away is silence). Before, every reconnect opened a new track as long as the whole session.
+- ~~**Only the session leader's computer stores study files.**~~ (Reverted after playtest 07.11: every player stores their own files again.) The leader is the LAN host, or on the Azure server the first player in the room (they stay leader after a dropout; while they are away the next player stands in). The leader saves the game log, all voice tracks and its own input as before. Other players' games save nothing locally: their own mouse, clicks, keys, selections, 60 Hz samples and questionnaire answers are sent over the game connection (through the server) to the leader, into `research/<session>/players/<player key>/` with the same file names. Shared game events are recorded once, by the leader. Make sure the researcher's (most stable) computer joins the room first.
+- **Teammates' crew status is hidden.** Their crew cards in the bottom bar say TEAMMATE instead of READY / EN ROUTE / ON SCENE, their stations on the map show no free-crew count, and on call cards their crews are listed without a state. Their vehicles still drive on the map.
+- **No upload to the Azure server** any more (removed with `tools/download_research.*`). The server stores nothing.
 
-This copy tests a "one role for everyone" model instead of the four specialist roles (Dispatcher, Resource manager, Field coordinator, Support lead).
+## Research update (0.9.2, client feedback 01.11)
 
-- There are four departments: Fire, Medical, Engineering and **Police** (new).
-- Every player has the same job: send the crews of the departments they command. Departments split automatically by player count:
-  - 1 player: all four
-  - 2 players: Fire + Engineering / Medical + Police
-  - 3 players: host gets Fire + Police, the others Medical / Engineering
-  - 4 players: one department each
-- If someone leaves, departments reshuffle for the remaining players.
-- Everyone sees the whole map and can scout, use supplies, rally and ping. You cannot send another player's crews (the host also enforces this), so calls that need two crew types force players to talk.
-- The dispatch cooldown is now per department, so four players can send crews at the same moment.
-- Police calls: car collision, lost child, crowd at the square, break-in, blocked junction. Police also back up severe floods (evacuation) and power cuts (traffic lights out). Market and festival disruptions bring more police calls.
-- Keys 1-4 highlight Fire / Medical / Engineering / Police crews.
-- The tutorial still teaches only the original three crews.
+- **Fixed 60 Hz recording.** Each level also writes `levels/<level_run_id>_samples_60hz.csv`: a background thread reads the cursor 60 times a second on a fixed clock, whatever the frame rate, plus the selection, the object under the cursor and the player's task load. Before, mouse rows came once per rendered frame, so a 30 fps PC recorded half as much as a 75 fps PC, and every PC recorded less when calls piled up.
+- **Task load per player:** calls that need your department vs not, your calls dispatched vs decision pending, urgent and critical calls, in every sample and once a second (`task_state`).
+- **Crew selection events** (`crew_selected`, `crew_deselected`) separate decision time from execution time. Definitions of every variable: `docs/VARIABLES.md`.
+- **Higher frame rate.** The static town is painted once per level into a texture instead of being redrawn as ~10,000 shapes every frame (draw calls at level start 600-1000 → ~200), and a ~1 ms per-frame rebuild of the level table is gone.
+- **Outside the game:** `analysis/` (Python workload analysis: level and phase differences, task-load drivers, per-player detection, DYWA alignment) and `study/questionnaires/` (offline DYWA and DLR-WAT page).
+- Network protocol unchanged; research schema 4.
 
-### Changes from 4 Oct 2026
+## Study session update (30.10)
 
-- **Sending a crew:** pick a crew first (click a station, a vehicle on the road, a crew card, or press 1-4), then click the call. The selected crew gets a pulsing gold ring. Hover a call to see the route and whether they make it in time. Right-click or ESC clears the selection. There are no crew pop-up menus any more.
-- **Teams:** every call needs 2-4 departments (no single-department calls since 7.10.2026). Severity 1 = two departments, 2 = three, 3 = all four. All-four calls appear in every shift, including shift 1, after the first minute: 10% of calls in shift 1, 12% / 14% / 16% / 16% / 20% in shifts 2-6, and every shift is guaranteed at least one by its 8th call and two by its 16th. Three-department calls are slightly less common in later shifts (28% + 4% per shift instead of 30% + 5%) to keep shift 5 fair. Icons under each call show which crews it still needs. The tutorial still uses one-crew calls to teach one thing at a time.
-- Balance check (bot with human-like delays): wins all six shifts. Shift 1 has 3 four-department calls, 0 failures (116/60). Shift 5 is the tightest: 114/104 with community at 56 against a 50 minimum. Four-department calls fail no more often than smaller ones, so deadlines were not changed.
-- **3 crews per department** (12 in total) so team calls stay winnable.
-- **Scouting** only reveals what a "?" call needs. It no longer adds time.
-- **Supplies** only work once a crew is on scene.
-- **Upgrades** that add extra crews are gone; the other upgrades stay for now.
-- **Full HD:** the game canvas is 1600x900 (16:9), so fullscreen (F11) fills 1920x1080 exactly and everything is 20% bigger and crisp.
-- **Less text:** the game name, level name, map labels, hint line, workshop credits and the "watch crew" button are gone from the game screen. The top bar shows rescued / target, community, time, and a flashing warning before each wave. New calls pulse on the map and in the list.
-- The tutorial follows the new flow (scout, send Bram, supply once he arrives).
-- **Full-screen map (later on 4 Oct):** the town now fills the whole window at an exact 3x pixel scale. The top bar (rescued, community, time, rally, help, pause) floats over the map, see-through and click-through except its buttons, and call markers are pushed out from under it. The crew strip at the bottom is also see-through. The call list, the crew/call side panel and the crew-updates ticker are gone; the selected call's map card shows what it still needs, who to ask in co-op, and the Q/E hints. North Pier's call spot moved slightly inland so it never sits under the crew strip.
-- **Attention and readability (4 Oct, later):** every call has a countdown ring (green, yellow, red) with the seconds in big outlined numbers. New calls flash gold with a NEW tag; calls still missing crews pulse; calls under 20 s that still need crews throb with big red rings. Map text uses a heavier outlined font; the call card says IN TIME +12s / TOO LATE -5s. Vehicle rings are quieter so they don't look like calls.
-- **Temporary send shortcut:** hover a call (or select one) and press 1 / 2 / 3 / 4 to send the nearest free fire / medic / engineer / police crew there. The call card shows which keys it still needs ("PRESS 1 FIRE 2 MED").
-- "Rally" is now **Coffee Boost** (SPACE).
-- **Font:** back to the normal font (the artificially bolded version rendered with holes); map text keeps its larger size and dark outline.
-- **Countdowns are real seconds now.** Before, a call's timer slowed to about a quarter speed once crews arrived and sped up as danger rose. Now it always ticks one second per second; each deadline includes the crews' work time instead (balance re-checked with the bot).
-- **Sound:** drop-in sound folder `assets/audio/custom/` (see SOUND_LIST.txt there). New sound slots: new_call, tick (every second while a call is about to fail without its crews), select, boost, win, lose. With custom music the game crossfades calm -> tense -> panic as the town's pressure rises.
+- **Withdraw from the call.** Click a call: its card lists every crew sent there (department, crew name, EN ROUTE / ON SCENE). Your own crews have a **WITHDRAW** button; teammates' crews are marked TEAMMATE. The crew card + **V** still works.
+- **All levels open** in the solo menu (no unlock order).
+- **Consent once per session.** Recording and voice are asked at the first level only; one continuous capture per level, even when a guest's clock is corrected by the host (`clock_correction` rows, logged clock never goes back).
+- **Microphone check** after enabling voice at level entry, plus an input meter in Settings → Sounds.
+- **Study PC check:** Settings → Research → **CHECK THIS STUDY PC**. Five-second test of window size, scaling, frame rate, microphone and recording, with OK / CHECK / FIX lines; saved to `research/pc_checks/`. During play a `display` row (fps, window, scaling) is logged every 10 s.
+- **NASA-TLX (raw):** opens after the last level (Level 6, won or lost) and from **SURVEY · NASA-TLX** on the title screen. Saved to `research/<session>/questionnaires/` (since 07.11: `<name>_nasa-tlx.json` in the session folder).
+- ~~Automatic upload to the study server~~ (removed 02.11: only the session leader's computer stores files).
+- **Fullscreen in the editor:** Godot 4.4+ runs the game inside the editor's Game tab, where fullscreen cannot work and the game looks small. Untick **Embed Game on Next Play** in the Game tab's ⋮ menu (or Editor Settings → Run → Window Placement → Game Embed Mode = Disabled). Exported builds are not affected.
 
-### Playing on two or more computers
+## Menu and camera update (0.9.1)
 
-The host clicks PLAY WITH FRIENDS > HOST A ROOM. The lobby shows the addresses to share.
+The level menu now shows illustrated cards in play order, **00–06**, with Level 0 first, clear completion/lock badges and a separate saved-shift panel. The Training Harbor title and subtitle no longer cover the practice map.
 
-- **Same Wi-Fi / LAN (easiest):** others type the "Same network" address (e.g. 192.168.1.23) and press JOIN.
-  - The first time, Windows asks whether Godot / Beacon Bay may use the network: tick **Private networks** and allow. If you clicked away, allow `Godot` (or the exported game) in Windows Defender Firewall, or allow UDP port 24680.
-  - Your Wi-Fi must be set to a *Private* network in Windows. Campus or guest Wi-Fi often blocks devices from seeing each other; use a phone hotspot or Tailscale instead.
-- **Over the internet:** the host's game asks the router to open UDP port 24680 (UPnP). If it works, the lobby shows "friends can join <public IP>". Many routers and mobile networks don't allow this.
-- **Reliable fallback (no router settings):** install Tailscale (free) on every computer, sign in to the same account/tailnet, and join using the host's 100.x.x.x address, which also appears in the lobby. ZeroTier or Radmin VPN work the same way.
-- A join gives up after ~9 seconds with a hint instead of hanging.
-- Smooth guests (laptop lag fix): the host now sends a lean network copy of the game state (no save-file encoding, no shift plan, no event log, settled calls dropped after 8 s): about 5x smaller and about 4x faster for the guest to apply. Between updates the guest runs the same simulation itself, so crews glide and countdowns tick every frame; each host update corrects it (measured error under 2 px, timers within 0.02 s). A guest's own dispatch moves the crew immediately instead of waiting for the host. Crew markers on the road now move every frame (also on the host), and the town backdrop is no longer repainted on every update.
-- Press **F3** in game to show FPS, ping to the host and how often host updates arrive. Low FPS = the computer is slow at drawing; high ping or long update gaps = the network.
-- The IP box in the lobby was hidden behind the menu panel after the full-screen change; it is visible again.
+Your camera stays where you leave it when selecting a call, crew or station, scouting, dispatching or cycling through calls. (Since 04.11 the whole town is the only view.)
 
-To test multiplayer on one computer: in the Godot editor choose Debug > Customize Run Instances, enable multiple instances (2-4), press F5, host in one window and join 127.0.0.1 in the others.
+## Level 0 and getting started (0.9.0)
 
-A backup of the code before this change is in `_backup_before_departments/` (ignored by Godot).
+New solo players start in **Level 0: Training Harbor**, a new compact island map with two bridges and a fixed **2:30** practice session. It is also available at the top of the level list and as **00** in co-op. It introduces calls, each department's road task, a blackout, a bridge flood, sand and rain. Travel penalties are gentle, calls need one crew and three seconds of work, and helpers finish unattended calls. There is no failure, urgent countdown, lost confidence or campaign unlock reward.
 
-## Data and multiplayer
+On the first level entry each launch, choose **Play without collection** or **Enable collection**. Both allow the full game. A compact role briefing then shows four instructions for each department you command; use its tabs when you have multiple roles. Solo pauses and a new co-op level waits until every connected player is ready. Collection settings can be changed independently in Settings > Research. Enabling collection does not enable the microphone.
 
-Progress saves locally. Research logging is optional, off on each launch, and stays on the player's computer. No microphone recording or automatic data upload is implemented. LAN play supports up to four players; separate-machine LAN compatibility has not been verified.
+The six existing campaign levels keep their saved indices and difficulty. **Start Level 1** follows practice. Build 0.9.0 uses network protocol **13**, so co-op clients and servers need the same updated build.
 
-## Export
+## Play
+- Pick a crew, then click a call. Or hover a call and press **1–4** for the nearest available crew in that department.
+- **Withdraw a crew from a scene:** click the call and press **WITHDRAW** next to the crew on its card, or click its crew card in the bottom bar, then **WITHDRAW** (or **V**). It leaves the incident and returns to standby; you can send it to another call while it returns, once the normal dispatch cooldown has passed. This also cancels a crew en route or clearing a road. Other crews keep working, and the incident still needs a replacement for the withdrawn department.
+- **Change roles between levels:** in the co-op lobby or results screen, click **SWAP** beside a teammate to exchange your department assignments. With two or three players, this swaps the entire department bundle. Roles stay fixed during a level; the host/session leader remains the same player. Joining or leaving redistributes departments to keep every role covered. Solo players already command every department.
+- **Q:** scout. The shared field team needs 8 s between scouts: the **SCOUT** counter in the top bar and the SCOUT button on a ? call show the seconds left (playtest 19.10). **E:** supply a crew on scene. **Space:** speed boost (every crew drives and works faster for 20 s, and every open call gets up to 8 s more; recharges in 95 s). **C:** rescue close-up. **R:** ping.
+- **One view:** the whole town is always on screen (04.11: no zoom, no panning, no minimap).
+- The map fills the whole screen; the top bar and crew cards float over it, see-through. Markers are kept out from under them.
+- Crews and stations are picked the moment you press on them, so a press that turns into a drag still selects the crew. Moving vehicles never steal a click meant for a call or station under them. Station buttons are 20% bigger. A crew's route preview is drawn in its department's colour.
+- With a crew selected, clicking a **?** call does **not** send the crew: it opens the call's card with a **SCOUT** button, and the crew stays selected. 1–4 over a ? call also asks you to scout first.
+- The clicked call's card has a **CLOSE** button. The whole-town view shows the countryside around the town instead of empty side bars. The pause menu is compact. The results screen shows the rescue goal and says exactly why a level gave no (or fewer) stars. It also has a **SETTINGS** button (playtest 19.10), the same size as the other buttons, so sound, voice chat and recordings can be changed between levels; BACK returns to the results screen (in co-op too). In co-op the results and the CHANGE ROLES player list are centred together as one group.
+- **Settings** has four tabs: **Sounds** (music, sound effects, voice chat, volume sliders per teammate), **Devices** (which microphone, which headset/speakers and which monitor; see below), **Video** (fullscreen, reduced motion, FPS and ping) and **Research** (record my mouse, allow team recording, save team voice, open recordings).
+- **Settings → Devices** (22.11): three dropdown lists to pick the **Microphone**, the **Sound output** (headset or speakers; **PLAY TEST SOUND** checks it, even with sound effects off) and the **Monitor** the game shows on (a fullscreen game moves and stays fullscreen). Devices are listed by readable name: on Linux the game asks `pactl` for the names (instead of ids such as `alsa_output.pci-…`) and reads monitor model names with `xrandr --verbose`; "Default" shows which device the computer currently uses when it can tell. The lists are re-read each time the tab opens. Choices are saved in `user://beacon_bay_device_settings.cfg` and used again next launch; a device that is no longer plugged in falls back to the default. The microphone check at level entry has a **CHOOSE MICROPHONE** button that opens this tab.
+- **Right-click / Esc:** clear selection.
+- Enable **Voice chat** in Settings → Sounds for an open microphone; turn it off there to mute. No key needs to be held. Use headphones.
+- **Esc:** menu. Solo pauses; a shared shift continues while personal menus are open.
 
-Install the matching Godot export templates, open Project > Export, and use Windows Desktop. Create the local `build` folder if needed. Compiled builds and generated caches are excluded from Git.
+Departments split automatically between connected players. The campaign has six 5:30 shifts. The world is **2752 by 1536** (16:9, so the whole-town view fills the screen), with **69 playable locations**. In Oct 2026 (playtest 15.10) one road column with five call sites was added on each side (west: Westwind Farm, Pinecrest Cabins, Old Mill, Heron Marsh Homes, West Beach Huts; east: Summit Lodge, Quarry Works, Seal Point Homes, Cape Clinic, East Beach Cafe); the old town and its stations moved 224 px east unchanged. To keep the balance, crews drive ~8% faster (130 world px/s), every call gets 2 s more decision time, and the finale's rescue goal is 100. Old saves are converted (map version 5); the network protocol is now 12 (role swaps and withdrawal in 11; four crews everywhere and routes in dispatch events in 12), so everyone in a co-op game needs this version. A click selects or dispatches on release; dragging across a crew or call never dispatches it. Travel is calibrated to keep the more distant districts practical to reach. Original crew rules, joint calls and campaign remain; the upgrade workshop was removed (Oct 2026).
 
-See `ASSET_CREDITS.md` for asset provenance.
+## Road events (traffic rework, `andrei-traffic-events`)
+
+The old slow zones (school crossing, harbor deliveries, market queues, bridge works, flooded road) are gone. In playtests they only cost travel time and never changed a decision. They are replaced by **road events**: closures that one department must clear for everyone else.
+
+- **Traffic jam** (crash, crowd, stalled bus…): **only Police** drive through it and can clear it (7 s on site).
+- **Debris** (fallen tree, burst water main, flooding…): **only Engineering** drive through it and can clear it (9 s on site).
+- **Road fire** (burning car, grass fire by the road): **only Fire** drive through it and put it out (8 s). The burning car and smoke are drawn on the road.
+- **Accident** (pile-up): **only Medical** drive through it and clear it by treating and taking away the injured (9 s). Wrecked cars, a warning triangle and the injured are drawn on the road.
+- Fire and Medical events were added after the 4-player playtest of 15.10 (Police and Engineering had more special jobs). Every level now has about one closure per department (Lights Out: two each for Fire and Medical, one for Police, plus three blackouts for Engineering; the North End blackout was dropped). The call that comes with a closure is always led by a different department than the one that clears it.
+- Every other department crawls through a closed street (6% speed) or takes a detour. Each closure is two blocks long, so it also closes the crossing in the middle. Buildings are reached from the road in front of them, so a closure cuts off up to four buildings.
+- Each shift's four closures are in four different parts of town (north, centre, east, south).
+- Each road event comes with a **call on the closed street** (e.g. injured drivers at Community Hall behind a crash). The team either asks Police/Engineering to open the road first, or crawls in and risks the deadline. That call follows the normal active-call limit.
+- **To clear:** pick a crew of the department on the badge (POL jam, ENG debris, FIRE road fire, MED accident), then click the striped road, its badge or its label (the badge and label are always clickable, even when a call marker sits on the road). Or hover the road and press that department's number (**1** Fire, **2** Medical, **3** Engineering, **4** Police). A crew clearing a road is off calls until it's done; the speed boost speeds clearing too.
+- A road nobody clears reopens by itself after 95 s.
+- **Fixed script:** four road events per shift, at the same times and places for every group. They start a few seconds into high-chaos phases (sometimes in a normal phase), never in a low phase. Deadlines are calculated as if roads were open, so a closure is a real problem rather than something the countdown silently absorbs.
+- Closures show as striped bars in the colour of the department that can clear them, plus red bars on the minimap.
+- **Research log:** `road_event_started`, `road_event_clear_dispatched`, `road_event_cleared`, `road_event_expired` (with times, who cleared it, and the chaos phase at the start), plus `road_call_capacity_skipped`.
+- **Co-op:** only the player who commands that department can clear; the host checks the crew really belongs to that department.
+- Tests: `godot --headless --path . --script tests/test_road_events.gd`. A bot with human-like delays misses 6 calls in shift 1 when it ignores road events and 3 when it clears them; in shift 5 it loses when it ignores them and wins (112/104) when it clears them.
+
+## Map spread, extra crews, early finish (`andrei-traffic-events`)
+
+- **Stations spread over the town:** each department has a main station and a second station in another district. Fire: north-west centre + south-east. Medical: north centre-east + south-west. Engineering: east + west. Police: south centre + north-east.
+- **Every department has the same number of crews** (playtest 15.10: every player must carry the same load for the data): **4 each in every level** (playtest 19.10; before, levels 1–3 had 3). The last three levels have more calls at once (up to 7, 8 in the finale), calls come more often (every 11.8 / 11.4 / 10.8 s on average) and the rescue goals are 104 / 108 / 116. **Level 1 has no road events** (it's for learning the basics). Tested with simulated four-player teams: decent teams win every level with 1–2 stars on levels 4–6; a slow team wins levels 1–4 and usually loses 5–6. With the fourth crew, levels 1–3 got slightly easier for a slow team (level 3: 99/78 rescued instead of 81/78).
+- **Multiplayer route fix (playtest 19.10):** when a teammate sends a crew, every screen now draws that crew's new route from the crew to the call. Before, guests drew it from the crew's previous trip, which looked like a triangle back to the station. The dispatch event now carries the route (it is not written to research logs).
+- **Calls spread over the whole town:** 11 new sites in the south and east (59 in total), and calls pick one of nine districts evenly before picking a site. Over all six shifts with a bot: 40 calls in the north third, 70 in the middle, 52 in the south.
+- ~~**Shifts end early**~~ once the last scheduled call has arrived and nothing is open (removed after playtest 07.11: every level now runs its full time).
+- Disruption texts no longer promise slower travel (only road events slow traffic now).
+
+## Levels 3-6: a map and a hazard each (Oct 2026)
+
+Levels 1-2 keep the normal town. Every later level has its own map and one signature hazard. All of it is scripted (same time, same place, every session), so research data stays comparable.
+
+| Level | Map | Hazard |
+|---|---|---|
+| 3 **Two Banks** (rain) | A river splits the town; only West, Town and East Bridge cross it. Every department has a station on each bank. | **Bridge floods**: East Bridge 0:50 for 45 s, Town Bridge 2:26 for 60 s, West Bridge 4:05 for 45 s. Nobody can clear a flood; crews reroute over another bridge. |
+| 4 **Lights Out** (night) | Moon Lake fills the middle of town; no roads cross it. | **Blackouts** in Lantern Hill (0:42), East Docks (1:46) and Saltmarsh (2:56). In the dark everyone except Engineering drives at 40% and new calls come in unconfirmed. An engineer at the district's substation (yellow ENG badge, 8 s) turns the lights back on; otherwise it lasts 70 s. |
+| 5 **Dune Springs** (desert) | Sand town with the Palm Oasis and five streets buried under dunes. | **Sandstorms** sweep across the town in three steps (west → centre → east at 0:46, back east → west at 2:58). Inside the storm everyone drives at 65% and new calls are unconfirmed. Nobody can clear a storm. |
+| 6 **Beacon Night** (finale) | The river again. | Everything once: a blackout (Orchard Heights 0:38), two bridge floods (Town 1:44, East 3:28) and a squall sweeping west → east from 2:20. |
+
+- **Forecast:** every flood, blackout and storm step is announced 12 s ahead: a strip under the top bar ("BLACKOUT IN NORTH END IN 7s", then what is active and how long it lasts), a dashed outline with a countdown on the map, a blinking outline on the minimap, a banner and a horn sound. When it hits, a big banner and its own sound (wind, power-down); "LIGHTS BACK ON!" when an engineer restores power. Playtest 14.10: the bridge floods were easy to miss when playing alone.
+- **Visuals** are drawn in code like the rest of the town (no image assets): the night town and lake, the dark districts with a few torches, the desert palette with cacti, palms, dunes and the oasis, moving sand / rain over storm districts, and the wall of sand creeping in before it arrives.
+- **Sounds** for the hazards (`hazard`, `power_down`, `power_up`, `wind`) are synthesised by `assets/audio/generate_level_cues.py`; drop your own file with the same name into `assets/audio/custom/` to replace one.
+- **Rules:** call deadlines assume roads that can be cleared are open (road events, blackouts) and that bridges are open, but include storms (nobody can clear them). Lights Out has no debris closures, because blackouts already keep Engineering busy. Levels 5-6 have a slightly slower call rate (they have more going on) and rescue targets 92 / 108.
+- **Under the hood:** `campaign.gd` `layout()` holds each map (water, bridges, buried streets, floods), `level_hazards()` the blackouts and storms. Blackouts and storms reuse the road-event machinery (saved games, co-op guests, the `clear_road` action and research logging all work unchanged). Routes on these levels are found over the real road network. Research log adds `hazard_forecast` plus the existing `road_event_*` records (type `blackout` / `sandstorm` / `squall`) and `bridge_flood_started` / `bridge_flood_ended`.
+- Tests: `tests/test_levels.gd` (maps connected, every hazard announced, blackouts restorable, storms, guests in sync, a four-player bot wins levels 3-6) and `tests/test_two_banks.gd`.
+
+## Juicier feedback (Oct 2026)
+
+All cosmetic (in `scripts/juice_fx.gd`); the simulation is untouched, and "Reduced motion" tones it down.
+- **Rescue:** confetti burst, a bouncy "+N SAFE" pop-up, little icons flying into the RESCUED counter, which counts up and jumps.
+- **Close calls:** "CLUTCH SAVE! 2s LEFT" banner when a call is saved with 5 s or less left.
+- **Chains:** "x3 CHAIN!" banners with a rising chime for back-to-back rescues.
+- **Sending a crew:** the crew card flashes, the route draws itself on the map, and vehicles on the way have a flashing siren and a dust trail.
+- **Road cleared / bridge reopened:** barrier tape snaps apart, a ring and a "ROAD OPEN" pop-up.
+- **New call:** the marker drops in with a bounce and sends out a shockwave ring.
+- **Missed call:** short screen shake, red edge flash and a "MISSED" pop-up.
+- **End of level:** stars pop in one by one with a rising chime; the numbers count up.
+
+## Workshop removed, co-op level picker (Oct 2026)
+
+- **No more upgrades.** The Equipment Workshop is gone from the shift list and the results screen, and crews are never upgraded (old saved upgrades are ignored). Every session plays with the same crews. The results screen shows calls resolved and roads cleared instead of credits, and "Choose another level" replaces "Visit the workshop".
+- **Co-op level picker.** In the co-op lobby the host (or, on the Azure server, the first player) picks any of the six levels; all are open in co-op. On the results screen, "Choose another level" takes a LAN host back to the lobby; on the Azure server the first player gets a row of level buttons next to Next shift / Play again.
+
+## Every role equally busy (`andrei-traffic-events`)
+
+Before, each level leaned on some departments (shift 1 was mostly Medical and Police; later shifts mostly Engineering), so some players had little to do. Now:
+- **Who leads a call** comes from a fixed per-level order in which Fire, Medical, Engineering and Police each lead once in every block of four calls (`campaign.gd`, `lead_order()`), identical every session.
+- **Partners** (the other departments a call needs) rotate with every call, so each department is a partner equally often too.
+- The calls that come with road events are led by Fire or Medical, because Police and Engineering already have the road to clear.
+- A level's theme now only decides whether an Engineering call is a flood or a power problem (rain and storms: more floods; blackout: more power). Market and festival texts no longer promise extra police calls.
+- Result with a bot over all six levels: each department gets 21-29% of the work, counting road clearing (before: 17-35%).
+
+## Softer music
+
+## Local recordings
+
+Use **Settings → Research** (voice chat itself is under Settings → Sounds). All capture switches start off each launch.
+
+| Setting | Effect |
+| --- | --- |
+| Voice chat | Keeps the microphone open until disabled, including in menus. Starts off each launch. |
+| Save my voice | Your own microphone during levels, saved in the session folder (`<name>_voice/<name>_voice.wav`). Teammates' voices are not saved on your computer. |
+| Record gameplay & mouse | Records the game events and your own movements, mouse buttons and wheel input on this computer. |
+
+**Open my study files** opens `research/` in the game data folder (Windows: `%APPDATA%\Godot\app_userdata\Beacon Bay\research`). Each session is one folder named `<date>_<time>_<name>` with everything about this player in it (see the 07.11 section above and the READ ME file inside); players send that folder to the researcher. Nothing is stored on the Azure server: it relays voice but does not record. Only speech sent using in-game voice is captured; Discord/Teams calls and system audio are not included. Older builds wrote `research/<session>/levels/` and `research/voice/`.
+
+Level 0 can be recorded with consent; the separate legacy guided tutorial is excluded. Every level attempt has a unique ID and a separate mouse/event JSONL file, plus one authoritative session timeline. Events include scheduled/actual starts, ends, responsible crew, and resolved, expired, handed-off or unfinished outcomes. Abandoned or partially observed events are marked explicitly. Consent gaps and late joins are recorded without inventing missing outcomes. See [recording format and playback](docs/RECORDING_FORMAT.md).
+
+Voice tracks share frame zero and a common sample clock, so overlapping speech stays separate while the conversation stays synchronized. Open **listen.html** in the voice session folder for one Play/Pause/Seek control, speaker labels, mute/solo and level jumps. **session.json** maps player IDs/names and departments to WAVs. Saving off and between-level pauses insert silence; voice capture during a level also continues in personal menus. Disconnect and normal exit finalize the session. WAV headers checkpoint every second and interrupted files recover on the next launch. Disk failures stop saving without stopping play.
+
+## Repeatable emergency waves
+
+A fixed, versioned normal/high/low sequence and seeded arrival opportunities repeat at the same **active gameplay times** for every group. Phase boundaries never depend on team performance. Solo pause stops the active clock; shared menus do not. All play uses normal speed.
+
+Wave names, transition times and skipped arrivals appear only in local logs when logging is enabled. There are no wave banners, countdowns or phase sound cues. If a group has filled the active-call limit, an arrival opportunity is skipped and logged; later phases retain their original times. Team actions can still change which calls remain unresolved and their outcomes.
+
+The game contains no classifier, workload model, adaptive assistance or required questionnaire.
+
+## Build and verification
+
+This build uses network protocol **15** (09.11: study data stored on each player's computer, no relay; 4 ENet channels. 14: player keys, reserved departments). All co-op clients and the server must use the same build; redeploy the Azure server.
+
+Run `powershell -ExecutionPolicy Bypass -File tools/package.ps1` on Windows; pass `-GodotConsole` and `-GodotGui` for other engine paths. It builds the Windows portable package, Linux-server resource pack and clean source ZIP under `artifacts/`. The portable build includes the official Godot runtime because export templates were unavailable locally; its license texts are in `licenses/`.
+
+Tests:
+
+```
+godot --headless --path . --script tests/test_simulation.gd
+godot --headless --path . --script tests/test_practice_level.gd
+godot --headless --path . --script tests/test_level_entry.gd
+godot --headless --path . --script tests/test_research_lifecycle.gd
+godot --headless --path . --script tests/test_capture_event_order.gd
+godot --headless --path . --script tests/test_withdrawal.gd
+godot --headless --path . --script tests/test_remote_route.gd
+godot --headless --path . --script tests/test_playtest_19_10.gd
+godot --headless --path . --script tests/test_crew_controls.gd
+godot --headless --path . --script tests/test_call_card_close.gd
+godot --headless --path . --script tests/test_capture_continuity.gd
+godot --headless --path . --script tests/test_mic_check.gd
+godot --headless --path . --script tests/test_nasa_tlx.gd
+godot --headless --path . --script tests/test_sample_stream.gd
+godot --headless --path . --script tests/test_pc_check.gd
+godot --headless --path . --script tests/test_reconnect_roles.gd
+godot --headless --path . --script tests/test_local_storage.gd
+godot --headless --path . --script tests/test_level_full_time.gd
+godot --headless --path . --script tests/test_leave_survey.gd
+godot --headless --path . --script tests/test_study_consent.gd
+godot --headless --path . --script tests/test_role_assignment.gd
+godot --headless --path . --script tests/test_road_events.gd
+godot --headless --path . --script tests/test_levels.gd
+godot --headless --path . --script tests/test_two_banks.gd
+godot --headless --path . --script tests/test_player_capture.gd
+godot --headless --path . --script tests/test_map_navigation.gd
+godot --path . --script tests/test_map_viewport_input.gd
+godot --path . --script tests/test_cursor.gd
+godot --headless --path . --script tests/test_music_audio.gd
+godot --headless --path . --script tests/test_session_lifecycle.gd
+godot --headless --path . --script tests/test_snapshot_transport.gd
+python tests/run_voice_tests.py --godot /path/to/godot
+python tests/run_main_network_tests.py --godot /path/to/godot
+python tests/run_coop_storage_tests.py --godot /path/to/godot
+python tests/run_main_network_tests.py --briefings --godot /path/to/godot
+```
+
+Simulation tests cover all six shifts, tutorial progression, map routes, hidden phases under divergent player decisions, arrival caps and save/network continuity. Voice tests use synthetic PCM and real loopback ENet sessions with four clients. Physical microphones, separate computers and the live Azure subscription still require a real-team smoke test.
+
+See [Azure server setup](azure-connect.md), [validation notes](docs/GAME_POLISH_VALIDATION.md), [navigation evidence](docs/MAP_NAVIGATION_VALIDATION.md), and [asset credits](ASSET_CREDITS.md).
